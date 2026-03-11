@@ -58,25 +58,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // ── Global Hotkey ───────────────────────────────────────────────────────
 
     func registerHotkey() {
-        // F5 = keycode 96
+        // Push-to-talk: hold F5 to record, release to stop + transcribe
+        // Register both key-down and key-up events
         var hotKeyID = EventHotKeyID()
         hotKeyID.signature = OSType(0x5243_4F52) // "RCOR"
         hotKeyID.id = 1
 
-        var eventType = EventTypeSpec()
-        eventType.eventClass = OSType(kEventClassKeyboard)
-        eventType.eventKind = UInt32(kEventHotKeyPressed)
+        var eventTypes = [EventTypeSpec(), EventTypeSpec()]
+        eventTypes[0].eventClass = OSType(kEventClassKeyboard)
+        eventTypes[0].eventKind = UInt32(kEventHotKeyPressed)    // key down
+        eventTypes[1].eventClass = OSType(kEventClassKeyboard)
+        eventTypes[1].eventKind = UInt32(kEventHotKeyReleased)   // key up
 
-        // Install handler
         let handler: EventHandlerUPP = { (_, event, _) -> OSStatus in
             let appDelegate = NSApplication.shared.delegate as! AppDelegate
+            var eventKind: UInt32 = 0
+            GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                            EventParamType(typeUInt32), nil,
+                            MemoryLayout<UInt32>.size, nil, &eventKind)
+
+            // Get the actual event kind from the event ref
+            let kind = GetEventKind(event!)
+
             DispatchQueue.main.async {
-                appDelegate.toggleRecording()
+                if kind == UInt32(kEventHotKeyPressed) {
+                    // F5 pressed — start recording
+                    if !appDelegate.isRecording {
+                        appDelegate.startRecording()
+                    }
+                } else if kind == UInt32(kEventHotKeyReleased) {
+                    // F5 released — stop and transcribe
+                    if appDelegate.isRecording {
+                        appDelegate.stopAndTranscribe()
+                    }
+                }
             }
             return noErr
         }
 
-        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, nil, nil)
+        InstallEventHandler(GetApplicationEventTarget(), handler, 2, &eventTypes, nil, nil)
 
         let status = RegisterEventHotKey(
             UInt32(kVK_F5),    // F5
@@ -88,7 +108,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         if status != noErr {
-            // Try Cmd+Shift+R as fallback
+            // Fallback: Cmd+Shift+R (toggle mode since we can't detect release for combos)
             let status2 = RegisterEventHotKey(
                 UInt32(kVK_ANSI_R),
                 UInt32(cmdKey | shiftKey),
@@ -98,19 +118,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 &hotkeyRef
             )
             if status2 == noErr {
-                showNotification(title: "Recordings", body: "Hotkey: ⌘⇧R (F5 unavailable)")
+                showNotification(title: "Recordings", body: "Hotkey: ⌘⇧R (toggle mode)")
             }
         }
     }
 
-    // ── Recording Toggle ────────────────────────────────────────────────────
+    // ── Recording ────────────────────────────────────────────────────────────
 
     @objc func toggleRecording() {
-        if isRecording {
-            stopAndTranscribe()
-        } else {
-            startRecording()
-        }
+        if isRecording { stopAndTranscribe() } else { startRecording() }
     }
 
     func startRecording() {
@@ -120,8 +136,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let filepath = "\(audioDir)/\(filename)"
         currentAudioPath = filepath
 
-        // Use /bin/bash to run ffmpeg — avoids Process path/permission issues
+        // Run ffmpeg via bash — pipe stdin so we can send 'q' to stop gracefully
         let process = Process()
+        let stdinPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = ["-c", """
             export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -133,12 +150,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 exit 1
             fi
         """]
+        process.standardInput = stdinPipe
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
             recordProcess = process
+            stdinPipeRef = stdinPipe
             isRecording = true
             updateIcon()
             showNotification(title: "Recording...", body: "Press F5 to stop")
@@ -147,17 +166,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    var stdinPipeRef: Pipe?
+
     func stopAndTranscribe() {
         guard let process = recordProcess else { return }
 
-        // Stop recording — SIGTERM for ffmpeg (SIGINT doesn't always work)
-        process.terminate()
-        // Give it a moment to flush the file
-        Thread.sleep(forTimeInterval: 0.5)
+        // Send 'q' to ffmpeg stdin for graceful stop (flushes WAV header)
+        if let pipe = stdinPipeRef {
+            pipe.fileHandleForWriting.write("q".data(using: .utf8)!)
+            try? pipe.fileHandleForWriting.close()
+        }
+        // Wait for graceful exit, then force if needed
+        Thread.sleep(forTimeInterval: 1.0)
+        if process.isRunning {
+            process.terminate()
+            Thread.sleep(forTimeInterval: 0.3)
+        }
         if process.isRunning {
             process.interrupt()
         }
         recordProcess = nil
+        stdinPipeRef = nil
         isRecording = false
         updateIcon()
 
