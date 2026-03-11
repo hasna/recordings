@@ -178,7 +178,7 @@ describe("transcribeAudio", () => {
     await transcribeAudio(tempAudioFile, frConfig);
     expect(capturedOpts.language).toBe("fr");
     expect(capturedOpts.model).toBe(config.transcription_model);
-    expect(capturedOpts.response_format).toBe("verbose_json");
+    expect(capturedOpts.response_format).toBe("json");
 
     resetClient();
   });
