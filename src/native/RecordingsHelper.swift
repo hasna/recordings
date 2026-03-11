@@ -12,6 +12,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var recordProcess: Process?
     var currentAudioPath: String?
     var hotkeyRef: EventHotKeyRef?
+    var spaceDownTime: Date?
+    var longPressTimer: Timer?
+    let longPressDuration: TimeInterval = 1.0  // Hold space for 1 second to activate
 
     let recordingsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -38,7 +41,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Menu
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Toggle Recording (F5)", action: #selector(toggleRecording), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Hold Space (1s) to Record", action: #selector(toggleRecording), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -46,7 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Register global hotkey: F5
         registerHotkey()
 
-        showNotification(title: "Recordings", body: "Ready — press F5 to record")
+        showNotification(title: "Recordings", body: "Ready — hold Space for 1s to record")
     }
 
     func updateIcon() {
@@ -58,69 +61,87 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // ── Global Hotkey ───────────────────────────────────────────────────────
 
     func registerHotkey() {
-        // Push-to-talk: hold F5 to record, release to stop + transcribe
-        // Register both key-down and key-up events
-        var hotKeyID = EventHotKeyID()
-        hotKeyID.signature = OSType(0x5243_4F52) // "RCOR"
-        hotKeyID.id = 1
+        // Hold Space for 1+ second to start recording, release to stop.
+        // Uses CGEventTap to monitor all keyboard events globally.
+        // Normal space presses (< 1 second) pass through untouched.
 
-        var eventTypes = [EventTypeSpec(), EventTypeSpec()]
-        eventTypes[0].eventClass = OSType(kEventClassKeyboard)
-        eventTypes[0].eventKind = UInt32(kEventHotKeyPressed)    // key down
-        eventTypes[1].eventClass = OSType(kEventClassKeyboard)
-        eventTypes[1].eventKind = UInt32(kEventHotKeyReleased)   // key up
+        let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
 
-        let handler: EventHandlerUPP = { (_, event, _) -> OSStatus in
-            let appDelegate = NSApplication.shared.delegate as! AppDelegate
-            var eventKind: UInt32 = 0
-            GetEventParameter(event, EventParamName(kEventParamDirectObject),
-                            EventParamType(typeUInt32), nil,
-                            MemoryLayout<UInt32>.size, nil, &eventKind)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let appDelegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
-            // Get the actual event kind from the event ref
-            let kind = GetEventKind(event!)
-
-            DispatchQueue.main.async {
-                if kind == UInt32(kEventHotKeyPressed) {
-                    // F5 pressed — start recording
-                    if !appDelegate.isRecording {
-                        appDelegate.startRecording()
-                    }
-                } else if kind == UInt32(kEventHotKeyReleased) {
-                    // F5 released — stop and transcribe
-                    if appDelegate.isRecording {
-                        appDelegate.stopAndTranscribe()
-                    }
+                // Space bar = keycode 49
+                guard keyCode == 49 else {
+                    return Unmanaged.passRetained(event)
                 }
-            }
-            return noErr
+
+                if type == .keyDown {
+                    // Ignore key repeat events (auto-repeat while held)
+                    let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat)
+                    if isRepeat != 0 {
+                        // Already tracking this press — suppress the repeat
+                        if appDelegate.spaceDownTime != nil {
+                            return nil  // Swallow repeat while we're tracking
+                        }
+                        return Unmanaged.passRetained(event)
+                    }
+
+                    if appDelegate.spaceDownTime == nil {
+                        appDelegate.spaceDownTime = Date()
+                        // Start a timer — if space is still held after 1s, begin recording
+                        DispatchQueue.main.async {
+                            appDelegate.longPressTimer?.invalidate()
+                            appDelegate.longPressTimer = Timer.scheduledTimer(withTimeInterval: appDelegate.longPressDuration, repeats: false) { _ in
+                                if appDelegate.spaceDownTime != nil && !appDelegate.isRecording {
+                                    appDelegate.startRecording()
+                                }
+                            }
+                        }
+                    }
+                    // Let the keyDown through for now (normal typing)
+                    return Unmanaged.passRetained(event)
+
+                } else if type == .keyUp {
+                    let wasLongPress = appDelegate.isRecording
+
+                    if appDelegate.isRecording {
+                        // Space released after recording — stop and transcribe
+                        DispatchQueue.main.async {
+                            appDelegate.stopAndTranscribe()
+                        }
+                    }
+
+                    // Cancel timer
+                    DispatchQueue.main.async {
+                        appDelegate.longPressTimer?.invalidate()
+                        appDelegate.longPressTimer = nil
+                    }
+                    appDelegate.spaceDownTime = nil
+
+                    if wasLongPress {
+                        // Swallow the keyUp so it doesn't type a space
+                        return nil
+                    }
+                    return Unmanaged.passRetained(event)
+                }
+
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            showNotification(title: "Error", body: "Could not create event tap. Grant Accessibility permission in System Settings > Privacy > Accessibility")
+            return
         }
 
-        InstallEventHandler(GetApplicationEventTarget(), handler, 2, &eventTypes, nil, nil)
-
-        let status = RegisterEventHotKey(
-            UInt32(kVK_F5),    // F5
-            0,                  // no modifiers
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotkeyRef
-        )
-
-        if status != noErr {
-            // Fallback: Cmd+Shift+R (toggle mode since we can't detect release for combos)
-            let status2 = RegisterEventHotKey(
-                UInt32(kVK_ANSI_R),
-                UInt32(cmdKey | shiftKey),
-                hotKeyID,
-                GetApplicationEventTarget(),
-                0,
-                &hotkeyRef
-            )
-            if status2 == noErr {
-                showNotification(title: "Recordings", body: "Hotkey: ⌘⇧R (toggle mode)")
-            }
-        }
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     // ── Recording ────────────────────────────────────────────────────────────
