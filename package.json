@@ -1,0 +1,46 @@
+{
+  "name": "@hasna/recordings",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "recordings": "dist/cli/index.js",
+    "recordings-mcp": "dist/mcp/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun run build:cli && bun run build:mcp && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
+    "build:cli": "bun build src/cli/index.ts --target=bun --outfile=dist/cli/index.js --external=commander --external=chalk --external=openai",
+    "build:mcp": "bun build src/mcp/index.ts --target=bun --outfile=dist/mcp/index.js --external=@modelcontextprotocol/sdk --external=openai",
+    "build:lib": "bun build src/index.ts --target=bun --outfile=dist/index.js --external=openai",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "dev:cli": "bun run src/cli/index.ts",
+    "dev:mcp": "bun run src/mcp/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "openai": "^5.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.5",
+    "typescript": "^5.8.2"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "license": "MIT",
+  "author": "Hasna <andrei@hasna.com>"
+}

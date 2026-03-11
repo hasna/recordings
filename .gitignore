@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.recordings/
+*.db
+*.db-wal
+*.db-shm
+.secrets/
+.env
+*.wav
+*.mp3
+*.m4a
+*.webm
