@@ -34,7 +34,7 @@ program
   .description(
     "Speech-to-text recording tool — record, transcribe, and enhance with AI"
   )
-  .version("0.0.1")
+  .version("0.0.3")
   .option("--json", "Output as JSON")
   .option("--agent <name>", "Agent name or ID")
   .option("--project <name>", "Project name or ID")
