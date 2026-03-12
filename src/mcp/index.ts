@@ -30,7 +30,7 @@ getDatabase(config.db_path);
 
 const server = new McpServer({
   name: "recordings",
-  version: "0.0.2",
+  version: "0.0.3",
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -44,13 +44,11 @@ function errorResult(e: unknown) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
 
-/** Compact single-line format: id | mode | date | text preview */
 function compact(r: Recording): string {
   const t = (r.processed_text || r.raw_text).slice(0, 80);
   return `${r.id.slice(0, 8)} | ${r.processing_mode} | ${r.created_at.slice(0, 16)} | ${t}${t.length >= 80 ? "..." : ""}`;
 }
 
-/** Full format — only non-null fields */
 function full(r: Recording): string {
   const lines: string[] = [`ID: ${r.id}`, `Mode: ${r.processing_mode}`, `Model: ${r.model_used}`];
   if (r.enhancement_model) lines.push(`Enhanced by: ${r.enhancement_model}`);
@@ -68,19 +66,49 @@ function full(r: Recording): string {
   return lines.join("\n");
 }
 
-// ── Recording Tools ─────────────────────────────────────────────────────────
+// ── Full tool schemas for describe_tool ─────────────────────────────────────
+
+const toolDocs: Record<string, string> = {
+  transcribe_audio: "Transcribe audio file. Auto-enhances if needed.\nParams: audio_path (string, required): path to wav/mp3/m4a/webm | language (string): ISO code e.g. en/es/fr | no_enhance (bool): skip AI enhancement | tags (string[]): tags | agent_id (string) | project_id (string) | session_id (string)",
+  save_recording: "Save text as recording. Auto-enhances if needed.\nParams: text (string, required): text to save | enhance (bool): force enhancement | tags (string[]) | agent_id (string) | project_id (string) | session_id (string) | metadata (object)",
+  get_recording: "Get recording by ID or prefix.\nParams: id (string, required): recording ID or prefix",
+  list_recordings: "List recordings, compact by default, most recent first.\nParams: limit (number, default 10) | offset (number) | processing_mode ('raw'|'enhanced') | tags (string[]) | search (string): text search | since/until (ISO date) | agent_id | project_id | session_id | full (bool): verbose output",
+  search_recordings: "Search recordings by text content.\nParams: query (string, required) | limit (number, default 10) | agent_id | project_id | full (bool): verbose output",
+  delete_recording: "Delete recording by ID.\nParams: id (string, required)",
+  recording_stats: "Recording count, mode breakdown, duration.\nParams: none",
+  detect_enhancement: "Check if text needs AI enhancement.\nParams: text (string, required)",
+  register_agent: "Register agent (idempotent).\nParams: name (string, required) | description (string) | role (string)",
+  list_agents: "List registered agents.\nParams: none",
+  get_agent: "Get agent by ID or name.\nParams: id (string, required)",
+  register_project: "Register project (idempotent).\nParams: name (string, required) | path (string, required): absolute path | description (string)",
+  list_projects: "List registered projects.\nParams: none",
+};
+
+// ── Meta Tool ───────────────────────────────────────────────────────────────
+
+server.tool(
+  "describe_tool",
+  "Get full param docs for any tool.",
+  { name: z.string() },
+  async (args) => {
+    const doc = toolDocs[args.name];
+    return doc ? text(doc) : text(`Unknown tool: ${args.name}. Available: ${Object.keys(toolDocs).join(", ")}`);
+  }
+);
+
+// ── Recording Tools (lean stubs — no param descriptions) ────────────────────
 
 server.tool(
   "transcribe_audio",
   "Transcribe audio file. Auto-enhances if needed.",
   {
-    audio_path: z.string().describe("Audio file path"),
-    language: z.string().optional().describe("Language code"),
-    no_enhance: z.boolean().optional().describe("Skip enhancement"),
-    tags: z.array(z.string()).optional().describe("Tags"),
-    agent_id: z.string().optional().describe("Agent ID"),
-    project_id: z.string().optional().describe("Project ID"),
-    session_id: z.string().optional().describe("Session ID"),
+    audio_path: z.string(),
+    language: z.string().optional(),
+    no_enhance: z.boolean().optional(),
+    tags: z.array(z.string()).optional(),
+    agent_id: z.string().optional(),
+    project_id: z.string().optional(),
+    session_id: z.string().optional(),
   },
   async (args) => {
     try {
@@ -106,7 +134,6 @@ server.tool(
         session_id: args.session_id,
       });
 
-      // Compact output: just the text + id
       const output = processed.mode === "enhanced" ? processed.text : transcription.text;
       return text(`${recording.id.slice(0, 8)} | ${processed.mode} | ${output}`);
     } catch (e) {
@@ -119,13 +146,13 @@ server.tool(
   "save_recording",
   "Save text as recording. Auto-enhances if needed.",
   {
-    text: z.string().describe("Text to save"),
-    enhance: z.boolean().optional().describe("Force enhancement"),
-    tags: z.array(z.string()).optional().describe("Tags"),
-    agent_id: z.string().optional().describe("Agent ID"),
-    project_id: z.string().optional().describe("Project ID"),
-    session_id: z.string().optional().describe("Session ID"),
-    metadata: z.record(z.unknown()).optional().describe("Metadata"),
+    text: z.string(),
+    enhance: z.boolean().optional(),
+    tags: z.array(z.string()).optional(),
+    agent_id: z.string().optional(),
+    project_id: z.string().optional(),
+    session_id: z.string().optional(),
+    metadata: z.record(z.unknown()).optional(),
   },
   async (args) => {
     try {
@@ -166,9 +193,7 @@ server.tool(
 server.tool(
   "get_recording",
   "Get recording by ID or prefix.",
-  {
-    id: z.string().describe("Recording ID or prefix"),
-  },
+  { id: z.string() },
   async (args) => {
     try {
       const r = getRecording(args.id);
@@ -182,19 +207,19 @@ server.tool(
 
 server.tool(
   "list_recordings",
-  "List recordings. Compact by default, most recent first.",
+  "List recordings. Compact default, recent first.",
   {
-    limit: z.number().optional().describe("Max results (default: 10)"),
-    offset: z.number().optional().describe("Skip N"),
-    processing_mode: z.enum(["raw", "enhanced"]).optional().describe("Filter by mode"),
-    tags: z.array(z.string()).optional().describe("Filter tags"),
-    search: z.string().optional().describe("Search text"),
-    since: z.string().optional().describe("After date"),
-    until: z.string().optional().describe("Before date"),
-    agent_id: z.string().optional().describe("Agent filter"),
-    project_id: z.string().optional().describe("Project filter"),
-    session_id: z.string().optional().describe("Session filter"),
-    full: z.boolean().optional().describe("Full output per recording"),
+    limit: z.number().optional(),
+    offset: z.number().optional(),
+    processing_mode: z.enum(["raw", "enhanced"]).optional(),
+    tags: z.array(z.string()).optional(),
+    search: z.string().optional(),
+    since: z.string().optional(),
+    until: z.string().optional(),
+    agent_id: z.string().optional(),
+    project_id: z.string().optional(),
+    session_id: z.string().optional(),
+    full: z.boolean().optional(),
   },
   async (args) => {
     try {
@@ -225,13 +250,13 @@ server.tool(
 
 server.tool(
   "search_recordings",
-  "Search recordings by text content.",
+  "Search recordings by text.",
   {
-    query: z.string().describe("Search query"),
-    limit: z.number().optional().describe("Max results (default: 10)"),
-    agent_id: z.string().optional().describe("Agent filter"),
-    project_id: z.string().optional().describe("Project filter"),
-    full: z.boolean().optional().describe("Full output"),
+    query: z.string(),
+    limit: z.number().optional(),
+    agent_id: z.string().optional(),
+    project_id: z.string().optional(),
+    full: z.boolean().optional(),
   },
   async (args) => {
     try {
@@ -254,8 +279,8 @@ server.tool(
 
 server.tool(
   "delete_recording",
-  "Delete a recording by ID.",
-  { id: z.string().describe("Recording ID") },
+  "Delete recording by ID.",
+  { id: z.string() },
   async (args) => {
     try {
       return text(deleteRecording(args.id) ? `Deleted ${args.id}` : `Not found: ${args.id}`);
@@ -267,7 +292,7 @@ server.tool(
 
 server.tool(
   "recording_stats",
-  "Recording count, mode breakdown, duration stats.",
+  "Recording stats: count, modes, duration.",
   {},
   async () => {
     try {
@@ -283,12 +308,10 @@ server.tool(
   }
 );
 
-// ── Enhancement Detection ───────────────────────────────────────────────────
-
 server.tool(
   "detect_enhancement",
   "Check if text needs AI enhancement.",
-  { text: z.string().describe("Text to analyze") },
+  { text: z.string() },
   async (args) => {
     try {
       const r = needsEnhancement(args.text, config);
@@ -304,11 +327,7 @@ server.tool(
 server.tool(
   "register_agent",
   "Register agent (idempotent).",
-  {
-    name: z.string().describe("Agent name"),
-    description: z.string().optional().describe("Description"),
-    role: z.string().optional().describe("Role"),
-  },
+  { name: z.string(), description: z.string().optional(), role: z.string().optional() },
   async (args) => {
     try {
       const a = registerAgent(args.name, args.description, args.role);
@@ -337,7 +356,7 @@ server.tool(
 server.tool(
   "get_agent",
   "Get agent by ID or name.",
-  { id: z.string().describe("Agent ID or name") },
+  { id: z.string() },
   async (args) => {
     try {
       const a = getAgent(args.id);
@@ -354,11 +373,7 @@ server.tool(
 server.tool(
   "register_project",
   "Register project (idempotent).",
-  {
-    name: z.string().describe("Project name"),
-    path: z.string().describe("Absolute path"),
-    description: z.string().optional().describe("Description"),
-  },
+  { name: z.string(), path: z.string(), description: z.string().optional() },
   async (args) => {
     try {
       const p = registerProject(args.name, args.path, args.description);
