@@ -401,5 +401,46 @@ server.tool(
 
 // ── Start Server ────────────────────────────────────────────────────────────
 
+
+const _agentReg = new Map<string, { id: string; name: string; last_seen_at: string }>();
+
+server.tool(
+  "register_agent",
+  "Register this agent session. Returns agent_id for use in heartbeat/set_focus.",
+  { name: z.string(), session_id: z.string().optional() },
+  async (a: { name: string; session_id?: string }) => {
+    const existing = [..._agentReg.values()].find(x => x.name === a.name);
+    if (existing) { existing.last_seen_at = new Date().toISOString(); return { content: [{ type: "text" as const, text: JSON.stringify(existing) }] }; }
+    const id = Math.random().toString(36).slice(2, 10);
+    const ag = { id, name: a.name, last_seen_at: new Date().toISOString() };
+    _agentReg.set(id, ag);
+    return { content: [{ type: "text" as const, text: JSON.stringify(ag) }] };
+  }
+);
+
+server.tool(
+  "heartbeat",
+  "Update last_seen_at to signal agent is active.",
+  { agent_id: z.string() },
+  async (a: { agent_id: string }) => {
+    const ag = _agentReg.get(a.agent_id);
+    if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${a.agent_id}` }], isError: true };
+    ag.last_seen_at = new Date().toISOString();
+    return { content: [{ type: "text" as const, text: `♥ ${ag.name} — active` }] };
+  }
+);
+
+server.tool(
+  "set_focus",
+  "Set active project context for this agent session.",
+  { agent_id: z.string(), project_id: z.string().optional() },
+  async (a: { agent_id: string; project_id?: string }) => {
+    const ag = _agentReg.get(a.agent_id);
+    if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${a.agent_id}` }], isError: true };
+    (ag as any).project_id = a.project_id;
+    return { content: [{ type: "text" as const, text: a.project_id ? `Focus: ${a.project_id}` : "Focus cleared" }] };
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
