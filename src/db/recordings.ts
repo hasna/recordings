@@ -22,6 +22,9 @@ function parseRow(row: Record<string, unknown>): Recording {
     agent_id: (row["agent_id"] as string) || null,
     project_id: (row["project_id"] as string) || null,
     session_id: (row["session_id"] as string) || null,
+    goal: (row["goal"] as string) || null,
+    role: (row["role"] as string) || null,
+    task_list_id: (row["task_list_id"] as string) || null,
     metadata: JSON.parse((row["metadata"] as string) || "{}") as Record<string, unknown>,
     created_at: row["created_at"] as string,
   };
@@ -37,8 +40,8 @@ export function createRecording(
   const metadataJson = JSON.stringify(input.metadata || {});
 
   d.query(
-    `INSERT INTO recordings (id, audio_path, raw_text, processed_text, processing_mode, model_used, enhancement_model, duration_ms, language, tags, agent_id, project_id, session_id, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO recordings (id, audio_path, raw_text, processed_text, processing_mode, model_used, enhancement_model, duration_ms, language, tags, agent_id, project_id, session_id, goal, role, task_list_id, metadata)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     input.audio_path || null,
@@ -53,6 +56,9 @@ export function createRecording(
     input.agent_id || null,
     input.project_id || null,
     input.session_id || null,
+    input.goal || null,
+    input.role || null,
+    input.task_list_id || null,
     metadataJson
   );
 

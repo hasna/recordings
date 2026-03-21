@@ -14,6 +14,9 @@ export interface Recording {
   agent_id: string | null;
   project_id: string | null;
   session_id: string | null;
+  goal: string | null;
+  role: string | null;
+  task_list_id: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
 }
@@ -33,6 +36,9 @@ export interface CreateRecordingInput {
   agent_id?: string;
   project_id?: string;
   session_id?: string;
+  goal?: string;
+  role?: string;
+  task_list_id?: string;
   metadata?: Record<string, unknown>;
 }
 

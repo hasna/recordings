@@ -152,6 +152,9 @@ server.tool(
     agent_id: z.string().optional(),
     project_id: z.string().optional(),
     session_id: z.string().optional(),
+    goal: z.string().optional().describe("Goal or purpose of this recording session (e.g. 'code review for PR #123')"),
+    role: z.string().optional().describe("Agent role for this session (e.g. 'dev agent for connectdev')"),
+    task_list_id: z.string().optional().describe("Task list ID to bind this recording to"),
     metadata: z.record(z.unknown()).optional(),
   },
   async (args) => {
@@ -179,6 +182,9 @@ server.tool(
         agent_id: args.agent_id,
         project_id: args.project_id,
         session_id: args.session_id,
+        goal: args.goal,
+        role: args.role,
+        task_list_id: args.task_list_id,
         metadata: args.metadata,
       });
 

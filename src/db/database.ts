@@ -63,6 +63,14 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_recordings_mode ON recordings(processing_mode);
   CREATE INDEX IF NOT EXISTS idx_recording_tags_tag ON recording_tags(tag);
   `,
+
+  // Migration 2: session tagging attributes
+  `
+  ALTER TABLE recordings ADD COLUMN goal TEXT;
+  ALTER TABLE recordings ADD COLUMN role TEXT;
+  ALTER TABLE recordings ADD COLUMN task_list_id TEXT;
+  INSERT OR IGNORE INTO _migrations (id) VALUES (2);
+  `,
 ];
 
 export function getDatabase(dbPath?: string): Database {

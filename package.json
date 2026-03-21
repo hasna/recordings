@@ -1,6 +1,6 @@
 {
   "name": "@hasna/recordings",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
   "main": "dist/index.js",
