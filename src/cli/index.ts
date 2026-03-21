@@ -1073,6 +1073,24 @@ program
     }
   });
 
+// ── remove/uninstall ─────────────────────────────────────────────────────────
+
+program
+  .command("remove <id>")
+  .alias("rm")
+  .alias("uninstall")
+  .alias("delete")
+  .description("Delete a recording by ID")
+  .action((id: string) => {
+    const deleted = deleteRecording(id);
+    if (deleted) {
+      console.log(chalk.green(`✓ Recording ${id} deleted`));
+    } else {
+      console.error(chalk.red(`Recording not found: ${id}`));
+      process.exit(1);
+    }
+  });
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 
 program.parse();
