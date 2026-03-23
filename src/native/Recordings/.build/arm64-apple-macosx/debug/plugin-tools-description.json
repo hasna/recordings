@@ -1,0 +1,983 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/Info.plist" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Info.plist"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/Info.plist"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ar.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/ar.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ar.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/cs.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/cs.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/cs.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/de.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/de.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/de.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/en.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/en.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/en.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/es.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/es.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/es.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/fr.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/fr.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/fr.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/hu.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/hu.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/hu.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/it.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/it.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/it.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ja.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/ja.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ja.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ko.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/ko.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ko.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/nl.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/nl.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/nl.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/pt-br.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/pt-BR.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/pt-br.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ru.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/ru.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/ru.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/sk.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/sk.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/sk.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/zh-hans.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/zh-Hans.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/zh-hans.lproj/Localizable.strings"
+        }
+      ]
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/zh-tw.lproj/Localizable.strings" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Localization/zh-TW.lproj/Localizable.strings"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts_KeyboardShortcuts.bundle/zh-tw.lproj/Localizable.strings"
+        }
+      ]
+    }
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.KeyboardShortcuts-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/sources",
+      "importPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/CarbonKeyboardShortcuts.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Key.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/KeyboardShortcuts.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/NSMenuItem++.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Name.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Recorder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/RecorderCocoa.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Shortcut.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Utilities.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/ViewModifiers.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<KeyboardShortcuts-arm64-apple-macosx26.0-debug.module-resources>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "KeyboardShortcuts",
+      "moduleOutputPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules/KeyboardShortcuts.swiftmodule",
+      "objects" : [
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/CarbonKeyboardShortcuts.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Key.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/KeyboardShortcuts.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/NSMenuItem++.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Name.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Recorder.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/RecorderCocoa.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Shortcut.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Utilities.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/ViewModifiers.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/resource_bundle_accessor.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx10.15",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+        "-module-cache-path",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/include/KeyboardShortcuts-Swift.h",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-suppress-warnings",
+        "-user-module-version",
+        "2.4.0",
+        "-package-name",
+        "keyboardshortcuts"
+      ],
+      "outputFileMapPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/CarbonKeyboardShortcuts.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Key.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/KeyboardShortcuts.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/NSMenuItem++.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Name.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Recorder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/RecorderCocoa.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Shortcut.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Utilities.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/ViewModifiers.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules/KeyboardShortcuts.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/CarbonKeyboardShortcuts.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Key.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/KeyboardShortcuts.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/NSMenuItem++.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Name.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Recorder.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/RecorderCocoa.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Shortcut.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Utilities.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/ViewModifiers.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/DerivedSources/resource_bundle_accessor.swift"
+      ],
+      "tempsPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.Recordings-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/sources",
+      "importPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/FnKeyMonitor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/MenuBarPopover.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingsApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/VoiceShortcuts.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules/KeyboardShortcuts.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "Recordings",
+      "moduleOutputPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules/Recordings.swiftmodule",
+      "objects" : [
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/FnKeyMonitor.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/MenuBarPopover.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/RecordingEngine.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/RecordingsApp.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/SettingsView.swift.o",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/VoiceShortcuts.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx26.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "Recordings_main",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "recordings"
+      ],
+      "outputFileMapPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/FnKeyMonitor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/MenuBarPopover.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/RecordingEngine.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/RecordingsApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/VoiceShortcuts.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules/Recordings.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/FnKeyMonitor.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/MenuBarPopover.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingEngine.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingsApp.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/SettingsView.swift",
+        "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/VoiceShortcuts.swift"
+      ],
+      "tempsPath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "KeyboardShortcuts" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "KeyboardShortcuts",
+      "-package-name",
+      "keyboardshortcuts",
+      "-c",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/CarbonKeyboardShortcuts.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Key.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/KeyboardShortcuts.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/NSMenuItem++.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Name.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Recorder.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/RecorderCocoa.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Shortcut.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Utilities.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/ViewModifiers.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/DerivedSources/resource_bundle_accessor.swift",
+      "-I",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx10.15",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+      "-module-cache-path",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/include/KeyboardShortcuts-Swift.h",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-suppress-warnings",
+      "-user-module-version",
+      "2.4.0",
+      "-package-name",
+      "keyboardshortcuts",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "Recordings" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "Recordings",
+      "-package-name",
+      "recordings",
+      "-c",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/FnKeyMonitor.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/MenuBarPopover.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingEngine.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingsApp.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/SettingsView.swift",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/VoiceShortcuts.swift",
+      "-I",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx26.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "Recordings_main",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "recordings",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "KeyboardShortcuts" : [
+
+    ],
+    "Recordings" : [
+      "KeyboardShortcuts"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/CarbonKeyboardShortcuts.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Key.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/KeyboardShortcuts.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/NSMenuItem++.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Name.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Recorder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/RecorderCocoa.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Shortcut.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/Utilities.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/checkouts/KeyboardShortcuts/Sources/KeyboardShortcuts/ViewModifiers.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/DerivedSources/resource_bundle_accessor.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/sources"
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings-entitlement.plist"
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/FnKeyMonitor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/MenuBarPopover.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingsApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/VoiceShortcuts.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/sources"
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/CarbonKeyboardShortcuts.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Key.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/KeyboardShortcuts.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/NSMenuItem++.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Name.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Recorder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/RecorderCocoa.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Shortcut.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/Utilities.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/ViewModifiers.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/KeyboardShortcuts.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/FnKeyMonitor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/MenuBarPopover.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/RecordingEngine.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/RecordingsApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.build/VoiceShortcuts.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/Recordings.product/Objects.LinkFileList"
+    },
+    "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

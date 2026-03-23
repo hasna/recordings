@@ -1,0 +1,58 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "PackageStructure": ["<PackageStructure>"]
+  "Recordings-arm64-apple-macosx26.0-debug.module": ["<Recordings-arm64-apple-macosx26.0-debug.module>"]
+  "main": ["<Recordings-arm64-apple-macosx26.0-debug.module>"]
+  "test": ["<Recordings-arm64-apple-macosx26.0-debug.module>"]
+default: "main"
+nodes:
+  "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/MenuBarPopover.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingEngine.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingsApp.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/SettingsView.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/VoiceShortcuts.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/DerivedSources/resource_bundle_accessor.swift"]
+    outputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/sources"]
+    description: "Write auxiliary file /Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/sources"
+
+  "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings_Recordings.bundle/Info.plist":
+    tool: copy-tool
+    inputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/Info.plist"]
+    outputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings_Recordings.bundle/Info.plist"]
+    description: "Copying /Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/Info.plist"
+
+  "/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+
+  "<Recordings-arm64-apple-macosx26.0-debug.module>":
+    tool: phony
+    inputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Modules/Recordings.swiftmodule"]
+    outputs: ["<Recordings-arm64-apple-macosx26.0-debug.module>"]
+
+  "C.Recordings-arm64-apple-macosx26.0-debug.module":
+    tool: shell
+    inputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/MenuBarPopover.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingEngine.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/RecordingsApp.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/SettingsView.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/VoiceShortcuts.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/DerivedSources/resource_bundle_accessor.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt","<Recordings-arm64-apple-macosx26.0-debug.module-resources>","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/sources"]
+    outputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Modules/Recordings.swiftmodule"]
+    description: "Compiling Swift Module 'Recordings' (6 sources)"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-module-name","Recordings","-emit-dependencies","-emit-module","-emit-module-path","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Modules/Recordings.swiftmodule","-output-file-map","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/output-file-map.json","-incremental","@/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings.build/sources","-I","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx26.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j10","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE","-module-cache-path","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-swift-version","6","-Xfrontend","-experimental-lazy-typecheck","-Xfrontend","-experimental-skip-all-function-bodies","-Xfrontend","-experimental-allow-module-with-compiler-errors","-Xfrontend","-empty-abi-descriptor","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g","-Xcc","-isysroot","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-Xcc","-fPIC","-Xcc","-g","-package-name","recordings"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Recordings/","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Package.swift","/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
+  "Recordings-arm64-apple-macosx26.0-debug.module-resources":
+    tool: phony
+    inputs: ["/Users/hasna/Workspace/hasna/opensource/opensourcedev/open-recordings/src/native/Recordings/.build/index-build/arm64-apple-macosx/debug/Recordings_Recordings.bundle/Info.plist"]
+    outputs: ["<Recordings-arm64-apple-macosx26.0-debug.module-resources>"]
+
