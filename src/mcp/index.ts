@@ -77,9 +77,11 @@ const toolDocs: Record<string, string> = {
   delete_recording: "Delete recording by ID.\nParams: id (string, required)",
   recording_stats: "Recording count, mode breakdown, duration.\nParams: none",
   detect_enhancement: "Check if text needs AI enhancement.\nParams: text (string, required)",
-  register_agent: "Register agent (idempotent).\nParams: name (string, required) | description (string) | role (string)",
+  register_agent: "Register agent (idempotent). Auto-updates last_seen_at on re-register.\nParams: name (string, required) | description (string) | role (string)",
   list_agents: "List registered agents.\nParams: none",
   get_agent: "Get agent by ID or name.\nParams: id (string, required)",
+  heartbeat: "Update last_seen_at to signal agent is active.\nParams: agent_id (string, required): agent ID or name",
+  set_focus: "Set active project context for this agent session.\nParams: agent_id (string, required) | project_id (string, nullable): project ID or null to clear",
   register_project: "Register project (idempotent).\nParams: name (string, required) | path (string, required): absolute path | description (string)",
   list_projects: "List registered projects.\nParams: none",
 };
