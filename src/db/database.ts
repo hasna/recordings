@@ -1,9 +1,11 @@
 import { Database } from "bun:sqlite";
+import { SqliteAdapter } from "@hasna/cloud";
 import { mkdirSync } from "fs";
 import { dirname } from "path";
 import { loadConfig } from "../lib/config.js";
 
 let _db: Database | null = null;
+let _adapter: SqliteAdapter | null = null;
 
 const MIGRATIONS = [
   // Migration 0: Initial schema
@@ -71,6 +73,24 @@ const MIGRATIONS = [
   ALTER TABLE recordings ADD COLUMN task_list_id TEXT;
   INSERT OR IGNORE INTO _migrations (id) VALUES (2);
   `,
+
+  // Migration 3: feedback table
+  `
+  CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    message TEXT NOT NULL,
+    email TEXT,
+    category TEXT DEFAULT 'general',
+    version TEXT,
+    machine_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  `,
+
+  // Migration 4: agent focus
+  `
+  ALTER TABLE agents ADD COLUMN active_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+  `,
 ];
 
 export function getDatabase(dbPath?: string): Database {
@@ -82,12 +102,11 @@ export function getDatabase(dbPath?: string): Database {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
 
-  _db = new Database(path, { create: true });
+  _adapter = new SqliteAdapter(path);
+  _db = _adapter.raw;
 
-  // Pragmas for production SQLite
-  _db.run("PRAGMA journal_mode = WAL");
+  // SqliteAdapter already sets WAL and foreign_keys; add busy_timeout
   _db.run("PRAGMA busy_timeout = 5000");
-  _db.run("PRAGMA foreign_keys = ON");
 
   runMigrations(_db);
   return _db;
@@ -118,11 +137,21 @@ export function closeDatabase(): void {
   if (_db) {
     _db.close();
     _db = null;
+    _adapter = null;
   }
 }
 
 export function resetDatabase(): void {
   _db = null;
+  _adapter = null;
+}
+
+/** Get the SqliteAdapter for direct SQL queries (e.g. feedback). */
+export function getAdapter(): SqliteAdapter {
+  if (!_adapter) {
+    getDatabase(); // force initialization
+  }
+  return _adapter!;
 }
 
 export function getDbPath(): string {

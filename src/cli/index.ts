@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
-import { getDatabase } from "../db/database.js";
+import { getDatabase, getAdapter } from "../db/database.js";
 import {
   createRecording,
   getRecording,
@@ -1092,6 +1092,23 @@ program
       console.error(chalk.red(`Recording not found: ${id}`));
       process.exit(1);
     }
+  });
+
+// ── Feedback ────────────────────────────────────────────────────────────────
+
+program
+  .command("feedback <message>")
+  .description("Send feedback")
+  .option("--email <email>", "Contact email")
+  .option("--category <category>", "Category: bug, feature, general")
+  .action((message: string, opts: { email?: string; category?: string }) => {
+    const adapter = getAdapter();
+    const pkg = require("../../package.json");
+    adapter.run(
+      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+      message, opts.email || null, opts.category || "general", pkg.version
+    );
+    console.log(chalk.green("Feedback saved. Thank you!"));
   });
 
 // ── Run ─────────────────────────────────────────────────────────────────────

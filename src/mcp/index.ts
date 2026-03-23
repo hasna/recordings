@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
-import { getDatabase } from "../db/database.js";
+import { getDatabase, getAdapter } from "../db/database.js";
 import {
   createRecording,
   getRecording,
@@ -12,7 +12,7 @@ import {
   searchRecordings,
   getRecordingStats,
 } from "../db/recordings.js";
-import { registerAgent, getAgent, listAgents } from "../db/agents.js";
+import { registerAgent, getAgent, listAgents, heartbeatAgent, setAgentFocus } from "../db/agents.js";
 import {
   registerProject,
   getProject,
@@ -405,46 +405,54 @@ server.tool(
   }
 );
 
-// ── Start Server ────────────────────────────────────────────────────────────
-
-
-const _agentReg = new Map<string, { id: string; name: string; last_seen_at: string }>();
-
-server.tool(
-  "register_agent",
-  "Register this agent session. Returns agent_id for use in heartbeat/set_focus.",
-  { name: z.string(), session_id: z.string().optional() },
-  async (a: { name: string; session_id?: string }) => {
-    const existing = [..._agentReg.values()].find(x => x.name === a.name);
-    if (existing) { existing.last_seen_at = new Date().toISOString(); return { content: [{ type: "text" as const, text: JSON.stringify(existing) }] }; }
-    const id = Math.random().toString(36).slice(2, 10);
-    const ag = { id, name: a.name, last_seen_at: new Date().toISOString() };
-    _agentReg.set(id, ag);
-    return { content: [{ type: "text" as const, text: JSON.stringify(ag) }] };
-  }
-);
+// ── Heartbeat & Focus ───────────────────────────────────────────────────────
 
 server.tool(
   "heartbeat",
-  "Update last_seen_at to signal agent is active.",
-  { agent_id: z.string() },
-  async (a: { agent_id: string }) => {
-    const ag = _agentReg.get(a.agent_id);
-    if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${a.agent_id}` }], isError: true };
-    ag.last_seen_at = new Date().toISOString();
-    return { content: [{ type: "text" as const, text: `♥ ${ag.name} — active` }] };
+  "Update last_seen_at to signal agent is active. Call periodically during long tasks.",
+  { agent_id: z.string().describe("Agent ID or name") },
+  async (args) => {
+    try {
+      const agent = heartbeatAgent(args.agent_id);
+      if (!agent) return text(`Agent not found: ${args.agent_id}`);
+      return text(`${agent.id} | ${agent.name} | last_seen: ${agent.last_seen_at}`);
+    } catch (e) {
+      return errorResult(e);
+    }
   }
 );
 
 server.tool(
   "set_focus",
   "Set active project context for this agent session.",
-  { agent_id: z.string(), project_id: z.string().optional() },
-  async (a: { agent_id: string; project_id?: string }) => {
-    const ag = _agentReg.get(a.agent_id);
-    if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${a.agent_id}` }], isError: true };
-    (ag as any).project_id = a.project_id;
-    return { content: [{ type: "text" as const, text: a.project_id ? `Focus: ${a.project_id}` : "Focus cleared" }] };
+  { agent_id: z.string().describe("Agent ID or name"), project_id: z.string().nullable().optional().describe("Project ID to focus on, or null to clear") },
+  async (args) => {
+    try {
+      const agent = setAgentFocus(args.agent_id, args.project_id ?? null);
+      if (!agent) return text(`Agent not found: ${args.agent_id}`);
+      return text(args.project_id ? `Focus set: ${args.project_id}` : "Focus cleared");
+    } catch (e) {
+      return errorResult(e);
+    }
+  }
+);
+
+server.tool(
+  "send_feedback",
+  "Send feedback about this service",
+  {
+    message: z.string().describe("Feedback message"),
+    email: z.string().optional().describe("Contact email (optional)"),
+    category: z.enum(["bug", "feature", "general"]).optional().describe("Feedback category"),
+  },
+  async (params: { message: string; email?: string; category?: string }) => {
+    const adapter = getAdapter();
+    const pkg = require("../../package.json");
+    adapter.run(
+      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+      params.message, params.email || null, params.category || "general", pkg.version
+    );
+    return text("Feedback saved. Thank you!");
   }
 );
 

@@ -79,3 +79,26 @@ export function listAgents(db?: Database): Agent[] {
     .all() as Record<string, unknown>[];
   return rows.map(parseAgent);
 }
+
+export function heartbeatAgent(idOrName: string, db?: Database): Agent | null {
+  const d = db || getDatabase();
+  const agent = getAgent(idOrName, d);
+  if (!agent) return null;
+  d.query("UPDATE agents SET last_seen_at = ? WHERE id = ?").run(
+    new Date().toISOString(),
+    agent.id
+  );
+  return getAgent(agent.id, d);
+}
+
+export function setAgentFocus(idOrName: string, projectId: string | null, db?: Database): Agent | null {
+  const d = db || getDatabase();
+  const agent = getAgent(idOrName, d);
+  if (!agent) return null;
+  d.query("UPDATE agents SET active_project_id = ?, last_seen_at = ? WHERE id = ?").run(
+    projectId,
+    new Date().toISOString(),
+    agent.id
+  );
+  return getAgent(agent.id, d);
+}

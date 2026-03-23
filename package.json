@@ -27,6 +27,7 @@
     "dev:mcp": "bun run src/mcp/index.ts"
   },
   "dependencies": {
+    "@hasna/cloud": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
