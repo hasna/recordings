@@ -2,7 +2,7 @@
   "name": "@hasna/recordings",
   "version": "0.1.8",
   "type": "module",
-  "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
+  "description": "Speech-to-text recording tool with MCP and CLI \u2014 records, transcribes, and optionally enhances text using AI",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -24,7 +24,8 @@
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "dev:cli": "bun run src/cli/index.ts",
-    "dev:mcp": "bun run src/mcp/index.ts"
+    "dev:mcp": "bun run src/mcp/index.ts",
+    "postinstall": "mkdir -p $HOME/.hasna/recordings/audio 2>/dev/null || true"
   },
   "dependencies": {
     "@hasna/cloud": "^0.1.0",
