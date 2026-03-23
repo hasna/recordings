@@ -60,10 +60,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // ── Global Hotkey ───────────────────────────────────────────────────────
 
+    /// Check if Accessibility permission is granted. If not, show a dialog and open System Settings.
+    func checkAccessibilityPermission() -> Bool {
+        // First check without prompting
+        let trusted = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary
+        )
+        if trusted { return true }
+
+        // Not trusted — show dialog explaining why we need it
+        let alert = NSAlert()
+        alert.messageText = "Accessibility Permission Required"
+        alert.informativeText = "RecordingsHelper needs Accessibility access to detect the global hotkey (hold Space to record).\n\nClick 'Open Settings' to grant permission, then restart the app."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Quit")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            // Prompt the system dialog AND open System Settings > Accessibility
+            AXIsProcessTrustedWithOptions(
+                [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+            )
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        } else {
+            NSApplication.shared.terminate(nil)
+        }
+        return false
+    }
+
     func registerHotkey() {
         // Hold Space for 1+ second to start recording, release to stop.
         // Uses CGEventTap to monitor all keyboard events globally.
         // Normal space presses (< 1 second) pass through untouched.
+
+        // Check Accessibility permission BEFORE attempting event tap
+        if !checkAccessibilityPermission() {
+            return
+        }
 
         let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
 
