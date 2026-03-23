@@ -22,7 +22,7 @@ final class VoiceShortcuts: ObservableObject {
 
     private let storageURL: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".recordings/voice-shortcuts.json")
+        return home.appendingPathComponent(".hasna/recordings/voice-shortcuts.json")
     }()
 
     init() {

@@ -485,24 +485,27 @@ program
     const { existsSync: fileExists } = require("node:fs") as typeof import("node:fs");
     const home = getHome();
 
-    const appPath = pathJoin(home, ".recordings", "RecordingsHelper.app");
+    const appPath = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app");
+    const oldAppPath = pathJoin(home, ".recordings", "RecordingsHelper.app");
 
-    if (!fileExists(appPath)) {
+    if (!fileExists(appPath) && !fileExists(oldAppPath)) {
       console.error(chalk.red("RecordingsHelper.app not found. Run: recordings shortcut --install"));
       process.exit(1);
     }
+
+    const resolvedAppPath = fileExists(appPath) ? appPath : oldAppPath;
 
     // Kill existing instance
     try { execSync("pkill -f RecordingsHelper", { stdio: "pipe" }); } catch { /* not running */ }
 
     // Launch
-    execSync(`open "${appPath}"`, { stdio: "pipe" });
+    execSync(`open "${resolvedAppPath}"`, { stdio: "pipe" });
     console.log(chalk.green("Recordings helper launched — press F5 to record"));
 
     if (opts.login) {
       try {
         execSync(
-          `osascript -e 'tell application "System Events" to make login item at end with properties {path:"${appPath}", hidden:true}'`,
+          `osascript -e 'tell application "System Events" to make login item at end with properties {path:"${resolvedAppPath}", hidden:true}'`,
           { stdio: "pipe" }
         );
         console.log(chalk.green("Added to Login Items — will start on boot"));
@@ -688,7 +691,7 @@ program
     const { homedir: getHome } = require("node:os") as typeof import("node:os");
     const home = getHome();
 
-    const scriptDir = pathJoin(home, ".recordings");
+    const scriptDir = pathJoin(home, ".hasna", "recordings");
     mkdirSync(scriptDir, { recursive: true });
 
     const scriptPath = pathJoin(scriptDir, "record-toggle.sh");
@@ -747,7 +750,7 @@ fi
       // Install the native menu bar app — no config needed, just works with F5
       const { execSync: exec } = require("node:child_process") as typeof import("node:child_process");
 
-      const appPath = pathJoin(home, ".recordings", "RecordingsHelper.app");
+      const appPath = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app");
       const srcSwift = pathJoin(__dirname, "..", "native", "RecordingsHelper.swift");
       const distApp = pathJoin(__dirname, "..", "RecordingsHelper.app");
 
@@ -757,10 +760,10 @@ fi
       } else if (fileExists(srcSwift)) {
         // Compile from source
         console.log(chalk.blue("Compiling native helper app..."));
-        const appDir = pathJoin(home, ".recordings", "RecordingsHelper.app", "Contents", "MacOS");
+        const appDir = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app", "Contents", "MacOS");
         mkdirSync(appDir, { recursive: true });
 
-        const plistDir = pathJoin(home, ".recordings", "RecordingsHelper.app", "Contents");
+        const plistDir = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app", "Contents");
         const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>

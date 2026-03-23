@@ -33,8 +33,8 @@ fi
 
 echo "✓ Built $APP_DIR"
 echo ""
-echo "To install to ~/.recordings/:"
-echo "  cp -r $APP_DIR ~/.recordings/Recordings.app"
+echo "To install to ~/.hasna/recordings/:"
+echo "  cp -r $APP_DIR ~/.hasna/recordings/Recordings.app"
 echo ""
 echo "To run:"
 echo "  open $APP_DIR"

@@ -69,7 +69,7 @@ final class RecordingEngine: ObservableObject {
     private let fnMonitor = FnKeyMonitor()
 
     let home = FileManager.default.homeDirectoryForCurrentUser.path
-    private var audioDir: String { "\(home)/.recordings/audio" }
+    private var audioDir: String { "\(home)/.hasna/recordings/audio" }
 
     init() {
         try? FileManager.default.createDirectory(atPath: audioDir, withIntermediateDirectories: true)

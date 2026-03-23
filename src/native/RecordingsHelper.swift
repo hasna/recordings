@@ -18,12 +18,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     let recordingsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.recordings"
+        let newDir = "\(home)/.hasna/recordings"
+        let oldDir = "\(home)/.recordings"
+        // Auto-migrate from old location
+        if !FileManager.default.fileExists(atPath: newDir) && FileManager.default.fileExists(atPath: oldDir) {
+            try? FileManager.default.createDirectory(atPath: "\(home)/.hasna", withIntermediateDirectories: true)
+            try? FileManager.default.copyItem(atPath: oldDir, toPath: newDir)
+        }
+        return newDir
     }()
 
     let audioDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.recordings/audio"
+        return "\(home)/.hasna/recordings/audio"
     }()
 
     let recordingsBin: String = {

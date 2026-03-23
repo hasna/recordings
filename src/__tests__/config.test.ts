@@ -207,7 +207,7 @@ describe("getDataDir", () => {
   test("returns a string", () => {
     const dir = getDataDir();
     expect(typeof dir).toBe("string");
-    expect(dir).toContain(".recordings");
+    expect(dir).toContain("recordings");
   });
 });
 

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import type { RecordingsConfig } from "../types/index.js";
@@ -67,7 +67,9 @@ export function loadConfig(configPath?: string): RecordingsConfig {
   if (process.env.RECORDINGS_LANGUAGE) {
     config.language = process.env.RECORDINGS_LANGUAGE;
   }
-  if (process.env.RECORDINGS_DB_PATH) {
+  if (process.env.HASNA_RECORDINGS_DB_PATH) {
+    config.db_path = process.env.HASNA_RECORDINGS_DB_PATH;
+  } else if (process.env.RECORDINGS_DB_PATH) {
     config.db_path = process.env.RECORDINGS_DB_PATH;
   }
   if (process.env.RECORDINGS_AUDIO_DIR) {
@@ -115,7 +117,7 @@ function findConfigFile(): string | null {
 }
 
 export function getDataDir(): string {
-  // Check for .recordings in cwd hierarchy
+  // Check for .recordings in cwd hierarchy (project-local)
   let dir = process.cwd();
   const root = "/";
   while (dir !== root) {
@@ -125,8 +127,23 @@ export function getDataDir(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  // Fall back to ~/.recordings
-  return join(homedir(), ".recordings");
+
+  // Global: ~/.hasna/recordings (with backward compat from ~/.recordings)
+  const home = homedir();
+  const newDir = join(home, ".hasna", "recordings");
+  const oldDir = join(home, ".recordings");
+
+  // Auto-migrate from old location if new dir doesn't exist yet
+  if (!existsSync(newDir) && existsSync(oldDir)) {
+    try {
+      mkdirSync(join(home, ".hasna"), { recursive: true });
+      cpSync(oldDir, newDir, { recursive: true });
+    } catch {
+      // Fall through to use new dir
+    }
+  }
+
+  return newDir;
 }
 
 function loadSecretKey(keyName: string): string {
