@@ -28,7 +28,7 @@
     "postinstall": "mkdir -p $HOME/.hasna/recordings/audio 2>/dev/null || true"
   },
   "dependencies": {
-    "@hasna/cloud": "0.1.5",
+    "@hasna/cloud": "^0.1.24",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
