@@ -1082,7 +1082,6 @@ program
   .command("remove <id>")
   .alias("rm")
   .alias("uninstall")
-  .alias("delete")
   .description("Delete a recording by ID")
   .action((id: string) => {
     const deleted = deleteRecording(id);

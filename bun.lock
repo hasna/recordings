@@ -5,7 +5,7 @@
     "": {
       "name": "@hasna/recordings",
       "dependencies": {
-        "@hasna/cloud": "0.1.5",
+        "@hasna/cloud": "^0.1.24",
         "@modelcontextprotocol/sdk": "^1.12.1",
         "chalk": "^5.4.1",
         "commander": "^13.1.0",
@@ -19,7 +19,7 @@
     },
   },
   "packages": {
-    "@hasna/cloud": ["@hasna/cloud@0.1.5", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.12.1", "commander": "^13.1.0", "pg": "^8.13.3", "zod": "^3.24.2" }, "bin": { "cloud": "dist/cli/index.js", "cloud-mcp": "dist/mcp/index.js" } }, "sha512-B82jy53QC7xphchffDVZc7gw9OLkcX2rMnmytTQ6FZEeHgG/ySgfM3Om07OOl72dc8ZUkqOpcK+2OYBUYkFR/A=="],
+    "@hasna/cloud": ["@hasna/cloud@0.1.30", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.12.1", "commander": "^13.1.0", "pg": "^8.13.3", "zod": "^3.24.2" }, "bin": { "cloud": "dist/cli/index.js", "cloud-mcp": "dist/mcp/index.js" } }, "sha512-qpDiJNsU/K1cFDk1l+xUA1xEEq8+Q37OdAz/ec0LwrQiA1HyWukzR8Lh7igkOqBT2foa46cxhB7yGnfiT2cWrA=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.11", "", { "peerDependencies": { "hono": "^4" } }, "sha512-dr8/3zEaB+p0D2n/IUrlPF1HZm586qgJNXK1a9fhg/PzdtkK7Ksd5l312tJX2yBuALqDYBlG20QEbayqPyxn+g=="],
 
