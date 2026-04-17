@@ -332,16 +332,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     func simulatePaste() {
-        // Simulate Cmd+V
         let source = CGEventSource(stateID: .hidSystemState)
-
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true) // V key
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
         keyDown?.flags = .maskCommand
-        keyDown?.post(tap: .cghidEventTap)
-
+        keyDown?.post(tap: .cgSessionEventTap)
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
         keyUp?.flags = .maskCommand
-        keyUp?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cgSessionEventTap)
     }
 
     func runCommand(_ command: String, arguments: [String]) -> String {

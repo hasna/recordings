@@ -331,12 +331,10 @@ final class RecordingEngine: ObservableObject {
     // MARK: - Paste
 
     func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
-        // Step 1: Put text on clipboard
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        // Step 2: Find the real target app
         let myPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
         let targetApp = runningApps.first(where: {
@@ -347,81 +345,25 @@ final class RecordingEngine: ObservableObject {
             $0.activationPolicy == .regular && $0.processIdentifier != myPID
         })
 
-        let bundleId = targetApp?.bundleIdentifier
         let localName = targetApp?.localizedName ?? "frontmost app"
-
         statusMessage = "Pasting into \(localName)..."
 
-        // Step 3: Activate + paste in a single osascript subprocess.
-        // Running osascript as Process gives it "system" context which macOS
-        // trusts for sending synthetic keystrokes via System Events.
-        // NSAppleScript runs in-process and is often blocked for background apps.
-        // This is the same approach used by WisprFlow and OpenFlow.
-        let ok = pasteViaOsascript(bundleId: bundleId)
-        if ok {
-            statusMessage = "Pasted: \(String(text.prefix(50)))"
-        } else {
-            // Fallback: activate then CGEvent paste
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                targetApp?.activate(options: [.activateAllWindows])
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    self.postPasteShortcut()
-                    self.statusMessage = "Pasted (fallback): \(String(text.prefix(50)))"
-                }
-            }
+        targetApp?.activate()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            self.postKey(0x09, flags: .maskCommand)
+            self.statusMessage = "Pasted: \(String(text.prefix(50)))"
         }
-    }
-
-    /// Paste using osascript as an external subprocess.
-    private func pasteViaOsascript(bundleId: String?) -> Bool {
-        let script: String
-        if let bundleId {
-            script = """
-            tell application id "\(bundleId)" to activate
-            delay 0.35
-            tell application "System Events"
-                tell process 1 where frontmost is true
-                    keystroke "v" using command down
-                end tell
-            end tell
-            """
-        } else {
-            script = """
-            tell application "System Events"
-                tell process 1 where frontmost is true
-                    keystroke "v" using command down
-                end tell
-            end tell
-            """
-        }
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", script]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0
-        } catch {
-            return false
-        }
-    }
-
-    private func postPasteShortcut() {
-        postKey(0x09, flags: .maskCommand)
     }
 
     private func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
         let src = CGEventSource(stateID: .hidSystemState)
         let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true)
         down?.flags = flags
-        down?.post(tap: .cghidEventTap)
+        down?.post(tap: .cgSessionEventTap)
         let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false)
         up?.flags = flags
-        up?.post(tap: .cghidEventTap)
+        up?.post(tap: .cgSessionEventTap)
     }
 }
 
