@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, mkdirSync, cpSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, cpSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import type { RecordingsConfig } from "../types/index.js";
@@ -42,7 +42,7 @@ export function loadConfig(configPath?: string): RecordingsConfig {
     try {
       const raw = readFileSync(filePath, "utf-8");
       const fileConfig = JSON.parse(raw) as Partial<RecordingsConfig>;
-      Object.assign(config, fileConfig);
+      Object.assign(config, expandEnvBackedConfig(fileConfig));
     } catch {
       // Ignore invalid config files
     }
@@ -102,6 +102,19 @@ export function loadConfig(configPath?: string): RecordingsConfig {
   return config;
 }
 
+function expandEnvBackedConfig(config: Partial<RecordingsConfig>): Partial<RecordingsConfig> {
+  const expanded = { ...config };
+
+  for (const key of ["openai_api_key", "enhancement_api_key"] as const) {
+    const value = expanded[key];
+    if (typeof value === "string" && value.startsWith("$") && value.length > 1) {
+      expanded[key] = process.env[value.slice(1)] || value;
+    }
+  }
+
+  return expanded;
+}
+
 function findConfigFile(): string | null {
   // Walk up from cwd looking for .recordings/config.json
   let dir = process.cwd();
@@ -150,24 +163,51 @@ function loadSecretKey(keyName: string): string {
   const secretsPath = join(homedir(), ".secrets");
   if (!existsSync(secretsPath)) return "";
 
-  try {
-    const content = readFileSync(secretsPath, "utf-8");
-    const match = content.match(
-      new RegExp(`export\\s+${keyName}\\s*=\\s*"([^"]+)"`)
-    );
-    if (match) return match[1]!;
+  for (const candidate of listSecretFiles(secretsPath)) {
+    try {
+      const content = readFileSync(candidate, "utf-8");
+      const match = content.match(
+        new RegExp(`export\\s+${keyName}\\s*=\\s*"([^"]+)"`)
+      );
+      if (match) return match[1]!;
 
-    const match2 = content.match(
-      new RegExp(`export\\s+${keyName}\\s*=\\s*'([^']+)'`)
-    );
-    if (match2) return match2[1]!;
+      const match2 = content.match(
+        new RegExp(`export\\s+${keyName}\\s*=\\s*'([^']+)'`)
+      );
+      if (match2) return match2[1]!;
 
-    const match3 = content.match(new RegExp(`${keyName}\\s*=\\s*(.+)`));
-    if (match3) return match3[1]!.trim().replace(/^["']|["']$/g, "");
-  } catch {
-    // Ignore
+      const match3 = content.match(new RegExp(`${keyName}\\s*=\\s*(.+)`));
+      if (match3) return match3[1]!.trim().replace(/^["']|["']$/g, "");
+    } catch {
+      // Ignore unreadable secret files
+    }
   }
+
   return "";
+}
+
+function listSecretFiles(path: string): string[] {
+  try {
+    const stats = statSync(path);
+    if (stats.isFile()) return [path];
+    if (!stats.isDirectory()) return [];
+
+    return readdirSync(path)
+      .sort()
+      .flatMap((entry) => {
+        const child = join(path, entry);
+        try {
+          const childStats = statSync(child);
+          if (childStats.isDirectory()) return listSecretFiles(child);
+          if (childStats.isFile() && child.endsWith(".env")) return [child];
+        } catch {
+          // Ignore entries that disappear or are unreadable
+        }
+        return [];
+      });
+  } catch {
+    return [];
+  }
 }
 
 export function ensureDataDir(config: RecordingsConfig): void {

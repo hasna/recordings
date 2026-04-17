@@ -26,7 +26,7 @@ struct SettingsView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text("Required: System Settings → Keyboard → set \"Press 🌐 key to: Do Nothing\"")
+                        Text("Required: Keyboard → set \"Press 🌐 key to: Do Nothing\", then allow Input Monitoring and Accessibility.")
                             .font(.caption)
                     }
                     Button("Open Keyboard Settings") {
@@ -35,15 +35,15 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Shortcut — Custom Key") {
+            Section("Shortcut — Keyboard Key") {
                 HStack {
-                    Text("Toggle Recording")
+                    Text("Recording Shortcut")
                     Spacer()
                     KeyboardShortcuts.Recorder(for: .toggleRecording) { _ in
                         engine.updateStatus()
                     }
                 }
-                Text("Click the field and press any key combo (e.g. ⌥D, ⌃R, F5).")
+                Text("Default is F5 (mic key). Click the field and press any key or key combo you want.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

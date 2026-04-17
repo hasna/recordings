@@ -7,9 +7,8 @@ struct RecordingsApp: App {
     @StateObject private var shortcuts = VoiceShortcuts()
 
     init() {
-        AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        )
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
     var body: some Scene {

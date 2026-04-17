@@ -74,9 +74,9 @@ struct MenuBarPopover: View {
                 .toggleStyle(.switch).controlSize(.small)
             }
 
-            // Custom shortcut
+            // Recording shortcut
             HStack(spacing: 8) {
-                Text("Custom").font(.caption).foregroundStyle(.secondary)
+                Text("Shortcut").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 let current = KeyboardShortcuts.getShortcut(for: .toggleRecording)
                 Text(current?.description ?? "None")
