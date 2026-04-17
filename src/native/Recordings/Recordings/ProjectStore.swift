@@ -100,49 +100,42 @@ final class ProjectStore: ObservableObject {
 
     // MARK: - Auto-detection
 
-    func detectProject(bundleId: String?, pid: pid_t?) -> RecProject? {
+    static func detectProjectStatic(bundleId: String?, pid: pid_t?, projects: [RecProject]) -> RecProject? {
         if let bundleId {
-            if let match = settings.projects.first(where: { $0.appBundleIds?.contains(bundleId) == true }) {
+            if let match = projects.first(where: { $0.appBundleIds?.contains(bundleId) == true }) {
                 return match
             }
         }
 
-        if let bundleId, isTerminal(bundleId) {
-            if let match = detectFromWindowTitle(bundleId: bundleId) {
-                return match
+        if let bundleId, isTerminalStatic(bundleId) {
+            if let title = frontWindowTitleStatic(bundleId: bundleId) {
+                let lower = title.lowercased()
+                for project in projects {
+                    let name = project.name.lowercased()
+                    if lower.contains(name) { return project }
+                    let slug = name.replacingOccurrences(of: " ", with: "-")
+                    if lower.contains(slug) { return project }
+                    if let path = project.path {
+                        let dirName = (path as NSString).lastPathComponent.lowercased()
+                        if lower.contains(dirName) { return project }
+                    }
+                }
             }
         }
 
-        if let pid, let cwd = workingDirectory(for: pid, bundleId: bundleId) {
-            for project in settings.projects {
-                guard let projectPath = project.path else { continue }
-                if cwd.hasPrefix(projectPath) { return project }
+        if let pid, let bundleId, isTerminalStatic(bundleId) {
+            if let cwd = cwdViaProc(pid) ?? findShellChildCwd(of: pid), cwd != "/" {
+                for project in projects {
+                    guard let projectPath = project.path else { continue }
+                    if cwd.hasPrefix(projectPath) { return project }
+                }
             }
         }
 
         return nil
     }
 
-    private func detectFromWindowTitle(bundleId: String) -> RecProject? {
-        guard let title = frontWindowTitle(bundleId: bundleId) else { return nil }
-        let lower = title.lowercased()
-
-        for project in settings.projects {
-            let name = project.name.lowercased()
-            if lower.contains(name) { return project }
-
-            let slug = name.replacingOccurrences(of: " ", with: "-")
-            if lower.contains(slug) { return project }
-
-            if let path = project.path {
-                let dirName = (path as NSString).lastPathComponent.lowercased()
-                if lower.contains(dirName) { return project }
-            }
-        }
-        return nil
-    }
-
-    private func frontWindowTitle(bundleId: String) -> String? {
+    private static func frontWindowTitleStatic(bundleId: String) -> String? {
         let appName = bundleId.components(separatedBy: ".").last ?? ""
         let script = "tell application \"\(appName)\" to get name of front window"
         let proc = Process()
@@ -153,6 +146,9 @@ final class ProjectStore: ObservableObject {
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                if proc.isRunning { proc.terminate() }
+            }
             proc.waitUntilExit()
             guard proc.terminationStatus == 0 else { return nil }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -162,13 +158,7 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    private func workingDirectory(for pid: pid_t, bundleId: String?) -> String? {
-        guard let bundleId, isTerminal(bundleId) else { return nil }
-        let shellPid = findShellChild(of: pid) ?? pid
-        return cwdViaProc(shellPid)
-    }
-
-    private func isTerminal(_ bundleId: String) -> Bool {
+    private static func isTerminalStatic(_ bundleId: String) -> Bool {
         let terminals: Set<String> = [
             "com.apple.Terminal",
             "com.googlecode.iterm2",
@@ -182,7 +172,8 @@ final class ProjectStore: ObservableObject {
         return terminals.contains(bundleId)
     }
 
-    private func findShellChild(of parentPid: pid_t) -> pid_t? {
+    private static func findShellChildCwd(of parentPid: pid_t, depth: Int = 0) -> String? {
+        guard depth < 4 else { return nil }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         proc.arguments = ["-P", "\(parentPid)"]
@@ -192,25 +183,19 @@ final class ProjectStore: ObservableObject {
         do {
             try proc.run()
             proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let pids = String(data: data, encoding: .utf8)?
+            let pids = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .components(separatedBy: "\n")
                 .compactMap { pid_t($0) } ?? []
-
             for child in pids {
-                if let grandchild = findShellChild(of: child) {
-                    let cwd = cwdViaProc(grandchild)
-                    if let cwd, cwd != "/" { return grandchild }
-                }
-                let cwd = cwdViaProc(child)
-                if let cwd, cwd != "/" { return child }
+                if let cwd = cwdViaProc(child), cwd != "/" { return cwd }
+                if let cwd = findShellChildCwd(of: child, depth: depth + 1) { return cwd }
             }
         } catch {}
         return nil
     }
 
-    private func cwdViaProc(_ pid: pid_t) -> String? {
+    private static func cwdViaProc(_ pid: pid_t) -> String? {
         var vnodeInfo = proc_vnodepathinfo()
         let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         let result = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, size)

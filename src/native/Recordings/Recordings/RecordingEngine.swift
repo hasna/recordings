@@ -161,8 +161,18 @@ final class RecordingEngine: ObservableObject {
         targetAppBundleIdentifier = isOwnApp ? nil : frontmostApp?.bundleIdentifier
         targetAppPid = isOwnApp ? nil : frontmostApp?.processIdentifier
 
-        if let store = projectStore, let detected = store.detectProject(bundleId: targetAppBundleIdentifier, pid: targetAppPid) {
-            store.setActive(detected.id)
+        let detectBundleId = targetAppBundleIdentifier
+        let detectPid = targetAppPid
+        if let store = projectStore {
+            let projects = store.settings.projects
+            Task.detached {
+                let detected = ProjectStore.detectProjectStatic(
+                    bundleId: detectBundleId, pid: detectPid, projects: projects
+                )
+                if let detected {
+                    await MainActor.run { store.setActive(detected.id) }
+                }
+            }
         }
 
         let ts = DateFormatter()
