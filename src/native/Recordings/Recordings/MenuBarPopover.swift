@@ -39,7 +39,7 @@ struct MenuBarPopover: View {
             if !projectStore.settings.projects.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.fill")
-                        .foregroundStyle(projectStore.activeProject != nil ? .tint : .secondary)
+                        .foregroundColor(projectStore.activeProject != nil ? .accentColor : .secondary)
                     Menu {
                         Button("None") { projectStore.setActive(nil) }
                         Divider()
