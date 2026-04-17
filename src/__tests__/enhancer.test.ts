@@ -544,6 +544,71 @@ describe("processText", () => {
   });
 });
 
+// ── systemPrompt support ──────────────────────────────────────────────────
+
+describe("systemPrompt support", () => {
+  test("processText passes systemPrompt through to enhanceText", async () => {
+    let capturedMessages: Array<{ role: string; content: string }> = [];
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock((opts: { messages: Array<{ role: string; content: string }> }) => {
+              capturedMessages = opts.messages;
+              return Promise.resolve({
+                choices: [{ message: { content: "Enhanced with context" } }],
+              });
+            }),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    await process("write an email saying thanks", config, "You are working on the Acme project");
+    expect(capturedMessages[0]!.content).toContain("Additional context:");
+    expect(capturedMessages[0]!.content).toContain("Acme project");
+
+    resetEnhancementClient();
+  });
+
+  test("processText works without systemPrompt", async () => {
+    let capturedMessages: Array<{ role: string; content: string }> = [];
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock((opts: { messages: Array<{ role: string; content: string }> }) => {
+              capturedMessages = opts.messages;
+              return Promise.resolve({
+                choices: [{ message: { content: "Enhanced without context" } }],
+              });
+            }),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    await process("write an email saying thanks", config);
+    expect(capturedMessages[0]!.content).not.toContain("Additional context:");
+
+    resetEnhancementClient();
+  });
+
+  test("processText ignores systemPrompt for raw dictation", async () => {
+    const result = await processText("Just a regular note", config, "project context");
+    expect(result.mode).toBe("raw");
+    expect(result.text).toBe("Just a regular note");
+  });
+});
+
 // ── extractInstruction (tested via needsEnhancement) ────────────────────────
 
 describe("extractInstruction behavior via needsEnhancement", () => {
