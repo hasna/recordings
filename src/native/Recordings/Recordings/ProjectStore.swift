@@ -135,7 +135,7 @@ final class ProjectStore: ObservableObject {
         return nil
     }
 
-    private static func frontWindowTitleStatic(bundleId: String) -> String? {
+    nonisolated private static func frontWindowTitleStatic(bundleId: String) -> String? {
         let appName = bundleId.components(separatedBy: ".").last ?? ""
         let script = "tell application \"\(appName)\" to get name of front window"
         let proc = Process()
@@ -158,7 +158,7 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    private static func isTerminalStatic(_ bundleId: String) -> Bool {
+    nonisolated private static func isTerminalStatic(_ bundleId: String) -> Bool {
         let terminals: Set<String> = [
             "com.apple.Terminal",
             "com.googlecode.iterm2",
@@ -172,7 +172,7 @@ final class ProjectStore: ObservableObject {
         return terminals.contains(bundleId)
     }
 
-    private static func findShellChildCwd(of parentPid: pid_t, depth: Int = 0) -> String? {
+    nonisolated private static func findShellChildCwd(of parentPid: pid_t, depth: Int = 0) -> String? {
         guard depth < 4 else { return nil }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
@@ -195,7 +195,7 @@ final class ProjectStore: ObservableObject {
         return nil
     }
 
-    private static func cwdViaProc(_ pid: pid_t) -> String? {
+    nonisolated private static func cwdViaProc(_ pid: pid_t) -> String? {
         var vnodeInfo = proc_vnodepathinfo()
         let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         let result = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, size)
