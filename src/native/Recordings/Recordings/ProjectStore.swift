@@ -100,7 +100,7 @@ final class ProjectStore: ObservableObject {
 
     // MARK: - Auto-detection
 
-    static func detectProjectStatic(bundleId: String?, pid: pid_t?, projects: [RecProject]) -> RecProject? {
+    nonisolated static func detectProjectStatic(bundleId: String?, pid: pid_t?, projects: [RecProject]) -> RecProject? {
         if let bundleId {
             if let match = projects.first(where: { $0.appBundleIds?.contains(bundleId) == true }) {
                 return match
