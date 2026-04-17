@@ -6,6 +6,7 @@ import KeyboardShortcuts
 struct RecordingsApp: App {
     @StateObject private var engine = RecordingEngine()
     @StateObject private var shortcuts = VoiceShortcuts()
+    @StateObject private var projectStore = ProjectStore()
 
     init() {
         AXIsProcessTrustedWithOptions(
@@ -15,8 +16,9 @@ struct RecordingsApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarPopover(engine: engine, shortcuts: shortcuts)
-                .frame(width: 300, height: 360)
+            MenuBarPopover(engine: engine, shortcuts: shortcuts, projectStore: projectStore)
+                .frame(width: 300, height: 380)
+                .onAppear { engine.projectStore = projectStore }
         } label: {
             if engine.isRecording {
                 Image(systemName: "record.circle.fill")
@@ -29,9 +31,8 @@ struct RecordingsApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        // Settings window — opened via SettingsLink
         Settings {
-            SettingsView(engine: engine, shortcuts: shortcuts)
+            SettingsView(engine: engine, shortcuts: shortcuts, projectStore: projectStore)
         }
     }
 }

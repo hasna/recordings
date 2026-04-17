@@ -72,7 +72,9 @@ final class RecordingEngine: ObservableObject {
     private var activeTrigger: RecordingTrigger?
     private var keyboardShortcutIsDown = false
     private var targetAppBundleIdentifier: String?
+    private var targetAppPid: pid_t?
     private let maxDuration = 300
+    var projectStore: ProjectStore?
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -155,7 +157,13 @@ final class RecordingEngine: ObservableObject {
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let frontmostApp = NSWorkspace.shared.frontmostApplication
-        targetAppBundleIdentifier = frontmostApp?.processIdentifier == myPID ? nil : frontmostApp?.bundleIdentifier
+        let isOwnApp = frontmostApp?.processIdentifier == myPID
+        targetAppBundleIdentifier = isOwnApp ? nil : frontmostApp?.bundleIdentifier
+        targetAppPid = isOwnApp ? nil : frontmostApp?.processIdentifier
+
+        if let store = projectStore, let detected = store.detectProject(bundleId: targetAppBundleIdentifier, pid: targetAppPid) {
+            store.setActive(detected.id)
+        }
 
         let ts = DateFormatter()
         ts.dateFormat = "yyyyMMdd'T'HHmmss"
@@ -227,9 +235,11 @@ final class RecordingEngine: ObservableObject {
         recordProcess = nil
         stdinPipe = nil
         let targetAppBundleIdentifier = targetAppBundleIdentifier
+        let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
         activeTrigger = nil
         keyboardShortcutIsDown = false
         self.targetAppBundleIdentifier = nil
+        self.targetAppPid = nil
         let homePath = home
 
         Task.detached {
@@ -246,11 +256,15 @@ final class RecordingEngine: ObservableObject {
             let attrs = try? FileManager.default.attributesOfItem(atPath: audioPath)
             let size = (attrs?[.size] as? Int) ?? 0
             guard size >= 1000 else {
-                await MainActor.run { self.finish("Audio too short — speak longer") }
+                await MainActor.run { self.finish("Audio too short") }
                 return
             }
 
-            let output = CLIRunner.run(["transcribe", audioPath, "--json"], home: homePath)
+            var cliArgs = ["transcribe", audioPath, "--json"]
+            if !systemPrompt.isEmpty {
+                cliArgs += ["--system-prompt", systemPrompt]
+            }
+            let output = CLIRunner.run(cliArgs, home: homePath)
             if let error = CLIRunner.parseError(output) {
                 await MainActor.run { self.finish(error) }
                 return
@@ -280,7 +294,7 @@ final class RecordingEngine: ObservableObject {
 
     private func finish(_ msg: String) {
         isTranscribing = false
-        statusMessage = msg
+        updateStatus()
     }
 
     // MARK: - Command Mode

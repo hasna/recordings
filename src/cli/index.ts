@@ -148,6 +148,7 @@ program
   .description("Transcribe an existing audio file")
   .option("--no-enhance", "Skip AI enhancement")
   .option("-t, --tags <tags>", "Comma-separated tags")
+  .option("--system-prompt <prompt>", "System prompt for enhancement context")
   .action(async (file, opts) => {
     const config = loadConfig();
     ensureDataDir(config);
@@ -156,7 +157,7 @@ program
     console.log(chalk.blue("Transcribing..."));
     const transcription = await transcribeAudio(file, config);
 
-    const processed = await processText(transcription.text, config);
+    const processed = await processText(transcription.text, config, opts.systemPrompt);
     const parentOpts = program.opts();
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 

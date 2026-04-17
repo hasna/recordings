@@ -92,17 +92,12 @@ function extractInstruction(text: string, trigger: string): string {
 export async function enhanceText(
   rawText: string,
   instruction: string,
-  config: RecordingsConfig
+  config: RecordingsConfig,
+  systemPrompt?: string
 ): Promise<EnhancementResult> {
   const client = getEnhancementClient(config);
 
-  try {
-    const response = await client.chat.completions.create({
-      model: config.enhancement_model,
-      messages: [
-        {
-          role: "system",
-          content: `You are a writing assistant. The user has dictated speech that needs to be transformed into polished output.
+  const basePrompt = `You are a writing assistant. The user has dictated speech that needs to be transformed into polished output.
 
 Rules:
 - Output ONLY the enhanced/rewritten text — no explanations, no preamble
@@ -110,7 +105,17 @@ Rules:
 - Fix grammar, structure, and clarity
 - If the user is giving instructions (e.g., "write an email saying..."), produce the actual output (the email), not a description of it
 - If the user says "say it better" or similar, rewrite their preceding text to be clearer and more professional
-- Match the appropriate tone (formal for business, casual for personal)`,
+- Match the appropriate tone (formal for business, casual for personal)`;
+
+  const fullPrompt = systemPrompt ? `${basePrompt}\n\nAdditional context:\n${systemPrompt}` : basePrompt;
+
+  try {
+    const response = await client.chat.completions.create({
+      model: config.enhancement_model,
+      messages: [
+        {
+          role: "system",
+          content: fullPrompt,
         },
         {
           role: "user",
@@ -141,7 +146,8 @@ Rules:
  */
 export async function processText(
   rawText: string,
-  config: RecordingsConfig
+  config: RecordingsConfig,
+  systemPrompt?: string
 ): Promise<{
   text: string;
   mode: "raw" | "enhanced";
@@ -157,7 +163,7 @@ export async function processText(
     return { text: rawText, mode: "raw", enhancement_model: null };
   }
 
-  const result = await enhanceText(rawText, detection.instruction, config);
+  const result = await enhanceText(rawText, detection.instruction, config, systemPrompt);
 
   return {
     text: result.enhanced,

@@ -4,6 +4,7 @@ import KeyboardShortcuts
 struct MenuBarPopover: View {
     @ObservedObject var engine: RecordingEngine
     @ObservedObject var shortcuts: VoiceShortcuts
+    @ObservedObject var projectStore: ProjectStore
     @State private var copiedIndex: Int?
 
     var body: some View {
@@ -11,6 +12,11 @@ struct MenuBarPopover: View {
             header
                 .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
             Divider()
+            if !projectStore.settings.projects.isEmpty {
+                projectBar
+                    .padding(.horizontal, 16).padding(.vertical, 6)
+                Divider()
+            }
             recordingArea
                 .padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
@@ -33,6 +39,29 @@ struct MenuBarPopover: View {
                 Text(shortcut.description)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    // MARK: - Project Bar
+
+    private var projectBar: some View {
+        HStack {
+            Menu {
+                Button("None") { projectStore.setActive(nil) }
+                Divider()
+                ForEach(projectStore.settings.projects) { project in
+                    Button(project.name) { projectStore.setActive(project.id) }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder")
+                    Text(projectStore.activeProject?.name ?? "No project")
+                        .foregroundStyle(projectStore.activeProject == nil ? .secondary : .primary)
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            Spacer()
         }
     }
 
@@ -84,13 +113,7 @@ struct MenuBarPopover: View {
     private var recentList: some View {
         Group {
             if engine.recentTranscriptions.isEmpty {
-                VStack {
-                    Spacer()
-                    Text("No transcriptions yet")
-                        .foregroundStyle(.quaternary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                Spacer()
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
