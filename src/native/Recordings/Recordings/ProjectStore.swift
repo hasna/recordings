@@ -107,6 +107,12 @@ final class ProjectStore: ObservableObject {
             }
         }
 
+        if let bundleId, isTerminal(bundleId) {
+            if let match = detectFromWindowTitle(bundleId: bundleId) {
+                return match
+            }
+        }
+
         if let pid, let cwd = workingDirectory(for: pid, bundleId: bundleId) {
             for project in settings.projects {
                 guard let projectPath = project.path else { continue }
@@ -115,6 +121,45 @@ final class ProjectStore: ObservableObject {
         }
 
         return nil
+    }
+
+    private func detectFromWindowTitle(bundleId: String) -> RecProject? {
+        guard let title = frontWindowTitle(bundleId: bundleId) else { return nil }
+        let lower = title.lowercased()
+
+        for project in settings.projects {
+            let name = project.name.lowercased()
+            if lower.contains(name) { return project }
+
+            let slug = name.replacingOccurrences(of: " ", with: "-")
+            if lower.contains(slug) { return project }
+
+            if let path = project.path {
+                let dirName = (path as NSString).lastPathComponent.lowercased()
+                if lower.contains(dirName) { return project }
+            }
+        }
+        return nil
+    }
+
+    private func frontWindowTitle(bundleId: String) -> String? {
+        let appName = bundleId.components(separatedBy: ".").last ?? ""
+        let script = "tell application \"\(appName)\" to get name of front window"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return nil
+        }
     }
 
     private func workingDirectory(for pid: pid_t, bundleId: String?) -> String? {
