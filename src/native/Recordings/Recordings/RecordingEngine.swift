@@ -335,6 +335,9 @@ final class RecordingEngine: ObservableObject {
         pb.clearContents()
         pb.setString(text, forType: .string)
 
+        let trusted = AXIsProcessTrusted()
+        fputs("[Paste] AXIsProcessTrusted=\(trusted)\n", stderr)
+
         let myPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
         let targetApp = runningApps.first(where: {
@@ -346,24 +349,51 @@ final class RecordingEngine: ObservableObject {
         })
 
         let localName = targetApp?.localizedName ?? "frontmost app"
+        let bundleId = targetApp?.bundleIdentifier ?? "nil"
+        fputs("[Paste] target=\(localName) bundle=\(bundleId) targetParam=\(targetAppBundleIdentifier ?? "nil")\n", stderr)
+
         statusMessage = "Pasting into \(localName)..."
 
-        targetApp?.activate()
+        if let app = targetApp {
+            app.activate()
+            fputs("[Paste] activate() called on \(localName)\n", stderr)
+        } else {
+            fputs("[Paste] WARNING: no target app found\n", stderr)
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            self.postKey(0x09, flags: .maskCommand)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            self.postCmdV()
             self.statusMessage = "Pasted: \(String(text.prefix(50)))"
         }
     }
 
+    private func postCmdV() {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) else {
+            fputs("[Paste] ERROR: CGEvent creation failed\n", stderr)
+            return
+        }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cgSessionEventTap)
+        usleep(10_000)
+        up.post(tap: .cgSessionEventTap)
+        fputs("[Paste] CGEvent Cmd+V posted to cgSessionEventTap\n", stderr)
+    }
+
     private func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true)
-        down?.flags = flags
-        down?.post(tap: .cgSessionEventTap)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false)
-        up?.flags = flags
-        up?.post(tap: .cgSessionEventTap)
+        let src = CGEventSource(stateID: .combinedSessionState)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) else {
+            fputs("[Paste] ERROR: CGEvent creation failed for key \(key)\n", stderr)
+            return
+        }
+        down.flags = flags
+        up.flags = flags
+        down.post(tap: .cgSessionEventTap)
+        usleep(10_000)
+        up.post(tap: .cgSessionEventTap)
     }
 }
 
