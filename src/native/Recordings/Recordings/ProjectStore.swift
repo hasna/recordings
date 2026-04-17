@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct RecProject: Codable, Identifiable, Sendable {
     let id: String
@@ -118,8 +119,8 @@ final class ProjectStore: ObservableObject {
 
     private func workingDirectory(for pid: pid_t, bundleId: String?) -> String? {
         guard let bundleId, isTerminal(bundleId) else { return nil }
-        let childPid = frontmostChildPid(of: pid) ?? pid
-        return cwdOfProcess(childPid)
+        let shellPid = findShellChild(of: pid) ?? pid
+        return cwdViaProc(shellPid)
     }
 
     private func isTerminal(_ bundleId: String) -> Bool {
@@ -136,10 +137,10 @@ final class ProjectStore: ObservableObject {
         return terminals.contains(bundleId)
     }
 
-    private func frontmostChildPid(of parentPid: pid_t) -> pid_t? {
+    private func findShellChild(of parentPid: pid_t) -> pid_t? {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = ["-c", "pgrep -P \(parentPid) | tail -1"]
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        proc.arguments = ["-P", "\(parentPid)"]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
@@ -147,29 +148,33 @@ final class ProjectStore: ObservableObject {
             try proc.run()
             proc.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return pid_t(str)
-        } catch {
-            return nil
-        }
-    }
+            let pids = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: "\n")
+                .compactMap { pid_t($0) } ?? []
 
-    private func cwdOfProcess(_ pid: pid_t) -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        proc.arguments = ["-p", "\(pid)", "-Fn", "-d", "cwd"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            for line in output.components(separatedBy: "\n") where line.hasPrefix("n/") {
-                return String(line.dropFirst())
+            for child in pids {
+                if let grandchild = findShellChild(of: child) {
+                    let cwd = cwdViaProc(grandchild)
+                    if let cwd, cwd != "/" { return grandchild }
+                }
+                let cwd = cwdViaProc(child)
+                if let cwd, cwd != "/" { return child }
             }
         } catch {}
         return nil
+    }
+
+    private func cwdViaProc(_ pid: pid_t) -> String? {
+        var vnodeInfo = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let result = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, size)
+        guard result > 0 else { return nil }
+        return withUnsafePointer(to: vnodeInfo.pvi_cdir.vip_path) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                let s = String(cString: $0)
+                return s.isEmpty ? nil : s
+            }
+        }
     }
 }
