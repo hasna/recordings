@@ -330,13 +330,26 @@ final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
+    private static let debugLog = "/tmp/recordings-paste.log"
+
+    private func logPaste(_ msg: String) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+        if let fh = FileHandle(forWritingAtPath: Self.debugLog) {
+            fh.seekToEndOfFile()
+            fh.write(Data(line.utf8))
+            fh.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: Self.debugLog, contents: Data(line.utf8))
+        }
+    }
+
     func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
 
         let trusted = AXIsProcessTrusted()
-        fputs("[Paste] AXIsProcessTrusted=\(trusted)\n", stderr)
+        logPaste("AXIsProcessTrusted=\(trusted)")
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
@@ -350,49 +363,64 @@ final class RecordingEngine: ObservableObject {
 
         let localName = targetApp?.localizedName ?? "frontmost app"
         let bundleId = targetApp?.bundleIdentifier ?? "nil"
-        fputs("[Paste] target=\(localName) bundle=\(bundleId) targetParam=\(targetAppBundleIdentifier ?? "nil")\n", stderr)
+        logPaste("target=\(localName) bundle=\(bundleId) param=\(targetAppBundleIdentifier ?? "nil")")
 
         statusMessage = "Pasting into \(localName)..."
 
         if let app = targetApp {
             app.activate()
-            fputs("[Paste] activate() called on \(localName)\n", stderr)
+            logPaste("activate() called on pid=\(app.processIdentifier)")
         } else {
-            fputs("[Paste] WARNING: no target app found\n", stderr)
+            logPaste("WARNING: no target app found, will paste to current frontmost")
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.postCmdV()
+            self.doPaste()
             self.statusMessage = "Pasted: \(String(text.prefix(50)))"
         }
     }
 
-    private func postCmdV() {
-        let src = CGEventSource(stateID: .combinedSessionState)
+    private func doPaste() {
+        // Strategy 1: CGEvent to cgSessionEventTap (OpenWhispr approach)
+        let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true),
               let up = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) else {
-            fputs("[Paste] ERROR: CGEvent creation failed\n", stderr)
+            logPaste("ERROR: CGEvent creation failed")
             return
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cgSessionEventTap)
-        usleep(10_000)
+        usleep(20_000)
         up.post(tap: .cgSessionEventTap)
-        fputs("[Paste] CGEvent Cmd+V posted to cgSessionEventTap\n", stderr)
+        logPaste("CGEvent Cmd+V posted (hidSystemState -> cgSessionEventTap)")
+
+        // Strategy 2 fallback: also try cghidEventTap after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let clipNow = NSPasteboard.general.string(forType: .string) ?? ""
+            self.logPaste("Clipboard still has text: \(clipNow.prefix(30))...")
+
+            // If clipboard hasn't changed, the paste likely didn't work — try HID level
+            let src2 = CGEventSource(stateID: .hidSystemState)
+            guard let d2 = CGEvent(keyboardEventSource: src2, virtualKey: 0x09, keyDown: true),
+                  let u2 = CGEvent(keyboardEventSource: src2, virtualKey: 0x09, keyDown: false) else { return }
+            d2.flags = .maskCommand
+            u2.flags = .maskCommand
+            d2.post(tap: .cghidEventTap)
+            usleep(20_000)
+            u2.post(tap: .cghidEventTap)
+            self.logPaste("Fallback: CGEvent Cmd+V posted (hidSystemState -> cghidEventTap)")
+        }
     }
 
     private func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
-        let src = CGEventSource(stateID: .combinedSessionState)
+        let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) else {
-            fputs("[Paste] ERROR: CGEvent creation failed for key \(key)\n", stderr)
-            return
-        }
+              let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) else { return }
         down.flags = flags
         up.flags = flags
         down.post(tap: .cgSessionEventTap)
-        usleep(10_000)
+        usleep(20_000)
         up.post(tap: .cgSessionEventTap)
     }
 }
