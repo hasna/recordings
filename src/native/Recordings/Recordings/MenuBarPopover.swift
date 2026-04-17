@@ -12,11 +12,6 @@ struct MenuBarPopover: View {
             header
                 .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
             Divider()
-            if !projectStore.settings.projects.isEmpty {
-                projectBar
-                    .padding(.horizontal, 16).padding(.vertical, 6)
-                Divider()
-            }
             recordingArea
                 .padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
@@ -30,38 +25,45 @@ struct MenuBarPopover: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack {
-            Image(systemName: "mic.fill")
-                .foregroundStyle(.tint)
-            Text("Hasna Recordings")
-            Spacer()
-            if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
-                Text(shortcut.description)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: - Project Bar
-
-    private var projectBar: some View {
-        HStack {
-            Menu {
-                Button("None") { projectStore.setActive(nil) }
-                Divider()
-                ForEach(projectStore.settings.projects) { project in
-                    Button(project.name) { projectStore.setActive(project.id) }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "mic.fill")
+                    .foregroundStyle(.tint)
+                Text("Hasna Recordings")
+                Spacer()
+                if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
+                    Text(shortcut.description)
+                        .foregroundStyle(.secondary)
                 }
-            } label: {
+            }
+            if !projectStore.settings.projects.isEmpty {
                 HStack(spacing: 4) {
-                    Image(systemName: "folder")
-                    Text(projectStore.activeProject?.name ?? "No project")
-                        .foregroundStyle(projectStore.activeProject == nil ? .secondary : .primary)
+                    Image(systemName: "folder.fill")
+                        .foregroundStyle(projectStore.activeProject != nil ? .tint : .secondary)
+                    Menu {
+                        Button("None") { projectStore.setActive(nil) }
+                        Divider()
+                        ForEach(projectStore.settings.projects) { project in
+                            Button {
+                                projectStore.setActive(project.id)
+                            } label: {
+                                HStack {
+                                    Text(project.name)
+                                    if project.id == projectStore.settings.activeProjectId {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Text(projectStore.activeProject?.name ?? "No project")
+                            .foregroundStyle(projectStore.activeProject == nil ? .secondary : .primary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    Spacer()
                 }
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            Spacer()
         }
     }
 
@@ -70,21 +72,40 @@ struct MenuBarPopover: View {
     private var recordingArea: some View {
         Group {
             if engine.isRecording {
-                HStack {
-                    Circle().fill(.red).frame(width: 8, height: 8)
-                    Text(fmt(engine.recordingDuration))
-                        .monospacedDigit()
-                    Spacer()
-                    Button("Stop") { engine.stopAndTranscribe() }
-                        .controlSize(.small)
+                VStack(spacing: 6) {
+                    HStack {
+                        Circle().fill(.red).frame(width: 8, height: 8)
+                        Text(fmt(engine.recordingDuration))
+                            .monospacedDigit()
+                        Spacer()
+                        Button("Stop") { engine.stopAndTranscribe() }
+                            .controlSize(.small)
+                    }
+                    if let project = projectStore.activeProject {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.fill").foregroundStyle(.tint)
+                            Text(project.name).foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
                 }
                 .padding(10)
                 .glassEffect(.regular)
             } else if engine.isTranscribing {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Transcribing...")
-                        .foregroundStyle(.secondary)
+                VStack(spacing: 6) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Transcribing...")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    if let project = projectStore.activeProject {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.fill").foregroundStyle(.tint)
+                            Text(project.name).foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(10)
