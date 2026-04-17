@@ -6,6 +6,12 @@ struct RecordingsApp: App {
     @StateObject private var engine = RecordingEngine()
     @StateObject private var shortcuts = VoiceShortcuts()
 
+    init() {
+        AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        )
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuBarPopover(engine: engine, shortcuts: shortcuts)
