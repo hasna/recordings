@@ -330,26 +330,10 @@ final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    private static let debugLog = "/tmp/recordings-paste.log"
-
-    private func logPaste(_ msg: String) {
-        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
-        if let fh = FileHandle(forWritingAtPath: Self.debugLog) {
-            fh.seekToEndOfFile()
-            fh.write(Data(line.utf8))
-            fh.closeFile()
-        } else {
-            FileManager.default.createFile(atPath: Self.debugLog, contents: Data(line.utf8))
-        }
-    }
-
     func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
-
-        let trusted = AXIsProcessTrusted()
-        logPaste("AXIsProcessTrusted=\(trusted)")
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
@@ -362,54 +346,13 @@ final class RecordingEngine: ObservableObject {
         })
 
         let localName = targetApp?.localizedName ?? "frontmost app"
-        let bundleId = targetApp?.bundleIdentifier ?? "nil"
-        logPaste("target=\(localName) bundle=\(bundleId) param=\(targetAppBundleIdentifier ?? "nil")")
-
         statusMessage = "Pasting into \(localName)..."
 
-        if let app = targetApp {
-            app.activate()
-            logPaste("activate() called on pid=\(app.processIdentifier)")
-        } else {
-            logPaste("WARNING: no target app found, will paste to current frontmost")
-        }
+        targetApp?.activate()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.doPaste()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.postKey(0x09, flags: .maskCommand)
             self.statusMessage = "Pasted: \(String(text.prefix(50)))"
-        }
-    }
-
-    private func doPaste() {
-        // Strategy 1: CGEvent to cgSessionEventTap (OpenWhispr approach)
-        let src = CGEventSource(stateID: .hidSystemState)
-        guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) else {
-            logPaste("ERROR: CGEvent creation failed")
-            return
-        }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
-        down.post(tap: .cgSessionEventTap)
-        usleep(20_000)
-        up.post(tap: .cgSessionEventTap)
-        logPaste("CGEvent Cmd+V posted (hidSystemState -> cgSessionEventTap)")
-
-        // Strategy 2 fallback: also try cghidEventTap after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            let clipNow = NSPasteboard.general.string(forType: .string) ?? ""
-            self.logPaste("Clipboard still has text: \(clipNow.prefix(30))...")
-
-            // If clipboard hasn't changed, the paste likely didn't work — try HID level
-            let src2 = CGEventSource(stateID: .hidSystemState)
-            guard let d2 = CGEvent(keyboardEventSource: src2, virtualKey: 0x09, keyDown: true),
-                  let u2 = CGEvent(keyboardEventSource: src2, virtualKey: 0x09, keyDown: false) else { return }
-            d2.flags = .maskCommand
-            u2.flags = .maskCommand
-            d2.post(tap: .cghidEventTap)
-            usleep(20_000)
-            u2.post(tap: .cghidEventTap)
-            self.logPaste("Fallback: CGEvent Cmd+V posted (hidSystemState -> cghidEventTap)")
         }
     }
 
