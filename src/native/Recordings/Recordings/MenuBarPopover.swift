@@ -146,9 +146,7 @@ struct MenuBarPopover: View {
 
     private var footerMenu: some View {
         VStack(spacing: 0) {
-            Button {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            } label: {
+            SettingsLink {
                 HStack {
                     Text("Settings...")
                     Spacer()
