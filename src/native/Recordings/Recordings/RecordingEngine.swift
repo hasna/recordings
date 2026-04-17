@@ -163,18 +163,14 @@ final class RecordingEngine: ObservableObject {
         targetAppBundleIdentifier = isOwnApp ? nil : frontmostApp?.bundleIdentifier
         targetAppPid = isOwnApp ? nil : frontmostApp?.processIdentifier
 
-        let detectBundleId = targetAppBundleIdentifier
-        let detectPid = targetAppPid
         if let store = projectStore {
+            let windowTitle = Self.focusedWindowTitle(pid: frontmostApp?.processIdentifier)
             let projects = store.settings.projects
-            Task.detached {
-                let detected = ProjectStore.detectProjectStatic(
-                    bundleId: detectBundleId, pid: detectPid, projects: projects
-                )
-                if let detected {
-                    await MainActor.run { store.setActive(detected.id) }
-                }
+            let detected = ProjectStore.matchProject(windowTitle: windowTitle, bundleId: targetAppBundleIdentifier, projects: projects)
+            if let detected {
+                store.setActive(detected.id)
             }
+        }
         }
 
         let ts = DateFormatter()
@@ -341,6 +337,20 @@ final class RecordingEngine: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: - Window Title (Accessibility API)
+
+    private static func focusedWindowTitle(pid: pid_t?) -> String? {
+        guard let pid else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
+              let window = windowRef else { return nil }
+        var titleRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef) == .success,
+              let title = titleRef as? String else { return nil }
+        return title
     }
 
     // MARK: - Paste
