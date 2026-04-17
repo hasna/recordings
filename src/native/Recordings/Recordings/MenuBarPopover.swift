@@ -6,6 +6,17 @@ struct MenuBarPopover: View {
     @ObservedObject var shortcuts: VoiceShortcuts
     @ObservedObject var projectStore: ProjectStore
     @State private var copiedIndex: Int?
+    @State private var filterProjectId: String?
+
+    private var filteredTranscriptions: [TranscriptionResult] {
+        guard let filter = filterProjectId else {
+            return engine.recentTranscriptions
+        }
+        if filter == "__none__" {
+            return engine.recentTranscriptions.filter { $0.projectId == nil }
+        }
+        return engine.recentTranscriptions.filter { $0.projectId == filter }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,6 +26,11 @@ struct MenuBarPopover: View {
             recordingArea
                 .padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
+            if !engine.recentTranscriptions.isEmpty {
+                filterBar
+                    .padding(.horizontal, 16).padding(.vertical, 6)
+                Divider()
+            }
             recentList
                 .frame(maxHeight: 200)
             Divider()
@@ -129,25 +145,56 @@ struct MenuBarPopover: View {
         }
     }
 
+    // MARK: - Filter Bar
+
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                FilterChip(label: "All", isActive: filterProjectId == nil) {
+                    filterProjectId = nil
+                }
+                ForEach(projectStore.settings.projects) { project in
+                    let count = engine.recentTranscriptions.filter { $0.projectId == project.id }.count
+                    if count > 0 {
+                        FilterChip(
+                            label: "\(project.name) (\(count))",
+                            isActive: filterProjectId == project.id
+                        ) {
+                            filterProjectId = filterProjectId == project.id ? nil : project.id
+                        }
+                    }
+                }
+                let noProjectCount = engine.recentTranscriptions.filter { $0.projectId == nil }.count
+                if noProjectCount > 0 {
+                    FilterChip(
+                        label: "No project (\(noProjectCount))",
+                        isActive: filterProjectId == "__none__"
+                    ) {
+                        filterProjectId = filterProjectId == "__none__" ? nil : "__none__"
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Recent
 
     private var recentList: some View {
         Group {
-            if engine.recentTranscriptions.isEmpty {
+            if filteredTranscriptions.isEmpty {
                 Spacer()
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(engine.recentTranscriptions.indices, id: \.self) { i in
+                        ForEach(filteredTranscriptions.indices, id: \.self) { i in
+                            let item = filteredTranscriptions[i]
                             TranscriptionRow(
-                                item: engine.recentTranscriptions[i],
+                                item: item,
+                                showProject: filterProjectId == nil,
                                 isCopied: copiedIndex == i
                             ) {
                                 NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(
-                                    engine.recentTranscriptions[i].displayText,
-                                    forType: .string
-                                )
+                                NSPasteboard.general.setString(item.displayText, forType: .string)
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     copiedIndex = i
                                 }
@@ -200,24 +247,56 @@ struct MenuBarPopover: View {
     }
 }
 
+// MARK: - Filter Chip
+
+struct FilterChip: View {
+    let label: String
+    let isActive: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isActive ? .primary : .secondary)
+    }
+}
+
+// MARK: - Transcription Row
+
 struct TranscriptionRow: View {
     let item: TranscriptionResult
+    let showProject: Bool
     let isCopied: Bool
     let onCopy: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(item.displayText)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(item.displayText)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            if isCopied {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(.green)
-                    .transition(.scale.combined(with: .opacity))
-            } else {
-                Text(relativeTime(item.timestamp))
-                    .foregroundStyle(.tertiary)
+                if isCopied {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.green)
+                        .transition(.scale.combined(with: .opacity))
+                } else {
+                    Text(relativeTime(item.timestamp))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            if showProject, let name = item.projectName {
+                HStack(spacing: 3) {
+                    Image(systemName: "folder")
+                    Text(name)
+                }
+                .foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 4)

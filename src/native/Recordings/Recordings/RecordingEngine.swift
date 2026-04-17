@@ -37,6 +37,8 @@ struct TranscriptionResult: Sendable {
     let rawText: String
     let processedText: String?
     let timestamp: Date
+    let projectId: String?
+    let projectName: String?
     var displayText: String { processedText ?? rawText }
 }
 
@@ -246,6 +248,8 @@ final class RecordingEngine: ObservableObject {
         stdinPipe = nil
         let targetAppBundleIdentifier = targetAppBundleIdentifier
         let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
+        let activeProjectId = projectStore?.settings.activeProjectId
+        let activeProjectName = projectStore?.activeProject?.name
         activeTrigger = nil
         keyboardShortcutIsDown = false
         self.targetAppBundleIdentifier = nil
@@ -293,7 +297,7 @@ final class RecordingEngine: ObservableObject {
                 } else {
                     self.pasteIntoFrontApp(text, targetAppBundleIdentifier: targetAppBundleIdentifier)
                     self.recentTranscriptions.insert(
-                        TranscriptionResult(rawText: text, processedText: nil, timestamp: Date()), at: 0
+                        TranscriptionResult(rawText: text, processedText: nil, timestamp: Date(), projectId: activeProjectId, projectName: activeProjectName), at: 0
                     )
                     if self.recentTranscriptions.count > 20 { self.recentTranscriptions.removeLast() }
                     // statusMessage updated by pasteIntoFrontApp

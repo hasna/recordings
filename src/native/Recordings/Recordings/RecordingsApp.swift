@@ -17,7 +17,7 @@ struct RecordingsApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuBarPopover(engine: engine, shortcuts: shortcuts, projectStore: projectStore)
-                .frame(width: 300, height: 380)
+                .frame(width: 320, height: 420)
                 .onAppear { engine.projectStore = projectStore }
         } label: {
             if engine.isRecording {
