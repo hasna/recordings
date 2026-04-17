@@ -1,3 +1,4 @@
+@preconcurrency import Cocoa
 import SwiftUI
 import KeyboardShortcuts
 
@@ -7,8 +8,9 @@ struct RecordingsApp: App {
     @StateObject private var shortcuts = VoiceShortcuts()
 
     init() {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        )
     }
 
     var body: some Scene {
