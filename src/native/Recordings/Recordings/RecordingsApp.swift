@@ -16,7 +16,7 @@ struct RecordingsApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuBarPopover(engine: engine, shortcuts: shortcuts)
-                .frame(width: 320, height: 440)
+                .frame(width: 300, height: 360)
         } label: {
             if engine.isRecording {
                 Image(systemName: "record.circle.fill")

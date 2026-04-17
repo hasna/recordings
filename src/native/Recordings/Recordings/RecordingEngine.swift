@@ -137,20 +137,7 @@ final class RecordingEngine: ObservableObject {
 
     func updateStatus() {
         if isRecording || isTranscribing { return }
-
-        var parts: [String] = []
-        if useFnKey {
-            parts.append("fn (hold)")
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
-            parts.append(shortcut.description)
-        }
-
-        if parts.isEmpty {
-            statusMessage = "No shortcut set — enable fn or set a recording shortcut"
-        } else {
-            statusMessage = "Ready — hold \(parts.joined(separator: " or ")) to record"
-        }
+        statusMessage = "Ready"
     }
 
     // MARK: - Toggle
@@ -345,14 +332,11 @@ final class RecordingEngine: ObservableObject {
             $0.activationPolicy == .regular && $0.processIdentifier != myPID
         })
 
-        let localName = targetApp?.localizedName ?? "frontmost app"
-        statusMessage = "Pasting into \(localName)..."
-
         targetApp?.activate()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.postKey(0x09, flags: .maskCommand)
-            self.statusMessage = "Pasted: \(String(text.prefix(50)))"
+            self.updateStatus()
         }
     }
 

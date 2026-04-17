@@ -17,43 +17,16 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
-            Section("Shortcut — fn Key") {
-                Toggle("Use fn (Globe) key", isOn: $engine.useFnKey)
-
-                if engine.useFnKey {
-                    Text("Hold fn to record, release to stop and paste.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        Text("Required: Keyboard → set \"Press 🌐 key to: Do Nothing\", then allow Input Monitoring and Accessibility.")
-                            .font(.caption)
-                    }
-                    Button("Open Keyboard Settings") {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension")!)
-                    }.controlSize(.small)
-                }
-            }
-
-            Section("Shortcut — Keyboard Key") {
+            Section("Recording Shortcut") {
                 HStack {
-                    Text("Recording Shortcut")
+                    Text("Shortcut")
                     Spacer()
                     KeyboardShortcuts.Recorder(for: .toggleRecording) { _ in
                         engine.updateStatus()
                     }
                 }
-                Text("Default is F5 (mic key). Click the field and press any key or key combo you want.")
+                Text("Hold to record, release to transcribe and paste.")
                     .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("Recording") {
-                Picker("Mode", selection: $engine.mode) {
-                    ForEach(RecordingMode.allCases) { m in
-                        Label(m.rawValue, systemImage: m.icon).tag(m)
-                    }
-                }
-                Toggle("Whisper Mode", isOn: $engine.isWhisperMode)
             }
         }
         .formStyle(.grouped).padding()
