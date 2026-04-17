@@ -17,8 +17,7 @@ struct MenuBarPopover: View {
             recentList
                 .frame(maxHeight: 200)
             Divider()
-            footer
-                .padding(.horizontal, 16).padding(.vertical, 8)
+            footerMenu
         }
     }
 
@@ -27,16 +26,12 @@ struct MenuBarPopover: View {
     private var header: some View {
         HStack {
             Image(systemName: "mic.fill")
-                .font(.title3)
                 .foregroundStyle(.tint)
             Text("Hasna Recordings")
-                .font(.headline)
             Spacer()
             if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
                 Text(shortcut.description)
-                    .font(.system(.caption, design: .monospaced))
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .glassEffect(.regular)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -46,40 +41,34 @@ struct MenuBarPopover: View {
     private var recordingArea: some View {
         Group {
             if engine.isRecording {
-                HStack(spacing: 10) {
+                HStack {
                     Circle().fill(.red).frame(width: 8, height: 8)
                     Text(fmt(engine.recordingDuration))
-                        .font(.system(.body, design: .monospaced))
                         .monospacedDigit()
                     Spacer()
                     Button("Stop") { engine.stopAndTranscribe() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red)
                         .controlSize(.small)
                 }
                 .padding(10)
-                .glassEffect(.regular.tint(.red.opacity(0.3)))
+                .glassEffect(.regular)
             } else if engine.isTranscribing {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Transcribing...")
-                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(10)
                 .glassEffect(.regular)
             } else {
-                VStack(spacing: 8) {
+                VStack(spacing: 6) {
                     Button { engine.startRecording() } label: {
                         Label("Record", systemImage: "mic.circle.fill")
                     }
-                    .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
 
                     if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
                         Text("or hold \(shortcut.description)")
-                            .font(.caption)
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -98,7 +87,6 @@ struct MenuBarPopover: View {
                 VStack {
                     Spacer()
                     Text("No transcriptions yet")
-                        .font(.caption)
                         .foregroundStyle(.quaternary)
                     Spacer()
                 }
@@ -133,16 +121,35 @@ struct MenuBarPopover: View {
 
     // MARK: - Footer
 
-    private var footer: some View {
-        HStack {
-            SettingsLink {
-                Image(systemName: "gear")
+    private var footerMenu: some View {
+        VStack(spacing: 0) {
+            Button {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            } label: {
+                HStack {
+                    Text("Settings...")
+                    Spacer()
+                    Text("⌘,").foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 16).padding(.vertical, 6)
             }
-            .buttonStyle(.borderless)
-            Spacer()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+
+            Divider()
+
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                HStack {
+                    Text("Quit Hasna Recordings")
+                    Spacer()
+                    Text("⌘Q").foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 16).padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -159,18 +166,15 @@ struct TranscriptionRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Text(item.displayText)
-                .font(.caption)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if isCopied {
                 Image(systemName: "checkmark")
-                    .font(.caption2)
                     .foregroundStyle(.green)
                     .transition(.scale.combined(with: .opacity))
             } else {
                 Text(relativeTime(item.timestamp))
-                    .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -179,11 +183,7 @@ struct TranscriptionRow: View {
         .contentShape(Rectangle())
         .onTapGesture { onCopy() }
         .onHover { hovering in
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
     }
 
