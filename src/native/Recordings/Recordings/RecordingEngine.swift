@@ -171,7 +171,6 @@ final class RecordingEngine: ObservableObject {
                 store.setActive(detected.id)
             }
         }
-        }
 
         let ts = DateFormatter()
         ts.dateFormat = "yyyyMMdd'T'HHmmss"
