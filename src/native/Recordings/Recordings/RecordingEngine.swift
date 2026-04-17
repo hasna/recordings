@@ -4,7 +4,7 @@ import KeyboardShortcuts
 // MARK: - Custom shortcut (not fn — fn is handled by FnKeyMonitor)
 
 extension KeyboardShortcuts.Name {
-    static let toggleRecording = Self("toggleRecording")
+    static let toggleRecording = Self("toggleRecording", default: .init(.f5))
 }
 
 // MARK: - Recording Mode
@@ -24,9 +24,9 @@ enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
     }
     var hint: String {
         switch self {
-        case .pushToTalk: return "Hold fn to record, release to stop & paste"
-        case .dictation: return "Hold fn to dictate, release to stop & paste"
-        case .command: return "Select text, hold fn, speak to rewrite"
+        case .pushToTalk: return "Hold F5 or your chosen shortcut to record, then release to paste"
+        case .dictation: return "Hold F5 or your chosen shortcut to dictate, then release to paste"
+        case .command: return "Select text, then hold F5 or your chosen shortcut and release to rewrite"
         }
     }
 }
@@ -40,13 +40,19 @@ struct TranscriptionResult: Sendable {
     var displayText: String { processedText ?? rawText }
 }
 
+enum RecordingTrigger {
+    case manual
+    case fnKey
+    case keyboardShortcut
+}
+
 // MARK: - Recording Engine
 
 @MainActor
 final class RecordingEngine: ObservableObject {
     @Published var isRecording = false
     @Published var mode: RecordingMode = .pushToTalk
-    @Published var useFnKey: Bool = true {
+    @Published var useFnKey: Bool = false {
         didSet {
             UserDefaults.standard.set(useFnKey, forKey: "useFnKey")
             updateFnMonitor()
@@ -63,6 +69,9 @@ final class RecordingEngine: ObservableObject {
     private var stdinPipe: Pipe?
     private var currentAudioPath: String?
     private var recordingTimer: Timer?
+    private var activeTrigger: RecordingTrigger?
+    private var keyboardShortcutIsDown = false
+    private var targetAppBundleIdentifier: String?
     private let maxDuration = 300
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
@@ -75,27 +84,40 @@ final class RecordingEngine: ObservableObject {
         try? FileManager.default.createDirectory(atPath: audioDir, withIntermediateDirectories: true)
 
         // Load preferences
-        useFnKey = UserDefaults.standard.object(forKey: "useFnKey") as? Bool ?? true
+        useFnKey = UserDefaults.standard.object(forKey: "useFnKey") as? Bool ?? false
+        if KeyboardShortcuts.getShortcut(for: .toggleRecording) == nil {
+            KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
+        }
 
         // Set up fn key monitor — hold fn to record, release to stop (like WisprFlow)
         fnMonitor.onFnKeyDown = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.useFnKey, !self.isRecording else { return }
-                self.startRecording()
+                self.startRecording(trigger: .fnKey)
             }
         }
         fnMonitor.onFnKeyUp = { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, self.useFnKey, self.isRecording else { return }
+                guard let self, self.useFnKey, self.isRecording, self.activeTrigger == .fnKey else { return }
                 self.stopAndTranscribe()
             }
         }
         updateFnMonitor()
 
-        // Set up custom shortcut (toggle mode — press to start, press to stop)
+        KeyboardShortcuts.onKeyDown(for: .toggleRecording) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, !self.keyboardShortcutIsDown else { return }
+                self.keyboardShortcutIsDown = true
+                guard !self.isRecording else { return }
+                self.startRecording(trigger: .keyboardShortcut)
+            }
+        }
         KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [weak self] in
             Task { @MainActor [weak self] in
-                self?.toggleRecording()
+                guard let self, self.keyboardShortcutIsDown else { return }
+                self.keyboardShortcutIsDown = false
+                guard self.isRecording, self.activeTrigger == .keyboardShortcut else { return }
+                self.stopAndTranscribe()
             }
         }
 
@@ -106,7 +128,7 @@ final class RecordingEngine: ObservableObject {
         if useFnKey {
             let ok = fnMonitor.start()
             if !ok {
-                statusMessage = "fn needs Accessibility permission (System Settings > Privacy & Security > Accessibility)"
+                statusMessage = "fn needs Input Monitoring / Accessibility permission, and Globe must be set to Do Nothing"
             }
         } else {
             fnMonitor.stop()
@@ -125,22 +147,28 @@ final class RecordingEngine: ObservableObject {
         }
 
         if parts.isEmpty {
-            statusMessage = "No shortcut set — enable fn or set a custom shortcut"
+            statusMessage = "No shortcut set — enable fn or set a recording shortcut"
         } else {
-            statusMessage = "Ready — press \(parts.joined(separator: " or ")) to record"
+            statusMessage = "Ready — hold \(parts.joined(separator: " or ")) to record"
         }
     }
 
     // MARK: - Toggle
 
     func toggleRecording() {
-        if isRecording { stopAndTranscribe() } else { startRecording() }
+        if isRecording { stopAndTranscribe() } else { startRecording(trigger: .manual) }
     }
 
     // MARK: - Start Recording
 
-    func startRecording() {
+    func startRecording(trigger: RecordingTrigger = .manual) {
         guard !isRecording else { return }
+        activeTrigger = trigger
+        keyboardShortcutIsDown = trigger == .keyboardShortcut
+
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        targetAppBundleIdentifier = frontmostApp?.processIdentifier == myPID ? nil : frontmostApp?.bundleIdentifier
 
         let ts = DateFormatter()
         ts.dateFormat = "yyyyMMdd'T'HHmmss"
@@ -170,7 +198,11 @@ final class RecordingEngine: ObservableObject {
             stdinPipe = stdin
             isRecording = true
             recordingDuration = 0
-            statusMessage = mode == .command ? "Speak your instruction..." : "Recording — press fn to stop"
+            statusMessage = switch (mode, trigger) {
+            case (.command, _): "Speak your instruction..."
+            case (_, .manual): "Recording — click Stop when finished"
+            case (_, .fnKey), (_, .keyboardShortcut): "Recording — release to stop"
+            }
 
             recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -178,6 +210,9 @@ final class RecordingEngine: ObservableObject {
                 }
             }
         } catch {
+            activeTrigger = nil
+            keyboardShortcutIsDown = false
+            targetAppBundleIdentifier = nil
             statusMessage = "Failed: \(error.localizedDescription)"
         }
     }
@@ -204,6 +239,10 @@ final class RecordingEngine: ObservableObject {
         currentAudioPath = nil
         recordProcess = nil
         stdinPipe = nil
+        let targetAppBundleIdentifier = targetAppBundleIdentifier
+        activeTrigger = nil
+        keyboardShortcutIsDown = false
+        self.targetAppBundleIdentifier = nil
         let homePath = home
 
         Task.detached {
@@ -225,8 +264,12 @@ final class RecordingEngine: ObservableObject {
             }
 
             let output = CLIRunner.run(["transcribe", audioPath, "--json"], home: homePath)
-            let text = CLIRunner.parseJSON(output)
+            if let error = CLIRunner.parseError(output) {
+                await MainActor.run { self.finish(error) }
+                return
+            }
 
+            let text = CLIRunner.parseJSON(output)
             guard let text, !text.isEmpty else {
                 await MainActor.run { self.finish("Empty transcription") }
                 return
@@ -237,12 +280,12 @@ final class RecordingEngine: ObservableObject {
                 if curMode == .command {
                     self.runCommandMode(instruction: text)
                 } else {
-                    self.pasteIntoFrontApp(text)
+                    self.pasteIntoFrontApp(text, targetAppBundleIdentifier: targetAppBundleIdentifier)
                     self.recentTranscriptions.insert(
                         TranscriptionResult(rawText: text, processedText: nil, timestamp: Date()), at: 0
                     )
                     if self.recentTranscriptions.count > 20 { self.recentTranscriptions.removeLast() }
-                    self.statusMessage = "Pasted: \(String(text.prefix(50)))"
+                    // statusMessage updated by pasteIntoFrontApp
                 }
             }
         }
@@ -287,23 +330,88 @@ final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    func pasteIntoFrontApp(_ text: String) {
+    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
+        // Step 1: Put text on clipboard
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        // Activate the last user app (not us)
+        // Step 2: Find the real target app
         let myPID = ProcessInfo.processInfo.processIdentifier
-        if let target = NSWorkspace.shared.runningApplications.first(where: {
+        let runningApps = NSWorkspace.shared.runningApplications
+        let targetApp = runningApps.first(where: {
+            guard $0.processIdentifier != myPID, $0.activationPolicy == .regular else { return false }
+            guard let bundleIdentifier = targetAppBundleIdentifier else { return false }
+            return $0.bundleIdentifier == bundleIdentifier
+        }) ?? runningApps.first(where: {
             $0.activationPolicy == .regular && $0.processIdentifier != myPID
-        }) {
-            target.activate()
+        })
+
+        let bundleId = targetApp?.bundleIdentifier
+        let localName = targetApp?.localizedName ?? "frontmost app"
+
+        statusMessage = "Pasting into \(localName)..."
+
+        // Step 3: Activate + paste in a single osascript subprocess.
+        // Running osascript as Process gives it "system" context which macOS
+        // trusts for sending synthetic keystrokes via System Events.
+        // NSAppleScript runs in-process and is often blocked for background apps.
+        // This is the same approach used by WisprFlow and OpenFlow.
+        let ok = pasteViaOsascript(bundleId: bundleId)
+        if ok {
+            statusMessage = "Pasted: \(String(text.prefix(50)))"
+        } else {
+            // Fallback: activate then CGEvent paste
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                targetApp?.activate(options: [.activateAllWindows])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self.postPasteShortcut()
+                    self.statusMessage = "Pasted (fallback): \(String(text.prefix(50)))"
+                }
+            }
+        }
+    }
+
+    /// Paste using osascript as an external subprocess.
+    private func pasteViaOsascript(bundleId: String?) -> Bool {
+        let script: String
+        if let bundleId {
+            script = """
+            tell application id "\(bundleId)" to activate
+            delay 0.35
+            tell application "System Events"
+                tell process 1 where frontmost is true
+                    keystroke "v" using command down
+                end tell
+            end tell
+            """
+        } else {
+            script = """
+            tell application "System Events"
+                tell process 1 where frontmost is true
+                    keystroke "v" using command down
+                end tell
+            end tell
+            """
         }
 
-        // Wait for activation, then Cmd+V
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.postKey(0x09, flags: .maskCommand)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return false
         }
+    }
+
+    private func postPasteShortcut() {
+        postKey(0x09, flags: .maskCommand)
     }
 
     private func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
@@ -324,19 +432,41 @@ enum CLIRunner: Sendable {
         let bin = "\(home)/.bun/bin/recordings"
         let escaped = args.map { "\"\($0)\"" }.joined(separator: " ")
         let proc = Process()
-        let pipe = Pipe()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-c", """
             export PATH="\(home)/.bun/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
             "\(bin)" \(escaped)
         """]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
         do {
             try proc.run()
             proc.waitUntilExit()
-            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        } catch { return "" }
+            let stdout = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            if proc.terminationStatus != 0 {
+                let details = stderr.isEmpty ? stdout : stderr
+                return "ERROR: \(details.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
+            return stdout.isEmpty ? stderr : stdout
+        } catch {
+            return "ERROR: \(error.localizedDescription)"
+        }
+    }
+
+    static func parseError(_ output: String) -> String? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("ERROR:") else { return nil }
+        let message = trimmed.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        if message.contains("OpenAI API key not configured") {
+            return "OpenAI API key not configured on this Mac"
+        }
+        if message.isEmpty {
+            return "Transcription failed"
+        }
+        return String(message.prefix(120))
     }
 
     static func parseJSON(_ output: String) -> String? {
@@ -350,6 +480,6 @@ enum CLIRunner: Sendable {
         }
         return output.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty && !$0.hasPrefix("{") && !$0.contains("Transcribing") && !$0.hasPrefix("Saved") }
+            .first { !$0.isEmpty && !$0.hasPrefix("{") && !$0.contains("Transcribing") && !$0.hasPrefix("Saved") && !$0.hasPrefix("ERROR:") }
     }
 }
