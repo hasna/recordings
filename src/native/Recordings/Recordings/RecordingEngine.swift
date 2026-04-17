@@ -330,7 +330,23 @@ final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
+    private static var pasteCallCount = 0
+
+    private func debugWrite(_ msg: String) {
+        let path = "/tmp/recordings-paste.log"
+        let line = "[\(Date())] \(msg)\n"
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile(); fh.write(Data(line.utf8)); fh.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
+        }
+    }
+
     func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
+        Self.pasteCallCount += 1
+        let callNum = Self.pasteCallCount
+        debugWrite("pasteIntoFrontApp CALLED #\(callNum) text=\(text.prefix(40)) AX=\(AXIsProcessTrusted())")
+
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
@@ -351,6 +367,7 @@ final class RecordingEngine: ObservableObject {
         targetApp?.activate()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.debugWrite("postKey FIRING for call #\(callNum)")
             self.postKey(0x09, flags: .maskCommand)
             self.statusMessage = "Pasted: \(String(text.prefix(50)))"
         }
@@ -363,7 +380,6 @@ final class RecordingEngine: ObservableObject {
         down.flags = flags
         up.flags = flags
         down.post(tap: .cgSessionEventTap)
-        usleep(20_000)
         up.post(tap: .cgSessionEventTap)
     }
 }
