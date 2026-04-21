@@ -179,11 +179,12 @@ final class RecordingEngine: ObservableObject {
 
         let proc = Process()
         let stdin = Pipe()
+        let stderrPipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-c", """
             export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
             if command -v ffmpeg &>/dev/null; then
-                ffmpeg -f avfoundation -i ":0" -ar 16000 -ac 1 -t \(maxDuration) "\(path)" -y 2>/dev/null
+                ffmpeg -f avfoundation -i ":0" -ar 16000 -ac 1 -t \(maxDuration) "\(path)" -y
             elif command -v rec &>/dev/null; then
                 rec -r 16000 -c 1 -b 16 "\(path)" trim 0 \(maxDuration)
             else
@@ -192,7 +193,7 @@ final class RecordingEngine: ObservableObject {
         """]
         proc.standardInput = stdin
         proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        proc.standardError = stderrPipe
 
         do {
             try proc.run()
@@ -257,6 +258,12 @@ final class RecordingEngine: ObservableObject {
             try? await Task.sleep(for: .milliseconds(300))
             if proc.isRunning { proc.interrupt() }
 
+            // Check if ffmpeg exited with an error (e.g. no mic permission)
+            if proc.terminationStatus != 0, proc.terminationStatus != 1 {
+                await MainActor.run { self.finish("Recording failed (mic access denied — check System Settings > Privacy & Security > Microphone)") }
+                return
+            }
+
             guard let audioPath else {
                 await MainActor.run { self.finish("No audio file") }
                 return
@@ -265,7 +272,7 @@ final class RecordingEngine: ObservableObject {
             let attrs = try? FileManager.default.attributesOfItem(atPath: audioPath)
             let size = (attrs?[.size] as? Int) ?? 0
             guard size >= 1000 else {
-                await MainActor.run { self.finish("Audio too short") }
+                await MainActor.run { self.finish("No audio captured — check microphone permissions") }
                 return
             }
 

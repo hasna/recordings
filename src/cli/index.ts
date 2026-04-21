@@ -473,64 +473,6 @@ program
     }
   });
 
-// ── start ───────────────────────────────────────────────────────────────────
-
-program
-  .command("start")
-  .description("Launch the menu bar helper app (F5 to toggle recording)")
-  .option("--login", "Also add to Login Items so it starts automatically")
-  .action(async (opts) => {
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-    const { join: pathJoin } = require("node:path") as typeof import("node:path");
-    const { homedir: getHome } = require("node:os") as typeof import("node:os");
-    const { existsSync: fileExists } = require("node:fs") as typeof import("node:fs");
-    const home = getHome();
-
-    const appPath = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app");
-    const oldAppPath = pathJoin(home, ".recordings", "RecordingsHelper.app");
-
-    if (!fileExists(appPath) && !fileExists(oldAppPath)) {
-      console.error(chalk.red("RecordingsHelper.app not found. Run: recordings shortcut --install"));
-      process.exit(1);
-    }
-
-    const resolvedAppPath = fileExists(appPath) ? appPath : oldAppPath;
-
-    // Kill existing instance
-    try { execSync("pkill -f RecordingsHelper", { stdio: "pipe" }); } catch { /* not running */ }
-
-    // Launch
-    execSync(`open "${resolvedAppPath}"`, { stdio: "pipe" });
-    console.log(chalk.green("Recordings helper launched — press F5 to record"));
-
-    if (opts.login) {
-      try {
-        execSync(
-          `osascript -e 'tell application "System Events" to make login item at end with properties {path:"${resolvedAppPath}", hidden:true}'`,
-          { stdio: "pipe" }
-        );
-        console.log(chalk.green("Added to Login Items — will start on boot"));
-      } catch {
-        console.log(chalk.yellow("Could not add to Login Items — add manually in System Settings > General > Login Items"));
-      }
-    }
-  });
-
-// ── stop ────────────────────────────────────────────────────────────────────
-
-program
-  .command("stop")
-  .description("Stop the menu bar helper app")
-  .action(() => {
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-    try {
-      execSync("pkill -f RecordingsHelper", { stdio: "pipe" });
-      console.log(chalk.green("Recordings helper stopped"));
-    } catch {
-      console.log(chalk.dim("Not running"));
-    }
-  });
-
 // ── listen ───────────────────────────────────────────────────────────────────
 
 program
@@ -681,13 +623,12 @@ program
   .command("shortcut")
   .description("Set up a global keyboard shortcut for recording (macOS)")
   .option("--raycast", "Generate Raycast script command")
-  .option("--install", "Set up F5 global shortcut via macOS Services (no extra installs)")
   .option("--karabiner", "Set up Fn key via Karabiner-Elements")
   .option("--skhd", "Generate skhd hotkey config")
   .option("--hammerspoon", "Generate Hammerspoon config")
   .option("--script", "Just output the shell script path")
   .action((opts) => {
-    const { writeFileSync, mkdirSync, chmodSync, existsSync: fileExists } = require("node:fs") as typeof import("node:fs");
+    const { writeFileSync, mkdirSync, chmodSync } = require("node:fs") as typeof import("node:fs");
     const { join: pathJoin } = require("node:path") as typeof import("node:path");
     const { homedir: getHome } = require("node:os") as typeof import("node:os");
     const home = getHome();
@@ -746,72 +687,6 @@ fi
 `;
     writeFileSync(scriptPath, script, "utf-8");
     chmodSync(scriptPath, 0o755);
-
-    if (opts.install) {
-      // Install the native menu bar app — no config needed, just works with F5
-      const { execSync: exec } = require("node:child_process") as typeof import("node:child_process");
-
-      const appPath = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app");
-      const srcSwift = pathJoin(__dirname, "..", "native", "RecordingsHelper.swift");
-      const distApp = pathJoin(__dirname, "..", "RecordingsHelper.app");
-
-      // Copy pre-built app if available, otherwise compile
-      if (fileExists(pathJoin(distApp, "Contents", "MacOS", "RecordingsHelper"))) {
-        exec(`rm -rf "${appPath}" && cp -R "${distApp}" "${appPath}"`, { stdio: "pipe", shell: "/bin/bash" });
-      } else if (fileExists(srcSwift)) {
-        // Compile from source
-        console.log(chalk.blue("Compiling native helper app..."));
-        const appDir = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app", "Contents", "MacOS");
-        mkdirSync(appDir, { recursive: true });
-
-        const plistDir = pathJoin(home, ".hasna", "recordings", "RecordingsHelper.app", "Contents");
-        const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>RecordingsHelper</string>
-<key>CFBundleIdentifier</key><string>com.hasna.recordings-helper</string>
-<key>CFBundleName</key><string>Recordings</string>
-<key>LSUIElement</key><true/>
-<key>NSMicrophoneUsageDescription</key><string>Recordings needs microphone access for speech transcription.</string>
-</dict></plist>`;
-        writeFileSync(pathJoin(plistDir, "Info.plist"), plist, "utf-8");
-
-        try {
-          exec(
-            `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc -O -o "${appDir}/RecordingsHelper" "${srcSwift}" -framework Cocoa -framework Carbon`,
-            { stdio: "pipe" }
-          );
-        } catch {
-          // Fallback to default toolchain
-          exec(
-            `swiftc -O -o "${appDir}/RecordingsHelper" "${srcSwift}" -framework Cocoa -framework Carbon`,
-            { stdio: "pipe" }
-          );
-        }
-      } else {
-        console.error(chalk.red("Cannot find RecordingsHelper. Run from the project directory or rebuild."));
-        process.exit(1);
-      }
-
-      // Kill existing instance and launch
-      try { exec("pkill -f RecordingsHelper", { stdio: "pipe" }); } catch { /* not running */ }
-      exec(`open "${appPath}"`, { stdio: "pipe" });
-
-      // Add to Login Items
-      try {
-        exec(
-          `osascript -e 'tell application "System Events" to make login item at end with properties {path:"${appPath}", hidden:true}'`,
-          { stdio: "pipe" }
-        );
-      } catch { /* already exists or no permission */ }
-
-      console.log(chalk.green("\nRecordings helper installed and running!\n"));
-      console.log(`  ${chalk.yellow("F5")}     Start/stop recording`);
-      console.log(`  ${chalk.dim("🎙")}      Menu bar icon (click for options)`);
-      console.log(`  ${chalk.dim("Auto")}   Starts on login\n`);
-      console.log(chalk.dim("  Press F5 → speak → F5 → text is pasted where your cursor is."));
-      return;
-    }
 
     if (opts.karabiner) {
       const karabinerDir = pathJoin(home, ".config", "karabiner", "assets", "complex_modifications");
@@ -900,9 +775,6 @@ ${scriptPath}
     console.log(chalk.bold("Global shortcut script created:"));
     console.log(chalk.cyan(`  ${scriptPath}\n`));
     console.log("Bind it to a hotkey using any of these:\n");
-
-    console.log(chalk.bold("  macOS built-in") + chalk.dim(" (no extra installs — recommended)"));
-    console.log(`    recordings shortcut --install\n`);
 
     console.log(chalk.bold("  Karabiner-Elements") + chalk.dim(" (for Fn key specifically)"));
     console.log(`    brew install --cask karabiner-elements`);
