@@ -18,5 +18,7 @@
     <string>26.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Recordings needs microphone access to record and transcribe your speech.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Recordings needs Apple Events access to paste transcribed text into your active app.</string>
 </dict>
 </plist>

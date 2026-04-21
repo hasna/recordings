@@ -345,6 +345,16 @@ final class RecordingEngine: ObservableObject {
         }
     }
 
+    private func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
+        let src = CGEventSource(stateID: .hidSystemState)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) else { return }
+        down.flags = flags
+        up.flags = flags
+        down.post(tap: .cgSessionEventTap)
+        up.post(tap: .cgSessionEventTap)
+    }
+
     // MARK: - Window Title (Accessibility API)
 
     private static func focusedWindowTitle(pid: pid_t?) -> String? {
@@ -376,22 +386,25 @@ final class RecordingEngine: ObservableObject {
             $0.activationPolicy == .regular && $0.processIdentifier != myPID
         })
 
-        targetApp?.activate()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.postKey(0x09, flags: .maskCommand)
-            self.updateStatus()
+        guard let app = targetApp else {
+            self.statusMessage = "No target app found"
+            return
         }
-    }
 
-    private func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        guard let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) else { return }
-        down.flags = flags
-        up.flags = flags
-        down.post(tap: .cgSessionEventTap)
-        up.post(tap: .cgSessionEventTap)
+        // Activate target app and wait for focus to stabilize
+        app.activate()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let src = CGEventSource(stateID: .hidSystemState)
+            if let down = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true),
+               let up = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) {
+                down.flags = .maskCommand
+                up.flags = .maskCommand
+                down.post(tap: .cgSessionEventTap)
+                up.post(tap: .cgSessionEventTap)
+            }
+            self.statusMessage = "Pasted (\(text.count) chars)"
+        }
     }
 }
 
