@@ -16,6 +16,11 @@ let package = Package(
             dependencies: ["KeyboardShortcuts"],
             path: "Recordings",
             exclude: ["Info.plist", "Recordings.entitlements"]
-        )
+        ),
+        .testTarget(
+            name: "RecordingsTests",
+            dependencies: ["Recordings"],
+            path: "RecordingsTests"
+        ),
     ]
 )

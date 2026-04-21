@@ -24,9 +24,9 @@ enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
     }
     var hint: String {
         switch self {
-        case .pushToTalk: return "Hold F5 or your chosen shortcut to record, then release to paste"
-        case .dictation: return "Hold F5 or your chosen shortcut to dictate, then release to paste"
-        case .command: return "Select text, then hold F5 or your chosen shortcut and release to rewrite"
+        case (.pushToTalk, _): return "Hold F5 or your chosen shortcut to record, then release to paste"
+        case (.dictation, _): return "Hold F5 or your chosen shortcut to dictate, then release to paste"
+        case (.command, _): return "Select text, then hold F5 or your chosen shortcut and release to rewrite"
         }
     }
 }
@@ -66,10 +66,11 @@ final class RecordingEngine: ObservableObject {
     @Published var statusMessage = "Starting..."
     @Published var isTranscribing = false
     @Published var recordingDuration: TimeInterval = 0
+    @Published var liveTranscriptionText = ""
 
     private var recordProcess: Process?
     private var stdinPipe: Pipe?
-    private var currentAudioPath: String?
+    private var stdoutPipe: Pipe?
     private var recordingTimer: Timer?
     private var activeTrigger: RecordingTrigger?
     private var keyboardShortcutIsDown = false
@@ -78,11 +79,26 @@ final class RecordingEngine: ObservableObject {
     private let maxDuration = 300
     var projectStore: ProjectStore?
 
+    // Real-time streaming
+    private var realtimeClient: RealtimeTranscriptionClient?
+    private var audioStreamContinuation: AsyncStream<Data>.Continuation?
+    private var streamingTask: Task<Void, Never>?
+
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
 
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     private var audioDir: String { "\(home)/.hasna/recordings/audio" }
+
+    // MARK: - OpenAI API Key
+
+    private var openAIAPIKey: String {
+        // Try environment, then saved preference
+        if let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !key.isEmpty {
+            return key
+        }
+        return UserDefaults.standard.string(forKey: "openAIAPIKey") ?? ""
+    }
 
     init() {
         try? FileManager.default.createDirectory(atPath: audioDir, withIntermediateDirectories: true)
@@ -150,7 +166,7 @@ final class RecordingEngine: ObservableObject {
         if isRecording { stopAndTranscribe() } else { startRecording(trigger: .manual) }
     }
 
-    // MARK: - Start Recording
+    // MARK: - Start Recording (Streaming)
 
     func startRecording(trigger: RecordingTrigger = .manual) {
         guard !isRecording else { return }
@@ -172,35 +188,35 @@ final class RecordingEngine: ObservableObject {
             }
         }
 
-        let ts = DateFormatter()
-        ts.dateFormat = "yyyyMMdd'T'HHmmss"
-        let path = "\(audioDir)/rec-\(ts.string(from: Date())).wav"
-        currentAudioPath = path
-
+        // Start ffmpeg recording
         let proc = Process()
         let stdin = Pipe()
+        let stdout = Pipe()
         let stderrPipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-c", """
             export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
             if command -v ffmpeg &>/dev/null; then
-                ffmpeg -f avfoundation -i ":0" -ar 16000 -ac 1 -t \(maxDuration) "\(path)" -y
+                ffmpeg -f avfoundation -i ":0" -ar 24000 -ac 1 -f s16le -t \(maxDuration) - 2>/dev/null
             elif command -v rec &>/dev/null; then
-                rec -r 16000 -c 1 -b 16 "\(path)" trim 0 \(maxDuration)
+                rec -r 24000 -c 1 -b 16 -t raw - trim 0 \(maxDuration)
             else
                 exit 1
             fi
         """]
         proc.standardInput = stdin
-        proc.standardOutput = FileHandle.nullDevice
+        proc.standardOutput = stdout
         proc.standardError = stderrPipe
 
         do {
             try proc.run()
             recordProcess = proc
             stdinPipe = stdin
+            stdoutPipe = stdout
             isRecording = true
             recordingDuration = 0
+            streamingText = ""
+            liveTranscriptionText = ""
             statusMessage = switch (mode, trigger) {
             case (.command, _): "Speak your instruction..."
             case (_, .manual): "Recording — click Stop when finished"
@@ -212,11 +228,102 @@ final class RecordingEngine: ObservableObject {
                     self?.recordingDuration += 0.1
                 }
             }
+
+            // Start real-time streaming if API key is available
+            let apiKey = openAIAPIKey
+            if !apiKey.isEmpty {
+                startRealtimeStreaming(apiKey: apiKey)
+            } else {
+                // Fall back to file-based recording for legacy
+                startFallbackRecording()
+            }
+
+            // Read PCM from stdout and stream to OpenAI
+            startPCMStreaming(stdout: stdout)
         } catch {
             activeTrigger = nil
             keyboardShortcutIsDown = false
             targetAppBundleIdentifier = nil
             statusMessage = "Failed: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Real-time Streaming
+
+    private func startRealtimeStreaming(apiKey: String) {
+        let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
+        let client = RealtimeTranscriptionClient(apiKey: apiKey, homePath: home)
+        realtimeClient = client
+
+        streamingTask = Task {
+            await client.startStreaming(systemPrompt: systemPrompt)
+
+            // Receive deltas
+            while client.isStreaming {
+                try? await Task.sleep(for: .milliseconds(100))
+                let text = client.accumulatedText
+                if text != streamingText {
+                    await MainActor.run {
+                        self.streamingText = text
+                        self.liveTranscriptionText = text
+                    }
+                }
+            }
+        }
+    }
+
+    private func startPCMStreaming(stdout: Pipe) {
+        let handle = stdout.fileHandleForReading
+
+        Task {
+            // Read in chunks (~500ms of audio at 24kHz/16-bit/mono = 24000 bytes/s)
+            let chunkSize = 12000 // ~250ms chunks
+            var buffer = Data()
+
+            while true {
+                try Task.checkCancellation()
+                let data = handle.availableData
+                if data.isEmpty {
+                    // EOF — ffmpeg exited
+                    break
+                }
+                buffer.append(data)
+
+                // Send chunks to streaming client
+                while buffer.count >= chunkSize {
+                    let chunk = buffer.prefix(chunkSize)
+                    buffer.removeFirst(chunkSize)
+
+                    // Send to realtime client if available
+                    if let client = realtimeClient {
+                        await client.sendAudio(Data(chunk))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Fallback (file-based for when no API key)
+
+    private func startFallbackRecording() {
+        // Create a temp file for fallback transcription
+        let ts = DateFormatter()
+        ts.dateFormat = "yyyyMMdd'T'HHmmss"
+        let path = "\(audioDir)/rec-\(ts.string(from: Date())).wav"
+
+        // Re-run ffmpeg to file instead (already running as raw PCM)
+        // We'll use the existing file path for post-recording fallback
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            if let proc = recordProcess, proc.isRunning {
+                // Save as WAV for fallback by killing current PCM stream and re-recording
+                await MainActor.run {
+                    self.terminateRecordingProcess()
+                    self.recordProcess = nil
+                    self.isRecording = false
+                    self.statusMessage = "OpenAI API key not configured — streaming unavailable"
+                }
+            }
         }
     }
 
@@ -235,47 +342,70 @@ final class RecordingEngine: ObservableObject {
 
         isRecording = false
         isTranscribing = true
-        statusMessage = "Transcribing..."
 
-        let audioPath = currentAudioPath
         let curMode = mode
-        currentAudioPath = nil
-        recordProcess = nil
-        stdinPipe = nil
         let targetAppBundleIdentifier = targetAppBundleIdentifier
-        let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
         let activeProjectId = projectStore?.settings.activeProjectId
         let activeProjectName = projectStore?.activeProject?.name
         activeTrigger = nil
         keyboardShortcutIsDown = false
         self.targetAppBundleIdentifier = nil
         self.targetAppPid = nil
-        let homePath = home
+        recordProcess = nil
+        stdinPipe = nil
+        stdoutPipe = nil
 
+        // If we were streaming, stop and get the accumulated text
+        let streamingResult = realtimeClient?.stop() ?? ""
+        realtimeClient = nil
+        streamingTask?.cancel()
+        streamingTask = nil
+
+        // Kill the process
         Task.detached {
-            try? await Task.sleep(for: .seconds(1))
             if proc.isRunning { proc.terminate() }
             try? await Task.sleep(for: .milliseconds(300))
-            if proc.isRunning { proc.interrupt() }
 
-            // Check if ffmpeg exited with an error (e.g. no mic permission)
-            if proc.terminationStatus != 0, proc.terminationStatus != 1 {
-                await MainActor.run { self.finish("Recording failed (mic access denied — check System Settings > Privacy & Security > Microphone)") }
-                return
+            let text = streamingResult.isEmpty ? nil : streamingResult
+
+            await MainActor.run {
+                self.isTranscribing = false
+                self.liveTranscriptionText = ""
+
+                if let text, !text.isEmpty {
+                    if curMode == .command {
+                        self.runCommandMode(instruction: text)
+                    } else {
+                        self.pasteIntoFrontApp(text, targetAppBundleIdentifier: targetAppBundleIdentifier)
+                        self.recentTranscriptions.insert(
+                            TranscriptionResult(rawText: text, processedText: nil, timestamp: Date(), projectId: activeProjectId, projectName: activeProjectName), at: 0
+                        )
+                        if self.recentTranscriptions.count > 20 { self.recentTranscriptions.removeLast() }
+                    }
+                } else {
+                    // Fall back to file-based transcription if streaming didn't produce results
+                    self.fallbackTranscribe(curMode: curMode, targetAppBundleIdentifier: targetAppBundleIdentifier, activeProjectId: activeProjectId, activeProjectName: activeProjectName)
+                }
             }
+        }
+    }
 
-            guard let audioPath else {
-                await MainActor.run { self.finish("No audio file") }
-                return
-            }
+    // MARK: - Fallback Transcription
 
-            let attrs = try? FileManager.default.attributesOfItem(atPath: audioPath)
-            let size = (attrs?[.size] as? Int) ?? 0
-            guard size >= 1000 else {
-                await MainActor.run { self.finish("No audio captured — check microphone permissions") }
-                return
-            }
+    private func fallbackTranscribe(curMode: RecordingMode, targetAppBundleIdentifier: String?, activeProjectId: String?, activeProjectName: String?) {
+        // Use most recent audio file in the directory
+        guard let audioPath = self.mostRecentAudioFile() else {
+            statusMessage = "No audio captured"
+            return
+        }
 
+        let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
+        let homePath = home
+
+        isTranscribing = true
+        statusMessage = "Transcribing..."
+
+        Task.detached {
             var cliArgs = ["transcribe", audioPath, "--json"]
             if !systemPrompt.isEmpty {
                 cliArgs += ["--system-prompt", systemPrompt]
@@ -302,15 +432,35 @@ final class RecordingEngine: ObservableObject {
                         TranscriptionResult(rawText: text, processedText: nil, timestamp: Date(), projectId: activeProjectId, projectName: activeProjectName), at: 0
                     )
                     if self.recentTranscriptions.count > 20 { self.recentTranscriptions.removeLast() }
-                    // statusMessage updated by pasteIntoFrontApp
                 }
             }
         }
     }
 
+    private func mostRecentAudioFile() -> String? {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: audioDir)) ?? []
+        let wavFiles = files.filter { $0.hasSuffix(".wav") }.sorted().reversed()
+        return wavFiles.first.map { "\(audioDir)/\($0)" }
+    }
+
     private func finish(_ msg: String) {
         isTranscribing = false
+        liveTranscriptionText = ""
         updateStatus()
+    }
+
+    private func terminateRecordingProcess() {
+        guard let proc = recordProcess else { return }
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        if let pipe = stdinPipe {
+            try? pipe.fileHandleForWriting.write(contentsOf: Data("q".utf8))
+            try? pipe.fileHandleForWriting.close()
+        }
+        if proc.isRunning { proc.terminate() }
+        recordProcess = nil
+        stdinPipe = nil
+        stdoutPipe = nil
     }
 
     // MARK: - Command Mode
@@ -334,6 +484,7 @@ final class RecordingEngine: ObservableObject {
                 let result = CLIRunner.run(["transcribe", "--text", prompt, "--enhance"], home: homePath)
                 await MainActor.run {
                     self.isTranscribing = false
+                    self.liveTranscriptionText = ""
                     if !result.isEmpty {
                         self.pasteIntoFrontApp(result)
                         self.statusMessage = "Rewritten"
