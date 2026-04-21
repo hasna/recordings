@@ -97,6 +97,18 @@ struct MenuBarPopover: View {
                         Button("Stop") { engine.stopAndTranscribe() }
                             .controlSize(.small)
                     }
+                    // Live streaming transcription text
+                    if !engine.liveTranscriptionText.isEmpty {
+                        Text(engine.liveTranscriptionText)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(3)
+                            .padding(.vertical, 4)
+                        Text("Listening...")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
                     if let project = projectStore.activeProject {
                         HStack(spacing: 4) {
                             Image(systemName: "folder.fill").foregroundStyle(.tint)
@@ -114,6 +126,15 @@ struct MenuBarPopover: View {
                         Text("Transcribing...")
                             .foregroundStyle(.secondary)
                         Spacer()
+                    }
+                    // Show accumulated text during transcribing
+                    if !engine.liveTranscriptionText.isEmpty {
+                        Text(engine.liveTranscriptionText)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(3)
+                            .padding(.vertical, 4)
                     }
                     if let project = projectStore.activeProject {
                         HStack(spacing: 4) {
