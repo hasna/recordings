@@ -24,9 +24,9 @@ enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
     }
     var hint: String {
         switch self {
-        case (.pushToTalk, _): return "Hold F5 or your chosen shortcut to record, then release to paste"
-        case (.dictation, _): return "Hold F5 or your chosen shortcut to dictate, then release to paste"
-        case (.command, _): return "Select text, then hold F5 or your chosen shortcut and release to rewrite"
+        case .pushToTalk: return "Hold F5 or your chosen shortcut to record, then release to paste"
+        case .dictation: return "Hold F5 or your chosen shortcut to dictate, then release to paste"
+        case .command: return "Select text, then hold F5 or your chosen shortcut and release to rewrite"
         }
     }
 }
@@ -83,6 +83,7 @@ final class RecordingEngine: ObservableObject {
     private var realtimeClient: RealtimeTranscriptionClient?
     private var audioStreamContinuation: AsyncStream<Data>.Continuation?
     private var streamingTask: Task<Void, Never>?
+    private var streamingText = ""
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -274,6 +275,8 @@ final class RecordingEngine: ObservableObject {
 
     private func startPCMStreaming(stdout: Pipe) {
         let handle = stdout.fileHandleForReading
+        // Capture client reference for this recording session
+        let client = realtimeClient
 
         Task {
             // Read in chunks (~500ms of audio at 24kHz/16-bit/mono = 24000 bytes/s)
@@ -295,8 +298,10 @@ final class RecordingEngine: ObservableObject {
                     buffer.removeFirst(chunkSize)
 
                     // Send to realtime client if available
-                    if let client = realtimeClient {
-                        await client.sendAudio(Data(chunk))
+                    if let client {
+                        Task { @MainActor in
+                            client.sendAudio(Data(chunk))
+                        }
                     }
                 }
             }
@@ -306,12 +311,6 @@ final class RecordingEngine: ObservableObject {
     // MARK: - Fallback (file-based for when no API key)
 
     private func startFallbackRecording() {
-        // Create a temp file for fallback transcription
-        let ts = DateFormatter()
-        ts.dateFormat = "yyyyMMdd'T'HHmmss"
-        let path = "\(audioDir)/rec-\(ts.string(from: Date())).wav"
-
-        // Re-run ffmpeg to file instead (already running as raw PCM)
         // We'll use the existing file path for post-recording fallback
         Task {
             try? await Task.sleep(for: .seconds(1))
