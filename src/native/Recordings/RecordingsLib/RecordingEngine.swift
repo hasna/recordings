@@ -1,12 +1,12 @@
 import AVFoundation
 @preconcurrency import ApplicationServices
 import SwiftUI
-import KeyboardShortcuts
+@preconcurrency import KeyboardShortcuts
 
 // MARK: - Custom shortcut (not fn — fn is handled by FnKeyMonitor)
 
 extension KeyboardShortcuts.Name {
-    static let toggleRecording = Self("toggleRecording", default: .init(.f5))
+    @MainActor static let toggleRecording = Self("toggleRecording", default: .init(.f5))
 }
 
 // MARK: - Recording Mode
@@ -142,6 +142,7 @@ public final class RecordingEngine: ObservableObject {
 
     public init() {
         try? FileManager.default.createDirectory(atPath: audioDir, withIntermediateDirectories: true)
+        log("RecordingEngine init; microphone=\(microphonePermissionLabel); accessibility=\(accessibilityPermissionLabel)")
 
         // Load preferences
         if let savedMode = UserDefaults.standard.string(forKey: "recordingMode"),
@@ -188,9 +189,66 @@ public final class RecordingEngine: ObservableObject {
         updateStatus()
     }
 
+    public var microphonePermissionLabel: String {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return "Microphone allowed"
+        case .notDetermined:
+            return "Microphone not requested"
+        case .denied:
+            return "Microphone denied"
+        case .restricted:
+            return "Microphone restricted"
+        @unknown default:
+            return "Microphone unknown"
+        }
+    }
+
+    public var accessibilityPermissionLabel: String {
+        AXIsProcessTrusted() ? "Accessibility allowed" : "Accessibility needed"
+    }
+
+    public func requestMicrophonePermission() {
+        log("requestMicrophonePermission status=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.log("requestMicrophonePermission result granted=\(granted)")
+                self.statusMessage = granted
+                    ? "Microphone allowed"
+                    : "Enable Microphone permission for Recordings in System Settings"
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    public func requestAccessibilityPermission() {
+        let trusted = ensureAccessibilityPermission(prompt: true)
+        log("requestAccessibilityPermission trusted=\(trusted)")
+        statusMessage = trusted
+            ? "Accessibility allowed"
+            : "Enable Accessibility permission for Recordings to paste"
+        objectWillChange.send()
+    }
+
+    public func openMicrophoneSettings() {
+        openPrivacySettings("Privacy_Microphone")
+    }
+
+    public func openAccessibilitySettings() {
+        openPrivacySettings("Privacy_Accessibility")
+    }
+
+    private func openPrivacySettings(_ pane: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private func updateFnMonitor() {
         if useFnKey {
             let ok = fnMonitor.start()
+            log("fn monitor start ok=\(ok)")
             if !ok {
                 statusMessage = "fn needs Input Monitoring / Accessibility permission, and Globe must be set to Do Nothing"
             }
@@ -214,6 +272,7 @@ public final class RecordingEngine: ObservableObject {
 
     public func startRecording(trigger: RecordingTrigger = .manual) {
         guard !isRecording else { return }
+        log("startRecording trigger=\(trigger) microphoneStatus=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) accessibility=\(AXIsProcessTrusted())")
         activeTrigger = trigger
         keyboardShortcutIsDown = trigger == .keyboardShortcut
 
@@ -237,9 +296,11 @@ public final class RecordingEngine: ObservableObject {
             startNativeRecording()
         case .notDetermined:
             statusMessage = "Allow microphone access to record"
+            log("requesting microphone access before recording")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    self.log("microphone access response granted=\(granted)")
                     if granted {
                         self.startNativeRecording()
                     } else {
@@ -250,6 +311,7 @@ public final class RecordingEngine: ObservableObject {
             }
         case .denied, .restricted:
             resetRecordingIntent()
+            log("microphone permission blocked status=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
             statusMessage = "Enable Microphone permission for Recordings in System Settings"
         @unknown default:
             resetRecordingIntent()
@@ -262,12 +324,18 @@ public final class RecordingEngine: ObservableObject {
         pcmStreamState = streamState
 
         let apiKey = openAIAPIKey
+        log("startNativeRecording apiKeyConfigured=\(!apiKey.isEmpty)")
         if !apiKey.isEmpty {
             startRealtimeStreaming(apiKey: apiKey)
         }
 
         let client = realtimeClient
+        let homePath = home
+        let firstChunkLogged = LockedFlag()
         let recorder = NativePCMRecorder { [weak client] data in
+            if firstChunkLogged.take() {
+                NativeAppLog.write("native recorder received first PCM chunk bytes=\(data.count)", homePath: homePath)
+            }
             Task {
                 let chunks = await streamState.append(data, chunkSize: 4_800)
                 for chunk in chunks {
@@ -278,6 +346,7 @@ public final class RecordingEngine: ObservableObject {
 
         do {
             try recorder.start()
+            log("native recorder started")
             nativeRecorder = recorder
             isRecording = true
             recordingDuration = 0
@@ -298,6 +367,7 @@ public final class RecordingEngine: ObservableObject {
                 }
             }
         } catch {
+            log("native recorder failed error=\(error.localizedDescription)")
             realtimeClient?.stop()
             realtimeClient = nil
             streamingTask?.cancel()
@@ -314,9 +384,11 @@ public final class RecordingEngine: ObservableObject {
         let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
         let client = RealtimeTranscriptionClient(apiKey: apiKey, homePath: home)
         realtimeClient = client
+        log("realtime streaming task starting")
 
         streamingTask = Task {
             await client.startStreaming(systemPrompt: systemPrompt)
+            self.log("realtime start completed streaming=\(client.isStreaming) error=\(client.error ?? "")")
 
             // Receive deltas
             while client.isStreaming {
@@ -332,6 +404,7 @@ public final class RecordingEngine: ObservableObject {
 
             if let message = client.error, !message.isEmpty {
                 await MainActor.run {
+                    self.log("realtime unavailable message=\(message)")
                     self.statusMessage = "Realtime unavailable — will transcribe after recording"
                 }
             }
@@ -342,6 +415,7 @@ public final class RecordingEngine: ObservableObject {
 
     public func stopAndTranscribe() {
         guard isRecording else { return }
+        log("stopAndTranscribe")
 
         recordingTimer?.invalidate()
         recordingTimer = nil
@@ -370,6 +444,7 @@ public final class RecordingEngine: ObservableObject {
                 }
                 self.recordedPCM = await pcmStreamState.capturedPCM()
             }
+            self.log("captured pcm bytes=\(self.recordedPCM.count)")
 
             let streamingResult = await client?.finish() ?? ""
 
@@ -382,6 +457,7 @@ public final class RecordingEngine: ObservableObject {
             self.liveTranscriptionText = ""
 
             if let text {
+                self.log("finish using realtime text chars=\(text.count)")
                 self.isTranscribing = false
                 self.finishWithText(
                     text,
@@ -391,6 +467,7 @@ public final class RecordingEngine: ObservableObject {
                     activeProjectName: activeProjectName
                 )
             } else if let audioPath, self.writeCapturedWAV(to: audioPath) {
+                self.log("falling back to CLI transcription audioPath=\(audioPath)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
                     curMode: curMode,
@@ -399,6 +476,7 @@ public final class RecordingEngine: ObservableObject {
                     activeProjectName: activeProjectName
                 )
             } else {
+                self.log("no audio captured")
                 self.finish("No audio captured")
             }
 
@@ -408,6 +486,7 @@ public final class RecordingEngine: ObservableObject {
     }
 
     private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, activeProjectId: String?, activeProjectName: String?) {
+        log("finishWithText mode=\(curMode.rawValue) chars=\(text.count)")
         if curMode == .command {
             runCommandMode(instruction: text)
             return
@@ -439,8 +518,10 @@ public final class RecordingEngine: ObservableObject {
                 bitsPerSample: 16,
                 to: URL(fileURLWithPath: path)
             )
+            log("wrote wav path=\(path) pcmBytes=\(recordedPCM.count)")
             return true
         } catch {
+            log("failed to save wav error=\(error.localizedDescription)")
             statusMessage = "Failed to save audio"
             return false
         }
@@ -504,17 +585,24 @@ public final class RecordingEngine: ObservableObject {
         Task.detached {
             let output = CLIRunner.run(["--json", "transcribe", audioPath, "--no-enhance"], home: homePath)
             if let error = CLIRunner.parseError(output) {
-                await MainActor.run { self.finish(error) }
+                await MainActor.run {
+                    self.log("fallback transcription failed error=\(error)")
+                    self.finish(error)
+                }
                 return
             }
 
             let text = CLIRunner.parseJSON(output)
             guard let text, !text.isEmpty else {
-                await MainActor.run { self.finish("Empty transcription") }
+                await MainActor.run {
+                    self.log("fallback transcription empty output=\(output.prefix(160))")
+                    self.finish("Empty transcription")
+                }
                 return
             }
 
             await MainActor.run {
+                self.log("fallback transcription succeeded chars=\(text.count)")
                 self.isTranscribing = false
                 self.finishWithText(
                     text,
@@ -534,6 +622,7 @@ public final class RecordingEngine: ObservableObject {
     }
 
     private func finish(_ msg: String) {
+        log("finish status=\(msg)")
         isTranscribing = false
         liveTranscriptionText = ""
         statusMessage = msg
@@ -550,6 +639,7 @@ public final class RecordingEngine: ObservableObject {
 
     private func runCommandMode(instruction: String) {
         guard ensureAccessibilityPermission(prompt: true) else {
+            log("command mode blocked by accessibility permission")
             statusMessage = "Enable Accessibility permission for Recordings to rewrite selected text"
             return
         }
@@ -609,11 +699,13 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Paste
 
     func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
+        log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
 
         guard ensureAccessibilityPermission(prompt: true) else {
+            log("paste blocked by accessibility permission; copied to clipboard")
             self.statusMessage = "Copied — enable Accessibility permission for Recordings to paste"
             return
         }
@@ -629,6 +721,7 @@ public final class RecordingEngine: ObservableObject {
         })
 
         guard let app = targetApp else {
+            log("paste target app not found")
             self.statusMessage = "No target app found"
             return
         }
@@ -645,6 +738,7 @@ public final class RecordingEngine: ObservableObject {
                 down.post(tap: .cgSessionEventTap)
                 up.post(tap: .cgSessionEventTap)
             }
+            self.log("paste event posted")
             self.statusMessage = "Pasted (\(text.count) chars)"
         }
     }
@@ -656,6 +750,23 @@ public final class RecordingEngine: ObservableObject {
         return AXIsProcessTrustedWithOptions(
             ["AXTrustedCheckOptionPrompt" as CFString: true] as CFDictionary
         )
+    }
+
+    private func log(_ message: String) {
+        NativeAppLog.write(message, homePath: home)
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = true
+
+    func take() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value else { return false }
+        value = false
+        return true
     }
 }
 

@@ -40,11 +40,49 @@ describe("recordings CLI", () => {
       installer_available: boolean;
       native_sources_available: boolean;
       installed_app_path: string;
+      microphone_permission: string;
+      accessibility_permission: string;
+      log_path: string;
     };
     expect(status.package_root).toBe(process.cwd());
     expect(status.installer_available).toBe(true);
     expect(status.native_sources_available).toBe(true);
     expect(status.installed_app_path).toContain(".hasna/recordings/Recordings.app");
+    expect(typeof status.microphone_permission).toBe("string");
+    expect(typeof status.accessibility_permission).toBe("string");
+    expect(status.log_path).toContain(".hasna/recordings/Recordings.log");
+  });
+
+  test("--json app permissions emits permission diagnostics", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "app", "permissions"],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+
+    const permissions = JSON.parse(stdout) as {
+      bundle_id: string;
+      microphone: string;
+      accessibility: string;
+      log_path: string;
+    };
+    expect(permissions.bundle_id).toBe("com.hasna.recordings");
+    expect(typeof permissions.microphone).toBe("string");
+    expect(typeof permissions.accessibility).toBe("string");
+    expect(permissions.log_path).toContain(".hasna/recordings/Recordings.log");
   });
 
   test("--json check emits machine-readable dependency status", async () => {

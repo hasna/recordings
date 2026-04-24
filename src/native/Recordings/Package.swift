@@ -8,7 +8,7 @@ let package = Package(
         .macOS(.v26)
     ],
     dependencies: [
-        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
+        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "1.12.0"),
         .package(url: "https://github.com/apple/swift-testing.git", .upToNextMinor(from: "0.99.0")),
     ],
     targets: [

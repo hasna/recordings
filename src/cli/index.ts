@@ -526,6 +526,74 @@ appCommand
     console.log(`Native sources: ${status.native_sources_available ? "available" : "missing"}`);
     console.log(`Installed app: ${status.installed ? status.installed_app_path : "missing"}`);
     console.log(`Executable: ${status.executable ? "available" : "missing"}`);
+    if (process.platform === "darwin") {
+      console.log(`Microphone: ${status.microphone_permission}`);
+      console.log(`Accessibility: ${status.accessibility_permission}`);
+      console.log(`Log: ${status.log_path}`);
+    }
+  });
+
+appCommand
+  .command("permissions")
+  .description("Show macOS permission state for Recordings.app")
+  .action(() => {
+    const status = getMacOSAppStatus();
+    const permissions = {
+      platform: status.platform,
+      bundle_id: "com.hasna.recordings",
+      microphone: status.microphone_permission,
+      accessibility: status.accessibility_permission,
+      log_path: status.log_path,
+    };
+    if (program.opts().json) {
+      console.log(JSON.stringify(permissions, null, 2));
+      return;
+    }
+    console.log(`Microphone: ${permissions.microphone}`);
+    console.log(`Accessibility: ${permissions.accessibility}`);
+    console.log(`Log: ${permissions.log_path}`);
+  });
+
+appCommand
+  .command("reset-permissions")
+  .description("Reset macOS Microphone and Accessibility permissions for Recordings.app")
+  .action(() => {
+    if (process.platform !== "darwin") {
+      console.error(chalk.red("Permission reset is only available on macOS"));
+      process.exit(1);
+    }
+    const services = ["Microphone", "Accessibility"];
+    for (const service of services) {
+      const result = spawnSync("tccutil", ["reset", service, "com.hasna.recordings"], {
+        stdio: "inherit",
+      });
+      if (result.error) {
+        console.error(chalk.red(result.error.message));
+        process.exit(1);
+      }
+    }
+  });
+
+appCommand
+  .command("log")
+  .description("Show the Recordings.app diagnostic log")
+  .option("-n, --lines <lines>", "Number of lines to print", "120")
+  .action((opts: { lines: string }) => {
+    const status = getMacOSAppStatus();
+    if (!existsSync(status.log_path)) {
+      console.log("");
+      return;
+    }
+    const lines = Math.max(1, parseInt(opts.lines, 10) || 120);
+    const result = spawnSync("tail", ["-n", String(lines), status.log_path], {
+      encoding: "utf8",
+    });
+    if (result.error) {
+      console.error(chalk.red(result.error.message));
+      process.exit(1);
+    }
+    process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
   });
 
 appCommand
@@ -1129,6 +1197,9 @@ type MacOSAppStatus = {
   installed: boolean;
   executable_path: string;
   executable: boolean;
+  microphone_permission: string;
+  accessibility_permission: string;
+  log_path: string;
 };
 
 function getMacOSAppStatus(): MacOSAppStatus {
@@ -1136,6 +1207,7 @@ function getMacOSAppStatus(): MacOSAppStatus {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const installedAppPath = pathJoin(home, ".hasna", "recordings", "Recordings.app");
   const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
+  const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
   const installerPath = pathJoin(packageRoot, "scripts", "install_macos_app.sh");
   const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
 
@@ -1150,7 +1222,50 @@ function getMacOSAppStatus(): MacOSAppStatus {
     installed: existsSync(installedAppPath),
     executable_path: executablePath,
     executable: existsSync(executablePath),
+    microphone_permission: getTccPermission("kTCCServiceMicrophone", home),
+    accessibility_permission: getTccPermission("kTCCServiceAccessibility", home),
+    log_path: logPath,
   };
+}
+
+function getTccPermission(service: string, home: string): string {
+  if (process.platform !== "darwin") return "unsupported";
+
+  const dbPaths = [
+    pathJoin(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"),
+    pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
+  ];
+  const sql =
+    "select auth_value from access where service = '" +
+    service.replace(/'/g, "''") +
+    "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
+
+  for (const dbPath of dbPaths) {
+    if (!existsSync(dbPath)) continue;
+    const result = spawnSync("sqlite3", [dbPath, sql], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const value = result.stdout.trim();
+    if (value) return tccAuthValueLabel(value);
+  }
+
+  return "not_determined";
+}
+
+function tccAuthValueLabel(value: string): string {
+  switch (value) {
+    case "0":
+      return "denied";
+    case "1":
+      return "unknown";
+    case "2":
+      return "allowed";
+    case "3":
+      return "limited";
+    default:
+      return `unknown(${value})`;
+  }
 }
 
 function findPackageRoot(): string {

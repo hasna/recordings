@@ -129,16 +129,56 @@ function runMigrations(db: Database): void {
   const currentLevel = result?.max_id ?? -1;
 
   for (let i = currentLevel + 1; i < MIGRATIONS.length; i++) {
-    db.run(MIGRATIONS[i]!);
     try {
+      db.run(MIGRATIONS[i]!);
       db.query("INSERT INTO _migrations (id) VALUES (?)").run(i);
     } catch (e) {
-      if (!(e instanceof Error && e.message.includes('UNIQUE constraint failed'))) {
+      if (isBenignMigrationError(e)) {
+        db.query("INSERT OR IGNORE INTO _migrations (id) VALUES (?)").run(i);
+        continue;
+      }
+      if (!(e instanceof Error && e.message.includes("UNIQUE constraint failed"))) {
         throw e;
       }
       // Migration already applied, continue
     }
   }
+
+  repairSchemaDrift(db);
+}
+
+function isBenignMigrationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes("duplicate column name");
+}
+
+function repairSchemaDrift(db: Database): void {
+  ensureColumn(db, "recordings", "goal", "TEXT");
+  ensureColumn(db, "recordings", "role", "TEXT");
+  ensureColumn(db, "recordings", "task_list_id", "TEXT");
+  ensureColumn(db, "recordings", "machine_id", "TEXT");
+  ensureColumn(db, "recordings", "metadata", "TEXT DEFAULT '{}'");
+  ensureColumn(
+    db,
+    "agents",
+    "active_project_id",
+    "TEXT REFERENCES projects(id) ON DELETE SET NULL"
+  );
+}
+
+function ensureColumn(
+  db: Database,
+  table: string,
+  column: string,
+  definition: string
+): void {
+  const rows = db.query(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+  }[];
+  if (rows.some((row) => row.name === column)) {
+    return;
+  }
+  db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 export function closeDatabase(): void {

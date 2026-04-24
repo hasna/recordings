@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync, rmSync, existsSync } from "fs";
@@ -105,6 +106,148 @@ describe("getDatabase", () => {
     const agent = db2.query("SELECT * FROM agents WHERE id = ?").get("test-id") as Record<string, unknown> | undefined;
     expect(agent).toBeDefined();
     expect(agent!["name"]).toBe("test-agent");
+  });
+
+  test("repairs existing recording tables missing newer columns", () => {
+    const dbPath = join(tempDir, "legacy.db");
+    const legacy = new Database(dbPath);
+    legacy.run(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT UNIQUE NOT NULL,
+        description TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.run(`
+      CREATE TABLE agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        role TEXT DEFAULT 'agent',
+        metadata TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.run(`
+      CREATE TABLE recordings (
+        id TEXT PRIMARY KEY,
+        audio_path TEXT,
+        raw_text TEXT NOT NULL,
+        processed_text TEXT,
+        processing_mode TEXT NOT NULL DEFAULT 'raw',
+        model_used TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+        enhancement_model TEXT,
+        duration_ms INTEGER DEFAULT 0,
+        language TEXT,
+        tags TEXT DEFAULT '[]',
+        agent_id TEXT,
+        project_id TEXT,
+        session_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.run(`
+      CREATE TABLE recording_tags (
+        recording_id TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (recording_id, tag)
+      )
+    `);
+    legacy.run(`
+      CREATE TABLE _migrations (
+        id INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.query("INSERT INTO _migrations (id) VALUES (?)").run(4);
+    legacy.close();
+
+    const db = getDatabase(dbPath);
+    const recordingColumns = (
+      db.query("PRAGMA table_info(recordings)").all() as { name: string }[]
+    ).map((row) => row.name);
+    const agentColumns = (
+      db.query("PRAGMA table_info(agents)").all() as { name: string }[]
+    ).map((row) => row.name);
+
+    expect(recordingColumns).toContain("goal");
+    expect(recordingColumns).toContain("role");
+    expect(recordingColumns).toContain("task_list_id");
+    expect(recordingColumns).toContain("machine_id");
+    expect(recordingColumns).toContain("metadata");
+    expect(agentColumns).toContain("active_project_id");
+
+    db.query(
+      `INSERT INTO recordings (id, raw_text, processing_mode, model_used, tags, machine_id, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run("legacy-ok", "hello", "raw", "gpt-4o-mini-transcribe", "[]", "apple03", "{}");
+    const row = db.query("SELECT machine_id FROM recordings WHERE id = ?").get("legacy-ok") as {
+      machine_id: string;
+    };
+    expect(row.machine_id).toBe("apple03");
+  });
+
+  test("continues when a schema migration was partially applied", () => {
+    const dbPath = join(tempDir, "partial.db");
+    const legacy = new Database(dbPath);
+    legacy.run(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT UNIQUE NOT NULL,
+        description TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.run(`
+      CREATE TABLE agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        role TEXT DEFAULT 'agent',
+        metadata TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.run(`
+      CREATE TABLE recordings (
+        id TEXT PRIMARY KEY,
+        audio_path TEXT,
+        raw_text TEXT NOT NULL,
+        processed_text TEXT,
+        processing_mode TEXT NOT NULL DEFAULT 'raw',
+        model_used TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+        enhancement_model TEXT,
+        duration_ms INTEGER DEFAULT 0,
+        language TEXT,
+        tags TEXT DEFAULT '[]',
+        agent_id TEXT,
+        project_id TEXT,
+        session_id TEXT,
+        goal TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.run("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
+    legacy.query("INSERT INTO _migrations (id) VALUES (?)").run(0);
+    legacy.close();
+
+    const db = getDatabase(dbPath);
+    const recordingColumns = (
+      db.query("PRAGMA table_info(recordings)").all() as { name: string }[]
+    ).map((row) => row.name);
+
+    expect(recordingColumns).toContain("goal");
+    expect(recordingColumns).toContain("role");
+    expect(recordingColumns).toContain("task_list_id");
+    expect(recordingColumns).toContain("machine_id");
+    expect(recordingColumns).toContain("metadata");
   });
 });
 
