@@ -1,5 +1,5 @@
 import SwiftUI
-import KeyboardShortcuts
+@preconcurrency import KeyboardShortcuts
 
 public struct SettingsView: View {
     @ObservedObject public var engine: RecordingEngine
@@ -43,6 +43,32 @@ public struct SettingsView: View {
                 }
                 Text("Hold to record, release to transcribe and paste.")
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Permissions") {
+                HStack {
+                    Text("Microphone")
+                    Spacer()
+                    Text(engine.microphonePermissionLabel)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Request Microphone") {
+                    engine.requestMicrophonePermission()
+                }
+                HStack {
+                    Text("Accessibility")
+                    Spacer()
+                    Text(engine.accessibilityPermissionLabel)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Request Accessibility") {
+                        engine.requestAccessibilityPermission()
+                    }
+                    Button("Open Accessibility Settings") {
+                        engine.openAccessibilitySettings()
+                    }
+                }
             }
 
             Section("System Prompt") {

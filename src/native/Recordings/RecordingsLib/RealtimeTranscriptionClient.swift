@@ -121,6 +121,9 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     public func finish(timeoutMilliseconds: UInt64 = 1_800) async -> String {
         guard isStreaming else { return accumulatedText }
         let initialCompletedCount = completedEventCount
+        if initialCompletedCount > 0 {
+            return stop()
+        }
         await commitInput()
 
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutMilliseconds) / 1_000)

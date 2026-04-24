@@ -526,6 +526,7 @@ appCommand
     console.log(`Native sources: ${status.native_sources_available ? "available" : "missing"}`);
     console.log(`Installed app: ${status.installed ? status.installed_app_path : "missing"}`);
     console.log(`Executable: ${status.executable ? "available" : "missing"}`);
+    console.log(`Code hash: ${status.app_code_hash ?? "unavailable"}`);
     if (process.platform === "darwin") {
       console.log(`Microphone: ${status.microphone_permission}`);
       console.log(`Accessibility: ${status.accessibility_permission}`);
@@ -543,6 +544,8 @@ appCommand
       bundle_id: "com.hasna.recordings",
       microphone: status.microphone_permission,
       accessibility: status.accessibility_permission,
+      app_code_hash: status.app_code_hash,
+      ad_hoc_signed: status.ad_hoc_signed,
       log_path: status.log_path,
     };
     if (program.opts().json) {
@@ -1197,6 +1200,8 @@ type MacOSAppStatus = {
   installed: boolean;
   executable_path: string;
   executable: boolean;
+  app_code_hash: string | null;
+  ad_hoc_signed: boolean;
   microphone_permission: string;
   accessibility_permission: string;
   log_path: string;
@@ -1210,6 +1215,8 @@ function getMacOSAppStatus(): MacOSAppStatus {
   const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
   const installerPath = pathJoin(packageRoot, "scripts", "install_macos_app.sh");
   const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
+  const signingInfo = getCodeSigningInfo(installedAppPath);
+  const permissionCodeHash = signingInfo.adHoc ? signingInfo.cdHash : null;
 
   return {
     platform: process.platform,
@@ -1222,13 +1229,29 @@ function getMacOSAppStatus(): MacOSAppStatus {
     installed: existsSync(installedAppPath),
     executable_path: executablePath,
     executable: existsSync(executablePath),
-    microphone_permission: getTccPermission("kTCCServiceMicrophone", home),
-    accessibility_permission: getTccPermission("kTCCServiceAccessibility", home),
+    app_code_hash: signingInfo.cdHash,
+    ad_hoc_signed: signingInfo.adHoc,
+    microphone_permission: getTccPermission("kTCCServiceMicrophone", home, permissionCodeHash),
+    accessibility_permission: getTccPermission("kTCCServiceAccessibility", home, permissionCodeHash),
     log_path: logPath,
   };
 }
 
-function getTccPermission(service: string, home: string): string {
+function getCodeSigningInfo(appPath: string): { cdHash: string | null; adHoc: boolean } {
+  if (process.platform !== "darwin" || !existsSync(appPath)) {
+    return { cdHash: null, adHoc: false };
+  }
+  const result = spawnSync("codesign", ["-d", "--verbose=4", appPath], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const output = `${result.stdout}\n${result.stderr}`;
+  const cdHash = output.match(/^CDHash=([a-fA-F0-9]+)/m)?.[1]?.toLowerCase() ?? null;
+  const adHoc = /Signature=adhoc/.test(output);
+  return { cdHash, adHoc };
+}
+
+function getTccPermission(service: string, home: string, currentCodeHash?: string | null): string {
   if (process.platform !== "darwin") return "unsupported";
 
   const dbPaths = [
@@ -1236,7 +1259,7 @@ function getTccPermission(service: string, home: string): string {
     pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
   ];
   const sql =
-    "select auth_value from access where service = '" +
+    "select auth_value || '|' || ifnull(hex(csreq), '') from access where service = '" +
     service.replace(/'/g, "''") +
     "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
 
@@ -1247,7 +1270,18 @@ function getTccPermission(service: string, home: string): string {
       stdio: ["ignore", "pipe", "ignore"],
     });
     const value = result.stdout.trim();
-    if (value) return tccAuthValueLabel(value);
+    if (!value) continue;
+    const [authValue, csreqHex = ""] = value.split("|");
+    const label = tccAuthValueLabel(authValue ?? "");
+    if (
+      label === "allowed" &&
+      currentCodeHash &&
+      csreqHex &&
+      !csreqHex.toLowerCase().includes(currentCodeHash.toLowerCase())
+    ) {
+      return "stale_allowed_for_previous_app_build";
+    }
+    return label;
   }
 
   return "not_determined";

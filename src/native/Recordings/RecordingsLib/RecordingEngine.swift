@@ -127,6 +127,7 @@ public final class RecordingEngine: ObservableObject {
     private var streamingText = ""
     private var recordedPCM = Data()
     private var activeAudioPath: String?
+    private var lastAccessibilityPromptAt: Date?
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -638,7 +639,7 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Command Mode
 
     private func runCommandMode(instruction: String) {
-        guard ensureAccessibilityPermission(prompt: true) else {
+        guard ensureAccessibilityPermission(prompt: shouldPromptAccessibility()) else {
             log("command mode blocked by accessibility permission")
             statusMessage = "Enable Accessibility permission for Recordings to rewrite selected text"
             return
@@ -704,9 +705,12 @@ public final class RecordingEngine: ObservableObject {
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        guard ensureAccessibilityPermission(prompt: true) else {
+        let prompted = shouldPromptAccessibility()
+        guard ensureAccessibilityPermission(prompt: prompted) else {
             log("paste blocked by accessibility permission; copied to clipboard")
-            self.statusMessage = "Copied — enable Accessibility permission for Recordings to paste"
+            self.statusMessage = prompted
+                ? "Copied — approve Accessibility for this Recordings app"
+                : "Copied — waiting for Accessibility approval"
             return
         }
 
@@ -744,12 +748,25 @@ public final class RecordingEngine: ObservableObject {
     }
 
     private func ensureAccessibilityPermission(prompt: Bool) -> Bool {
+        if AXIsProcessTrusted() {
+            return true
+        }
         if !prompt {
-            return AXIsProcessTrusted()
+            return false
         }
         return AXIsProcessTrustedWithOptions(
             ["AXTrustedCheckOptionPrompt" as CFString: true] as CFDictionary
         )
+    }
+
+    private func shouldPromptAccessibility() -> Bool {
+        let now = Date()
+        if let lastAccessibilityPromptAt,
+           now.timeIntervalSince(lastAccessibilityPromptAt) < 20 {
+            return false
+        }
+        lastAccessibilityPromptAt = now
+        return true
     }
 
     private func log(_ message: String) {

@@ -73,4 +73,36 @@ rm -rf "$APP_DEST"
 mkdir -p "$DATA_DIR"
 cp -R "$APP_SOURCE" "$APP_DEST" || warn_or_fail "failed to copy app bundle"
 
+current_cdhash() {
+  codesign -d --verbose=4 "$1" 2>&1 | awk -F= '/^CDHash=/ { print toupper($2); exit }'
+}
+
+tcc_csreq_hex() {
+  local db_path="$1"
+  local service="$2"
+  if [ ! -r "$db_path" ] || ! command -v sqlite3 >/dev/null 2>&1; then
+    return 0
+  fi
+  sqlite3 "$db_path" \
+    "SELECT hex(csreq) FROM access WHERE service = '${service}' AND client = 'com.hasna.recordings' ORDER BY last_modified DESC LIMIT 1;" \
+    2>/dev/null || true
+}
+
+reset_stale_permission() {
+  local service="$1"
+  local tcc_service="$2"
+  local db_path="$3"
+  local cdhash="$4"
+  local csreq_hex
+  csreq_hex="$(tcc_csreq_hex "$db_path" "$tcc_service" | tr '[:lower:]' '[:upper:]')"
+  if [ -n "$cdhash" ] && [ -n "$csreq_hex" ] && [[ "$csreq_hex" != *"$cdhash"* ]]; then
+    tccutil reset "$service" com.hasna.recordings >/dev/null 2>&1 || true
+    echo "Reset stale ${service} permission for the newly installed Recordings.app."
+  fi
+}
+
+APP_CDHASH="$(current_cdhash "$APP_DEST" || true)"
+reset_stale_permission "Microphone" "kTCCServiceMicrophone" "${HOME}/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
+reset_stale_permission "Accessibility" "kTCCServiceAccessibility" "/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
+
 echo "Installed Recordings.app from package: ${APP_DEST}"

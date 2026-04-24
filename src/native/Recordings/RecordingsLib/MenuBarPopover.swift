@@ -1,5 +1,5 @@
 import SwiftUI
-import KeyboardShortcuts
+@preconcurrency import KeyboardShortcuts
 
 public struct MenuBarPopover: View {
     @ObservedObject public var engine: RecordingEngine

@@ -40,6 +40,8 @@ describe("recordings CLI", () => {
       installer_available: boolean;
       native_sources_available: boolean;
       installed_app_path: string;
+      app_code_hash: string | null;
+      ad_hoc_signed: boolean;
       microphone_permission: string;
       accessibility_permission: string;
       log_path: string;
@@ -48,6 +50,8 @@ describe("recordings CLI", () => {
     expect(status.installer_available).toBe(true);
     expect(status.native_sources_available).toBe(true);
     expect(status.installed_app_path).toContain(".hasna/recordings/Recordings.app");
+    expect(typeof status.ad_hoc_signed).toBe("boolean");
+    expect(status.app_code_hash === null || typeof status.app_code_hash === "string").toBe(true);
     expect(typeof status.microphone_permission).toBe("string");
     expect(typeof status.accessibility_permission).toBe("string");
     expect(status.log_path).toContain(".hasna/recordings/Recordings.log");
@@ -77,11 +81,15 @@ describe("recordings CLI", () => {
       bundle_id: string;
       microphone: string;
       accessibility: string;
+      app_code_hash: string | null;
+      ad_hoc_signed: boolean;
       log_path: string;
     };
     expect(permissions.bundle_id).toBe("com.hasna.recordings");
     expect(typeof permissions.microphone).toBe("string");
     expect(typeof permissions.accessibility).toBe("string");
+    expect(typeof permissions.ad_hoc_signed).toBe("boolean");
+    expect(permissions.app_code_hash === null || typeof permissions.app_code_hash === "string").toBe(true);
     expect(permissions.log_path).toContain(".hasna/recordings/Recordings.log");
   });
 
