@@ -110,4 +110,17 @@ struct RealtimeTranscriptionTests {
         let text = RealtimeTranscriptionClient.joinTranscriptPartsTestHelper(["Hello", "world.", " Next"])
         #expect(text == "Hello world. Next")
     }
+
+    @Test("Manual commit waits for enough buffered PCM audio")
+    func manualCommitThreshold() {
+        #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 4_799) == false)
+        #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 5_760) == true)
+    }
+
+    @Test("Partial realtime text falls back for longer recordings")
+    func partialRealtimeFallback() {
+        #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 96_000) == true)
+        #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "This is a complete sentence.", pcmByteCount: 96_000) == false)
+        #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 12_000) == false)
+    }
 }

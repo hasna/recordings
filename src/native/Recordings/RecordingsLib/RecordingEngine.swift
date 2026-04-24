@@ -457,7 +457,7 @@ public final class RecordingEngine: ObservableObject {
 
             self.liveTranscriptionText = ""
 
-            if let text {
+            if let text, !Self.shouldFallbackFromPartialRealtime(text: text, pcmByteCount: self.recordedPCM.count) {
                 self.log("finish using realtime text chars=\(text.count)")
                 self.isTranscribing = false
                 self.finishWithText(
@@ -468,6 +468,9 @@ public final class RecordingEngine: ObservableObject {
                     activeProjectName: activeProjectName
                 )
             } else if let audioPath, self.writeCapturedWAV(to: audioPath) {
+                if let text {
+                    self.log("realtime text looked partial chars=\(text.count); falling back to CLI")
+                }
                 self.log("falling back to CLI transcription audioPath=\(audioPath)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
@@ -484,6 +487,13 @@ public final class RecordingEngine: ObservableObject {
             self.activeAudioPath = nil
             self.recordedPCM.removeAll(keepingCapacity: true)
         }
+    }
+
+    public nonisolated static func shouldFallbackFromPartialRealtime(text: String, pcmByteCount: Int) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pcmByteCount >= 48_000, !trimmed.isEmpty else { return false }
+        let words = trimmed.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+        return trimmed.count < 12 || words.count <= 2
     }
 
     private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, activeProjectId: String?, activeProjectName: String?) {
