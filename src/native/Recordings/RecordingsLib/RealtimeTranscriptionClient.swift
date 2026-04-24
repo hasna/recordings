@@ -16,7 +16,8 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
     private var ws: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
-    private var audioSendTask: Task<Void, Never>?
+    private var outboundEventTask: Task<Void, Never>?
+    private var liveCommitTask: Task<Void, Never>?
     private var isConfigured = false
     private var pendingAudioChunks: [Data] = []
     private var itemOrder: [String] = []
@@ -25,10 +26,14 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     private var committedItemIDs = Set<String>()
     private var completedItemIDs = Set<String>()
     private var completedEventCount = 0
+    private var queuedCommitCount = 0
     private var uncommittedAudioBytes = 0
     private var lastRealtimeEventAt = Date.distantPast
+    private var lastCommitQueuedAt = Date.distantPast
 
     private nonisolated static let minimumManualCommitBytes = 5_760
+    private nonisolated static let minimumLiveCommitBytes = 38_400
+    private nonisolated static let liveCommitIntervalSeconds: TimeInterval = 0.8
 
     private let apiKey: String
     private let homePath: String
@@ -62,8 +67,10 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         committedItemIDs.removeAll(keepingCapacity: true)
         completedItemIDs.removeAll(keepingCapacity: true)
         completedEventCount = 0
+        queuedCommitCount = 0
         uncommittedAudioBytes = 0
         lastRealtimeEventAt = Date()
+        lastCommitQueuedAt = Date()
         error = nil
 
         var request = URLRequest(url: Self.transcriptionURL)
@@ -114,27 +121,29 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
             "type": "input_audio_buffer.append",
             "audio": base64,
         ]
-        let previousSendTask = audioSendTask
-        audioSendTask = Task { [weak self] in
-            await previousSendTask?.value
-            try? await self?.sendEvent(msg)
-        }
+        enqueueOutboundEvent(msg)
+        scheduleLiveCommitIfNeeded()
     }
 
     /// Signal end of input — triggers final transcription completion.
     @discardableResult
-    public func commitInput() async -> Bool {
+    public func commitInput(reason: String = "final") async -> Bool {
         guard isStreaming, ws != nil else { return false }
         flushPendingAudio()
-        await audioSendTask?.value
-        guard Self.shouldManuallyCommit(uncommittedAudioBytes: uncommittedAudioBytes) else {
+        let bytesToCommit = uncommittedAudioBytes
+        guard Self.shouldManuallyCommit(uncommittedAudioBytes: bytesToCommit) else {
             return false
         }
         let msg: [String: Any] = [
             "type": "input_audio_buffer.commit",
         ]
+        uncommittedAudioBytes = 0
+        queuedCommitCount += 1
         lastRealtimeEventAt = Date()
-        try? await sendEvent(msg)
+        lastCommitQueuedAt = Date()
+        NativeAppLog.write("realtime commit queued reason=\(reason) bytes=\(bytesToCommit)", homePath: homePath)
+        let commitTask = enqueueOutboundEvent(msg)
+        await commitTask?.value
         return true
     }
 
@@ -143,13 +152,15 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         guard isStreaming else { return accumulatedText }
         let completedCountBeforeCommit = completedEventCount
         let didManualCommit = await commitInput()
+        let expectedCommitCount = queuedCommitCount
 
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutMilliseconds) / 1_000)
         while Date() < deadline, isStreaming {
             let hasIncompleteCommittedItems = !committedItemIDs.subtracting(completedItemIDs).isEmpty
             let hasManualCommitCompletion = !didManualCommit || completedEventCount > completedCountBeforeCommit
+            let hasQueuedCommitCompletion = completedEventCount >= expectedCommitCount
             let quietLongEnough = Date().timeIntervalSince(lastRealtimeEventAt) >= 0.35
-            if !hasIncompleteCommittedItems, hasManualCommitCompletion, quietLongEnough {
+            if !hasIncompleteCommittedItems, hasManualCommitCompletion, hasQueuedCommitCompletion, quietLongEnough {
                 break
             }
             try? await Task.sleep(for: .milliseconds(50))
@@ -166,10 +177,12 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         isConfigured = false
         receiveTask?.cancel()
         ws?.cancel(with: .normalClosure, reason: nil)
-        audioSendTask?.cancel()
+        outboundEventTask?.cancel()
+        liveCommitTask?.cancel()
         ws = nil
         receiveTask = nil
-        audioSendTask = nil
+        outboundEventTask = nil
+        liveCommitTask = nil
         pendingAudioChunks.removeAll(keepingCapacity: true)
         let text = accumulatedText
         return text
@@ -214,7 +227,6 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
                 registerItem(itemID, previousItemID: json["previous_item_id"] as? String)
                 committedItemIDs.insert(itemID)
             }
-            uncommittedAudioBytes = 0
 
         case "conversation.item.input_audio_transcription.delta":
             lastRealtimeEventAt = Date()
@@ -230,15 +242,19 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
             lastRealtimeEventAt = Date()
             let itemID = json["item_id"] as? String ?? "__default__"
             registerItem(itemID, previousItemID: nil)
+            completedItemIDs.insert(itemID)
+            completedEventCount += 1
             if let text = json["transcript"] as? String, !text.isEmpty {
                 completedTextByItem[itemID] = text
-                completedItemIDs.insert(itemID)
-                completedEventCount += 1
-                rebuildAccumulatedText()
             }
+            rebuildAccumulatedText()
 
         case "conversation.item.input_audio_transcription.failed":
             lastRealtimeEventAt = Date()
+            if let itemID = json["item_id"] as? String {
+                completedItemIDs.insert(itemID)
+                completedEventCount += 1
+            }
             if let msg = json["error"] as? [String: Any],
                let message = msg["message"] as? String {
                 self.error = message
@@ -255,6 +271,37 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         default:
             break
         }
+    }
+
+    @discardableResult
+    private func enqueueOutboundEvent(_ obj: [String: Any]) -> Task<Void, Never>? {
+        guard ws != nil else { return nil }
+        let previousTask = outboundEventTask
+        let task = Task { [weak self] in
+            await previousTask?.value
+            try? await self?.sendEvent(obj)
+        }
+        outboundEventTask = task
+        return task
+    }
+
+    private func scheduleLiveCommitIfNeeded(now: Date = Date()) {
+        guard liveCommitTask == nil else { return }
+        let secondsSinceLastCommit = now.timeIntervalSince(lastCommitQueuedAt)
+        guard Self.shouldAutoCommitLiveInput(
+            uncommittedAudioBytes: uncommittedAudioBytes,
+            secondsSinceLastCommit: secondsSinceLastCommit
+        ) else { return }
+
+        liveCommitTask = Task { [weak self] in
+            _ = await self?.commitLiveInput()
+        }
+    }
+
+    @discardableResult
+    private func commitLiveInput() async -> Bool {
+        defer { liveCommitTask = nil }
+        return await commitInput(reason: "live")
     }
 
     private func registerItem(_ itemID: String, previousItemID: String?) {
@@ -336,6 +383,14 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         uncommittedAudioBytes >= minimumManualCommitBytes
     }
 
+    private nonisolated static func shouldAutoCommitLiveInput(
+        uncommittedAudioBytes: Int,
+        secondsSinceLastCommit: TimeInterval
+    ) -> Bool {
+        uncommittedAudioBytes >= minimumLiveCommitBytes &&
+            secondsSinceLastCommit >= liveCommitIntervalSeconds
+    }
+
     private nonisolated static func transcriptionSessionUpdateEvent(transcription: [String: Any]) -> [String: Any] {
         [
             "type": "session.update",
@@ -348,12 +403,7 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
                             "rate": 24_000,
                         ],
                         "transcription": transcription,
-                        "turn_detection": [
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 350,
-                        ],
+                        "turn_detection": NSNull(),
                         "noise_reduction": [
                             "type": "near_field",
                         ],
@@ -406,6 +456,16 @@ extension RealtimeTranscriptionClient {
 
     public nonisolated static func shouldManuallyCommitTestHelper(uncommittedAudioBytes: Int) -> Bool {
         shouldManuallyCommit(uncommittedAudioBytes: uncommittedAudioBytes)
+    }
+
+    public nonisolated static func shouldAutoCommitLiveInputTestHelper(
+        uncommittedAudioBytes: Int,
+        secondsSinceLastCommit: TimeInterval
+    ) -> Bool {
+        shouldAutoCommitLiveInput(
+            uncommittedAudioBytes: uncommittedAudioBytes,
+            secondsSinceLastCommit: secondsSinceLastCommit
+        )
     }
 
     public nonisolated static func sessionUpdateTestHelper(prompt: String, language: String = "") -> [String: Any] {
