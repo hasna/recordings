@@ -1,4 +1,3 @@
-import Foundation
 import Testing
 @testable import RecordingsLib
 
@@ -99,7 +98,8 @@ struct RealtimeTranscriptionTests {
         #expect(transcription?["prompt"] as? String == "Use Alumia as vocabulary")
         #expect(transcription?["language"] as? String == "en")
 
-        #expect(input?["turn_detection"] is NSNull)
+        let turnDetection = input?["turn_detection"] as? [String: Any]
+        #expect(turnDetection?["type"] as? String == "server_vad")
 
         let include = session?["include"] as? [String]
         #expect(include?.contains("item.input_audio_transcription.logprobs") == true)
@@ -115,22 +115,6 @@ struct RealtimeTranscriptionTests {
     func manualCommitThreshold() {
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 4_799) == false)
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 5_760) == true)
-    }
-
-    @Test("Live commits wait for enough audio and elapsed time")
-    func liveCommitThreshold() {
-        #expect(RealtimeTranscriptionClient.shouldAutoCommitLiveInputTestHelper(
-            uncommittedAudioBytes: 38_399,
-            secondsSinceLastCommit: 1.0
-        ) == false)
-        #expect(RealtimeTranscriptionClient.shouldAutoCommitLiveInputTestHelper(
-            uncommittedAudioBytes: 38_400,
-            secondsSinceLastCommit: 0.79
-        ) == false)
-        #expect(RealtimeTranscriptionClient.shouldAutoCommitLiveInputTestHelper(
-            uncommittedAudioBytes: 38_400,
-            secondsSinceLastCommit: 0.8
-        ) == true)
     }
 
     @Test("Partial realtime text falls back for longer recordings")

@@ -382,13 +382,12 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Real-time Streaming
 
     private func startRealtimeStreaming(apiKey: String) {
-        let systemPrompt = projectStore?.effectiveSystemPrompt ?? ""
         let client = RealtimeTranscriptionClient(apiKey: apiKey, homePath: home)
         realtimeClient = client
         log("realtime streaming task starting")
 
         streamingTask = Task {
-            await client.startStreaming(systemPrompt: systemPrompt)
+            await client.startStreaming()
             self.log("realtime start completed streaming=\(client.isStreaming) error=\(client.error ?? "")")
 
             // Receive deltas
@@ -453,25 +452,15 @@ public final class RecordingEngine: ObservableObject {
             self.streamingTask?.cancel()
             self.streamingTask = nil
 
-            let text = streamingResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : streamingResult
+            let realtimeText = streamingResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : streamingResult
 
             self.liveTranscriptionText = ""
 
-            if let text, !Self.shouldFallbackFromPartialRealtime(text: text, pcmByteCount: self.recordedPCM.count) {
-                self.log("finish using realtime text chars=\(text.count)")
-                self.isTranscribing = false
-                self.finishWithText(
-                    text,
-                    curMode: curMode,
-                    targetAppBundleIdentifier: targetAppBundleIdentifier,
-                    activeProjectId: activeProjectId,
-                    activeProjectName: activeProjectName
-                )
-            } else if let audioPath, self.writeCapturedWAV(to: audioPath) {
-                if let text {
-                    self.log("realtime text looked partial chars=\(text.count); falling back to CLI")
+            if let audioPath, self.writeCapturedWAV(to: audioPath) {
+                if let realtimeText {
+                    self.log("realtime preview ignored for final chars=\(realtimeText.count)")
                 }
-                self.log("falling back to CLI transcription audioPath=\(audioPath)")
+                self.log("transcribing captured full audio audioPath=\(audioPath)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
                     curMode: curMode,
