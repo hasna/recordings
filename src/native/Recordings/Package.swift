@@ -8,18 +8,24 @@ let package = Package(
         .macOS(.v26)
     ],
     dependencies: [
-        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0")
+        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
+        .package(url: "https://github.com/apple/swift-testing.git", .upToNextMinor(from: "0.99.0")),
     ],
     targets: [
-        .executableTarget(
-            name: "Recordings",
+        .target(
+            name: "RecordingsLib",
             dependencies: ["KeyboardShortcuts"],
-            path: "Recordings",
+            path: "RecordingsLib",
             exclude: ["Info.plist", "Recordings.entitlements"]
+        ),
+        .executableTarget(
+            name: "App",
+            dependencies: ["RecordingsLib"],
+            path: "App"
         ),
         .testTarget(
             name: "RecordingsTests",
-            dependencies: ["Recordings"],
+            dependencies: ["RecordingsLib", .product(name: "Testing", package: "swift-testing")],
             path: "RecordingsTests"
         ),
     ]

@@ -7,7 +7,11 @@ import {
   closeDatabase,
   resetDatabase,
 } from "../db/database.js";
-import { registerAgent, getAgent, listAgents } from "../db/agents.js";
+import {
+  registerAgent,
+  getAgent,
+  listAgents,
+} from "../db/agents.js";
 import { type Database } from "bun:sqlite";
 
 let tempDir: string;

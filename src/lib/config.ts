@@ -26,9 +26,10 @@ export const DEFAULT_CONFIG: RecordingsConfig = {
     "improve this",
     "polish this",
   ],
+  keyword_transforms: {},
   db_path: "",
   audio_dir: "",
-  max_recording_seconds: 300,
+  max_recording_seconds: 1800,
 };
 
 export function loadConfig(configPath?: string): RecordingsConfig {

@@ -88,6 +88,16 @@ export function startRecording(config: RecordingsConfig): string {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
+  // Set up automatic chunking if recording exceeds max duration
+  if (config.max_recording_seconds > 0) {
+    setTimeout(() => {
+      if (_recordProcess && _currentFile === filepath) {
+        console.log(`Recording exceeded ${config.max_recording_seconds} seconds, auto-stopping`);
+        stopRecording();
+      }
+    }, config.max_recording_seconds * 1000);
+  }
+
   _currentFile = filepath;
 
   _recordProcess.on("error", (err) => {

@@ -22,6 +22,7 @@ import {
 import { transcribeAudio, transcribeBuffer } from "../lib/transcriber.js";
 import { processText, needsEnhancement } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
+import { VERSION } from "../version.js";
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 
@@ -31,8 +32,14 @@ getDatabase(config.db_path);
 
 const server = new McpServer({
   name: "recordings",
-  version: "0.0.3",
+  version: VERSION,
 });
+const registerTool = server.tool.bind(server) as (
+  name: string,
+  description: string,
+  paramsSchema: Record<string, unknown>,
+  cb: (args: any) => unknown
+) => void;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -67,6 +74,40 @@ function full(r: Recording): string {
   return lines.join("\n");
 }
 
+async function saveRecordingMemento(args: {
+  key: string;
+  value: string;
+  summary: string;
+}): Promise<void> {
+  try {
+    const proc = Bun.spawn(
+      [
+        "mementos",
+        "save",
+        "--scope",
+        "shared",
+        "--category",
+        "history",
+        "--importance",
+        "5",
+        "--tags",
+        "recording,transcription",
+        "--summary",
+        args.summary,
+        args.key,
+        args.value,
+      ],
+      {
+        stdout: "ignore",
+        stderr: "ignore",
+      }
+    );
+    await proc.exited;
+  } catch {
+    // Memory capture is best-effort; transcription should still succeed.
+  }
+}
+
 // ── Full tool schemas for describe_tool ─────────────────────────────────────
 
 const toolDocs: Record<string, string> = {
@@ -89,7 +130,7 @@ const toolDocs: Record<string, string> = {
 
 // ── Meta Tool ───────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   "describe_tool",
   "Get full param docs for any tool.",
   { name: z.string() },
@@ -101,7 +142,7 @@ server.tool(
 
 // ── Recording Tools (lean stubs — no param descriptions) ────────────────────
 
-server.tool(
+registerTool(
   "transcribe_audio",
   "Transcribe audio file. Auto-enhances if needed.",
   {
@@ -137,6 +178,22 @@ server.tool(
         session_id: args.session_id,
       });
 
+      // Create memory in Open Mementos if agent_id is provided
+      if (args.agent_id) {
+        await saveRecordingMemento({
+          key: `recording-${recording.id}`,
+          value: JSON.stringify({
+            recording_id: recording.id,
+            text: processed.mode === "enhanced" ? processed.text : transcription.text,
+            agent_id: args.agent_id,
+            project_id: args.project_id,
+            session_id: args.session_id,
+            created_at: recording.created_at
+          }),
+          summary: `Recording ${recording.id.slice(0, 8)} for ${args.agent_id}`,
+        });
+      }
+
       const output = processed.mode === "enhanced" ? processed.text : transcription.text;
       return text(`${recording.id.slice(0, 8)} | ${processed.mode} | ${output}`);
     } catch (e) {
@@ -145,7 +202,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "save_recording",
   "Save text as recording. Auto-enhances if needed.",
   {
@@ -199,7 +256,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "get_recording",
   "Get recording by ID or prefix.",
   { id: z.string() },
@@ -214,7 +271,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "list_recordings",
   "List recordings. Compact default, recent first.",
   {
@@ -257,7 +314,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "search_recordings",
   "Search recordings by text.",
   {
@@ -286,7 +343,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "delete_recording",
   "Delete recording by ID.",
   { id: z.string() },
@@ -299,7 +356,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "recording_stats",
   "Recording stats: count, modes, duration.",
   {},
@@ -317,7 +374,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "detect_enhancement",
   "Check if text needs AI enhancement.",
   { text: z.string() },
@@ -333,7 +390,7 @@ server.tool(
 
 // ── Agent Tools ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   "register_agent",
   "Register agent (idempotent).",
   { name: z.string(), description: z.string().optional(), role: z.string().optional() },
@@ -347,7 +404,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "list_agents",
   "List registered agents.",
   {},
@@ -362,7 +419,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "get_agent",
   "Get agent by ID or name.",
   { id: z.string() },
@@ -379,7 +436,7 @@ server.tool(
 
 // ── Project Tools ───────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   "register_project",
   "Register project (idempotent).",
   { name: z.string(), path: z.string(), description: z.string().optional() },
@@ -393,7 +450,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "list_projects",
   "List registered projects.",
   {},
@@ -410,7 +467,7 @@ server.tool(
 
 // ── Heartbeat & Focus ───────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   "heartbeat",
   "Update last_seen_at to signal agent is active. Call periodically during long tasks.",
   { agent_id: z.string().describe("Agent ID or name") },
@@ -425,7 +482,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "set_focus",
   "Set active project context for this agent session.",
   { agent_id: z.string().describe("Agent ID or name"), project_id: z.string().nullable().optional().describe("Project ID to focus on, or null to clear") },
@@ -440,7 +497,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "send_feedback",
   "Send feedback about this service",
   {

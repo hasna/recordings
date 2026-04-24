@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 import chalk from "chalk";
+import { spawnSync } from "child_process";
+import { existsSync, readFileSync } from "fs";
+import { dirname, join as pathJoin } from "path";
+import { fileURLToPath } from "url";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
 import { getDatabase, getAdapter } from "../db/database.js";
 import {
@@ -23,9 +27,10 @@ import {
   checkRecordingDeps,
   recordDuration,
 } from "../lib/recorder.js";
-import { transcribeAudio } from "../lib/transcriber.js";
-import { processText, needsEnhancement } from "../lib/enhancer.js";
+import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
+import { enhanceText, processText } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
+import { VERSION } from "../version.js";
 
 const program = new Command();
 
@@ -34,7 +39,7 @@ program
   .description(
     "Speech-to-text recording tool — record, transcribe, and enhance with AI"
   )
-  .version("0.0.3")
+  .version(VERSION)
   .option("--json", "Output as JSON")
   .option("--agent <name>", "Agent name or ID")
   .option("--project <name>", "Project name or ID")
@@ -147,18 +152,30 @@ program
   .command("transcribe <file>")
   .description("Transcribe an existing audio file")
   .option("--no-enhance", "Skip AI enhancement")
+  .option("--stream", "Stream transcription deltas while the file is processed")
   .option("-t, --tags <tags>", "Comma-separated tags")
+  .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
   .option("--system-prompt <prompt>", "System prompt for enhancement context")
   .action(async (file, opts) => {
     const config = loadConfig();
     ensureDataDir(config);
     if (opts.noEnhance === false) config.auto_enhance = false;
 
-    console.log(chalk.blue("Transcribing..."));
-    const transcription = await transcribeAudio(file, config);
+    const parentOpts = program.opts();
+    if (!parentOpts.json) {
+      console.log(chalk.blue("Transcribing..."));
+    }
+    const transcription = opts.stream
+      ? await transcribeAudioStream(file, config, {
+          prompt: opts.prompt,
+          onDelta: parentOpts.json ? undefined : (delta) => process.stdout.write(delta),
+        })
+      : await transcribeAudio(file, config, { prompt: opts.prompt });
+    if (opts.stream && !parentOpts.json) {
+      process.stdout.write("\n");
+    }
 
     const processed = await processText(transcription.text, config, opts.systemPrompt);
-    const parentOpts = program.opts();
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
     const recording = createRecording({
@@ -188,6 +205,41 @@ program
       console.log(JSON.stringify(recording, null, 2));
     } else {
       console.log(chalk.dim(`Saved as ${recording.id.slice(0, 8)}`));
+    }
+  });
+
+// ── rewrite ────────────────────────────────────────────────────────────────
+
+program
+  .command("rewrite <text>")
+  .description("Rewrite provided text using an instruction")
+  .requiredOption("-i, --instruction <instruction>", "Rewrite instruction")
+  .action(async (text, opts) => {
+    const config = loadConfig();
+    const parentOpts = program.opts();
+    const instruction = `Instruction: ${opts.instruction}\n\nText:\n${text}`;
+
+    try {
+      const result = await enhanceText(text, instruction, config);
+      if (parentOpts.json) {
+        console.log(
+          JSON.stringify(
+            {
+              raw_text: text,
+              processed_text: result.enhanced,
+              model_used: result.model,
+            },
+            null,
+            2
+          )
+        );
+      } else {
+        console.log(result.enhanced);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(chalk.red(message));
+      process.exit(1);
     }
   });
 
@@ -431,6 +483,73 @@ program
     console.log(chalk.dim("  db:     .recordings/recordings.db"));
   });
 
+// ── app ─────────────────────────────────────────────────────────────────────
+
+const appCommand = program
+  .command("app")
+  .description("Manage the macOS menu bar app installed from this package");
+
+appCommand
+  .command("install")
+  .description("Build and install Recordings.app from the installed package")
+  .option("--mode <mode>", "Swift build mode: debug or release", "release")
+  .action((opts: { mode: string }) => {
+    const status = getMacOSAppStatus();
+    if (!status.installer_available) {
+      console.error(chalk.red(`App installer missing from package: ${status.installer_path}`));
+      process.exit(1);
+    }
+
+    const result = spawnSync("bash", [status.installer_path, "--mode", opts.mode], {
+      stdio: "inherit",
+      env: process.env,
+    });
+    if (result.error) {
+      console.error(chalk.red(result.error.message));
+      process.exit(1);
+    }
+    process.exit(result.status ?? 1);
+  });
+
+appCommand
+  .command("status")
+  .description("Show installed Recordings.app status")
+  .action(() => {
+    const status = getMacOSAppStatus();
+    if (program.opts().json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+
+    console.log(`Package: ${status.package_root}`);
+    console.log(`Installer: ${status.installer_available ? "available" : "missing"}`);
+    console.log(`Native sources: ${status.native_sources_available ? "available" : "missing"}`);
+    console.log(`Installed app: ${status.installed ? status.installed_app_path : "missing"}`);
+    console.log(`Executable: ${status.executable ? "available" : "missing"}`);
+  });
+
+appCommand
+  .command("open")
+  .description("Open the installed Recordings.app")
+  .action(() => {
+    const status = getMacOSAppStatus();
+    if (process.platform !== "darwin") {
+      console.error(chalk.red("Recordings.app can only be opened on macOS"));
+      process.exit(1);
+    }
+    if (!status.installed) {
+      console.error(chalk.red("Recordings.app is not installed. Run: recordings app install"));
+      process.exit(1);
+    }
+
+    const result = spawnSync("open", [status.installed_app_path], { stdio: "inherit" });
+    if (result.error) {
+      console.error(chalk.red(result.error.message));
+      process.exit(1);
+    }
+    process.exit(result.status ?? 1);
+  });
+
 // ── check ───────────────────────────────────────────────────────────────────
 
 program
@@ -438,9 +557,26 @@ program
   .description("Check system dependencies (sox, API keys)")
   .action(async () => {
     const config = loadConfig();
+    const parentOpts = program.opts();
 
     // Check recording deps
     const deps = await checkRecordingDeps();
+    const enhKey = config.enhancement_api_key || config.openai_api_key;
+
+    if (parentOpts.json) {
+      console.log(JSON.stringify({
+        recording: {
+          available: deps.available,
+          tool: deps.tool,
+          message: deps.message,
+        },
+        openai_api_key_configured: Boolean(config.openai_api_key),
+        enhancement_api_key_configured: Boolean(enhKey),
+        enhancement_model: config.enhancement_model,
+      }, null, 2));
+      return;
+    }
+
     if (deps.available) {
       console.log(chalk.green(`✓ Recording tool: ${deps.tool}`));
     } else {
@@ -461,7 +597,6 @@ program
     }
 
     // Check enhancement key
-    const enhKey = config.enhancement_api_key || config.openai_api_key;
     if (enhKey) {
       console.log(
         chalk.green(`✓ Enhancement API key configured (model: ${config.enhancement_model})`)
@@ -982,6 +1117,65 @@ program
     );
     console.log(chalk.green("Feedback saved. Thank you!"));
   });
+
+type MacOSAppStatus = {
+  platform: string;
+  package_root: string;
+  installer_path: string;
+  installer_available: boolean;
+  native_sources_path: string;
+  native_sources_available: boolean;
+  installed_app_path: string;
+  installed: boolean;
+  executable_path: string;
+  executable: boolean;
+};
+
+function getMacOSAppStatus(): MacOSAppStatus {
+  const packageRoot = findPackageRoot();
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const installedAppPath = pathJoin(home, ".hasna", "recordings", "Recordings.app");
+  const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
+  const installerPath = pathJoin(packageRoot, "scripts", "install_macos_app.sh");
+  const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
+
+  return {
+    platform: process.platform,
+    package_root: packageRoot,
+    installer_path: installerPath,
+    installer_available: existsSync(installerPath),
+    native_sources_path: nativeSourcesPath,
+    native_sources_available: existsSync(pathJoin(nativeSourcesPath, "Package.swift")),
+    installed_app_path: installedAppPath,
+    installed: existsSync(installedAppPath),
+    executable_path: executablePath,
+    executable: existsSync(executablePath),
+  };
+}
+
+function findPackageRoot(): string {
+  let current = dirname(fileURLToPath(import.meta.url));
+
+  while (true) {
+    const packagePath = pathJoin(current, "package.json");
+    if (existsSync(packagePath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(packagePath, "utf8")) as { name?: string };
+        if (pkg.name === "@hasna/recordings") {
+          return current;
+        }
+      } catch {
+        // Keep walking upward.
+      }
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return process.cwd();
+    }
+    current = parent;
+  }
+}
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 

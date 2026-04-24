@@ -3,6 +3,10 @@
   "version": "0.1.11",
   "type": "module",
   "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasna/recordings.git"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -25,8 +29,21 @@
     "test:coverage": "bun test --coverage",
     "dev:cli": "bun run src/cli/index.ts",
     "dev:mcp": "bun run src/mcp/index.ts",
-    "postinstall": "mkdir -p $HOME/.hasna/recordings/audio 2>/dev/null || true"
+    "prepack": "bun run build",
+    "postinstall": "bash scripts/install_macos_app.sh --postinstall"
   },
+  "files": [
+    "dist/",
+    "scripts/",
+    "src/native/Recordings/App/",
+    "src/native/Recordings/RecordingsLib/",
+    "src/native/Recordings/RecordingsTests/",
+    "src/native/Recordings/Package.swift",
+    "src/native/Recordings/Package.resolved",
+    "src/native/Recordings/build.sh",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@hasna/cloud": "^0.1.24",
     "@modelcontextprotocol/sdk": "^1.12.1",

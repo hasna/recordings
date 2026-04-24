@@ -15,6 +15,7 @@ import {
   searchRecordings,
   getRecordingStats,
 } from "../db/recordings.js";
+import { shortUuid } from "../db/database.js";
 import type { Recording } from "../types/index.js";
 import { type Database } from "bun:sqlite";
 
@@ -39,7 +40,8 @@ afterEach(() => {
 
 describe("createRecording", () => {
   test("creates a recording with minimal input", () => {
-    const rec = createRecording({ raw_text: "hello world" }, db);
+    const id = shortUuid();
+    const rec = createRecording({ raw_text: "hello world", id }, db);
     expect(rec).toBeDefined();
     expect(rec.id).toBeDefined();
     expect(rec.raw_text).toBe("hello world");

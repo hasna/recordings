@@ -17,6 +17,7 @@ export interface Recording {
   goal: string | null;
   role: string | null;
   task_list_id: string | null;
+  machine_id: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
 }
@@ -39,6 +40,7 @@ export interface CreateRecordingInput {
   goal?: string;
   role?: string;
   task_list_id?: string;
+  machine_id?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -92,9 +94,10 @@ export interface RecordingsConfig {
   hotkey: string;
   auto_enhance: boolean;
   enhance_triggers: string[];
+  keyword_transforms: Record<string, string>; // Map of phrases to their replacements
   db_path: string;
   audio_dir: string;
-  max_recording_seconds: number;
+  max_recording_seconds: number; // Maximum recording duration in seconds (default: 1800 = 30 minutes)
 }
 
 // ── Transcription Types ─────────────────────────────────────────────────────

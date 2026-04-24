@@ -1,12 +1,19 @@
 import SwiftUI
 import KeyboardShortcuts
 
-struct SettingsView: View {
-    @ObservedObject var engine: RecordingEngine
-    @ObservedObject var shortcuts: VoiceShortcuts
-    @ObservedObject var projectStore: ProjectStore
+public struct SettingsView: View {
+    @ObservedObject public var engine: RecordingEngine
+    @ObservedObject public var shortcuts: VoiceShortcuts
+    @ObservedObject public var projectStore: ProjectStore
+    @AppStorage("openAIAPIKey") private var openAIAPIKey = ""
 
-    var body: some View {
+    public init(engine: RecordingEngine, shortcuts: VoiceShortcuts, projectStore: ProjectStore) {
+        self.engine = engine
+        self.shortcuts = shortcuts
+        self.projectStore = projectStore
+    }
+
+    public var body: some View {
         TabView {
             generalTab.tabItem { Label("General", systemImage: "gear") }
             projectsTab.tabItem { Label("Projects", systemImage: "folder") }
@@ -19,6 +26,13 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
+            Section("OpenAI") {
+                SecureField("API key", text: $openAIAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                Text("Used for realtime transcription in the menu bar app.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Recording Shortcut") {
                 HStack {
                     Text("Shortcut")
@@ -125,16 +139,10 @@ struct SettingsView: View {
             } else {
                 List {
                     ForEach(shortcuts.shortcuts) { s in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Trigger:").font(.caption).foregroundStyle(.secondary)
+                        VStack(alignment: .leading) {
                             Text(s.trigger).bold()
-                            Text("Inserts:").font(.caption).foregroundStyle(.secondary)
-                            Text(s.content)
-                                .foregroundStyle(.primary)
-                                .lineLimit(3)
-                                .fixedSize(horizontal: false, vertical: true)
+                            Text(s.content).foregroundStyle(.secondary).lineLimit(2)
                         }
-                        .padding(.vertical, 4)
                     }
                     .onDelete(perform: shortcuts.remove)
                 }

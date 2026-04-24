@@ -56,7 +56,7 @@ describe("DEFAULT_CONFIG", () => {
     expect(DEFAULT_CONFIG.record_command).toBe("sox");
     expect(DEFAULT_CONFIG.hotkey).toBe("space");
     expect(DEFAULT_CONFIG.auto_enhance).toBe(true);
-    expect(DEFAULT_CONFIG.max_recording_seconds).toBe(300);
+    expect(DEFAULT_CONFIG.max_recording_seconds).toBe(1800);
     expect(DEFAULT_CONFIG.enhance_triggers).toContain("say it better");
     expect(DEFAULT_CONFIG.enhance_triggers).toContain("rewrite this");
   });

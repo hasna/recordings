@@ -43,6 +43,7 @@ const MIGRATIONS = [
     agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
     project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
     session_id TEXT,
+    machine_id TEXT,
     metadata TEXT DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -129,7 +130,14 @@ function runMigrations(db: Database): void {
 
   for (let i = currentLevel + 1; i < MIGRATIONS.length; i++) {
     db.run(MIGRATIONS[i]!);
-    db.query("INSERT INTO _migrations (id) VALUES (?)").run(i);
+    try {
+      db.query("INSERT INTO _migrations (id) VALUES (?)").run(i);
+    } catch (e) {
+      if (!(e instanceof Error && e.message.includes('UNIQUE constraint failed'))) {
+        throw e;
+      }
+      // Migration already applied, continue
+    }
   }
 }
 

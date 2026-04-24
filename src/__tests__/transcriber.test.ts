@@ -1,8 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
-import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
-import { resetClient } from "../lib/transcriber.js";
+import { mkdirSync, rmSync, existsSync } from "fs";
+import { buildVerbatimPrompt, resetClient } from "../lib/transcriber.js";
 import { TranscriptionError } from "../types/index.js";
 import { DEFAULT_CONFIG } from "../lib/config.js";
 import type { RecordingsConfig } from "../types/index.js";
@@ -20,12 +20,11 @@ beforeEach(() => {
   resetClient();
   tempDir = join(tmpdir(), `open-recordings-test-trans-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
-  // Create a fake audio file for tests that need to open a file
+  // Mock file path without creating actual file
   tempAudioFile = join(tempDir, "test.wav");
-  writeFileSync(tempAudioFile, Buffer.from("fake-audio-content"));
 });
 
-afterEach(() => {
+afterEach(async () => {
   resetClient();
   if (existsSync(tempDir)) {
     rmSync(tempDir, { recursive: true, force: true });
@@ -66,6 +65,17 @@ describe("transcribeAudio", () => {
     resetClient();
     const { transcribeAudio } = await import("../lib/transcriber.js");
     resetClient();
+
+    // Create a mock file stream that doesn't actually read from disk
+    mock.module('fs', () => ({
+      createReadStream: mock((path) => ({
+        path,
+        destroy: mock(() => {}),
+        pipe: mock(() => ({
+          on: mock(() => this)
+        }))
+      }))
+    }));
 
     const result = await transcribeAudio(tempAudioFile, config);
     expect(result.text).toBe("Hello world transcribed");
@@ -179,6 +189,7 @@ describe("transcribeAudio", () => {
     expect(capturedOpts.language).toBe("fr");
     expect(capturedOpts.model).toBe(config.transcription_model);
     expect(capturedOpts.response_format).toBe("json");
+    expect(capturedOpts.prompt).toContain("verbatim");
 
     resetClient();
   });
@@ -207,6 +218,86 @@ describe("transcribeAudio", () => {
     expect(capturedOpts.language).toBeUndefined();
 
     resetClient();
+  });
+});
+
+describe("transcribeAudioStream", () => {
+  test("streams transcription delta events and returns final text", async () => {
+    const deltas: string[] = [];
+    let capturedOpts: any = null;
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        audio = {
+          transcriptions: {
+            create: mock((opts: any) => {
+              capturedOpts = opts;
+              return (async function* () {
+                yield { type: "transcript.text.delta", delta: "Hello " };
+                yield { type: "transcript.text.delta", delta: "world" };
+                yield { type: "transcript.text.done", text: "Hello world" };
+              })();
+            }),
+          },
+        };
+      },
+    }));
+
+    resetClient();
+    const { transcribeAudioStream } = await import("../lib/transcriber.js");
+    resetClient();
+
+    const result = await transcribeAudioStream(tempAudioFile, config, {
+      prompt: "Hasna",
+      onDelta: (delta) => deltas.push(delta),
+    });
+
+    expect(result.text).toBe("Hello world");
+    expect(deltas).toEqual(["Hello ", "world"]);
+    expect(capturedOpts.stream).toBe(true);
+    expect(capturedOpts.response_format).toBe("text");
+    expect(capturedOpts.prompt).toContain("Hasna");
+
+    resetClient();
+  });
+
+  test("falls back to non-streaming transcription for whisper-1", async () => {
+    let capturedOpts: any = null;
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        audio = {
+          transcriptions: {
+            create: mock((opts: any) => {
+              capturedOpts = opts;
+              return Promise.resolve({ text: "Whisper text" });
+            }),
+          },
+        };
+      },
+    }));
+
+    resetClient();
+    const { transcribeAudioStream } = await import("../lib/transcriber.js");
+    resetClient();
+
+    const result = await transcribeAudioStream(tempAudioFile, {
+      ...config,
+      transcription_model: "whisper-1",
+    });
+
+    expect(result.text).toBe("Whisper text");
+    expect(capturedOpts.stream).toBeUndefined();
+
+    resetClient();
+  });
+});
+
+describe("buildVerbatimPrompt", () => {
+  test("keeps transcription prompt strict and uses context as vocabulary only", () => {
+    const prompt = buildVerbatimPrompt("Alumia, Takumi");
+    expect(prompt).toContain("verbatim");
+    expect(prompt).toContain("Do not summarize");
+    expect(prompt).toContain("vocabulary context");
+    expect(prompt).toContain("Alumia");
   });
 });
 

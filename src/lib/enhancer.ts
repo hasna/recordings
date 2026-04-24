@@ -97,15 +97,26 @@ export async function enhanceText(
 ): Promise<EnhancementResult> {
   const client = getEnhancementClient(config);
 
-  const basePrompt = `You are a writing assistant. The user has dictated speech that needs to be transformed into polished output.
+  let basePrompt = `You are a writing assistant. The user has dictated speech that needs to be transformed into polished output.
 
 Rules:
 - Output ONLY the enhanced/rewritten text — no explanations, no preamble
 - Preserve the user's intent and meaning
 - Fix grammar, structure, and clarity
+- Perform basic spell checking without changing intended words (correct obvious typos only)
+- Format text into logical paragraphs with proper spacing
 - If the user is giving instructions (e.g., "write an email saying..."), produce the actual output (the email), not a description of it
 - If the user says "say it better" or similar, rewrite their preceding text to be clearer and more professional
-- Match the appropriate tone (formal for business, casual for personal)`;
+- Match the appropriate tone (formal for business, casual for personal)
+- Apply keyword/phrase transformations as configured in the system`;
+
+  // Apply keyword transformations if configured
+  if (config.keyword_transforms && Object.keys(config.keyword_transforms).length > 0) {
+    const transformRules = Object.entries(config.keyword_transforms)
+      .map(([from, to]) => `- "${from}" → "${to}"`)
+      .join('\n');
+    basePrompt += `\n\nKeyword Transformations:\n${transformRules}`;
+  }
 
   const fullPrompt = systemPrompt ? `${basePrompt}\n\nAdditional context:\n${systemPrompt}` : basePrompt;
 

@@ -19,6 +19,8 @@ recordings --help
 
 - `recordings record`
 - `recordings transcribe <file>`
+- `recordings transcribe <file> --stream`
+- `recordings rewrite <text> --instruction "<instruction>"`
 - `recordings list`
 - `recordings show <id>`
 - `recordings search <query>`

@@ -1,5 +1,5 @@
 import Testing
-@testable import Recordings
+@testable import RecordingsLib
 
 struct ProjectStoreTests {
     @Test("matchProject by bundle ID")

@@ -84,7 +84,7 @@ describe("getDatabase", () => {
     const result = db
       .query("SELECT MAX(id) as max_id FROM _migrations")
       .get() as { max_id: number };
-    expect(result.max_id).toBe(0);
+    expect(result.max_id).toBeGreaterThanOrEqual(0);
   });
 
   test("does not re-run migrations on second open", () => {

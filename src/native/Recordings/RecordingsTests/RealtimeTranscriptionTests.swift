@@ -1,5 +1,5 @@
 import Testing
-@testable import Recordings
+@testable import RecordingsLib
 
 // MARK: - RealtimeTranscriptionClient Event Parsing Tests
 
@@ -58,7 +58,7 @@ struct RealtimeTranscriptionTests {
     @Test("Does not flag normal events as errors")
     func noFalsePositives() {
         #expect(RealtimeTranscriptionClient.isSessionErrorTestHelper(
-            """{"type":"conversation.item.input_audio_transcription.delta"}"""
+            "{\"type\":\"conversation.item.input_audio_transcription.delta\"}"
         ) == false)
     }
 
@@ -68,5 +68,46 @@ struct RealtimeTranscriptionTests {
         {"type":"error","error":{"message":"Model not found","code":404}}
         """
         #expect(RealtimeTranscriptionClient.parseErrorTestHelper(errorJSON) == "Model not found")
+    }
+
+    @Test("Builds strict verbatim prompt with vocabulary context")
+    func buildPrompt() {
+        let prompt = RealtimeTranscriptionClient.buildPromptTestHelper("Alumia, Takumi")
+        #expect(prompt.contains("verbatim"))
+        #expect(prompt.contains("Do not summarize"))
+        #expect(prompt.contains("vocabulary context"))
+        #expect(prompt.contains("Alumia"))
+    }
+
+    @Test("Builds realtime transcription session update event")
+    func buildSessionUpdateEvent() {
+        let event = RealtimeTranscriptionClient.sessionUpdateTestHelper(prompt: "Use Alumia as vocabulary", language: "en")
+        #expect(event["type"] as? String == "session.update")
+
+        let session = event["session"] as? [String: Any]
+        #expect(session?["type"] as? String == "transcription")
+
+        let audio = session?["audio"] as? [String: Any]
+        let input = audio?["input"] as? [String: Any]
+        let format = input?["format"] as? [String: Any]
+        #expect(format?["type"] as? String == "audio/pcm")
+        #expect(format?["rate"] as? Int == 24_000)
+
+        let transcription = input?["transcription"] as? [String: Any]
+        #expect(transcription?["model"] as? String == "gpt-4o-transcribe")
+        #expect(transcription?["prompt"] as? String == "Use Alumia as vocabulary")
+        #expect(transcription?["language"] as? String == "en")
+
+        let turnDetection = input?["turn_detection"] as? [String: Any]
+        #expect(turnDetection?["type"] as? String == "server_vad")
+
+        let include = session?["include"] as? [String]
+        #expect(include?.contains("item.input_audio_transcription.logprobs") == true)
+    }
+
+    @Test("Joins transcript parts without dropping spoken text")
+    func joinParts() {
+        let text = RealtimeTranscriptionClient.joinTranscriptPartsTestHelper(["Hello", "world.", " Next"])
+        #expect(text == "Hello world. Next")
     }
 }
