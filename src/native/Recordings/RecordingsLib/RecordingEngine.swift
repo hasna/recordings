@@ -50,6 +50,12 @@ public enum RecordingTrigger {
     case keyboardShortcut
 }
 
+struct PasteTargetCandidate: Equatable, Sendable {
+    let pid: pid_t
+    let bundleIdentifier: String?
+    let isRegularApp: Bool
+}
+
 private actor PCMStreamState {
     private var recordedPCM = Data()
     private var pendingChunk = Data()
@@ -429,6 +435,7 @@ public final class RecordingEngine: ObservableObject {
 
         let curMode = mode
         let targetAppBundleIdentifier = targetAppBundleIdentifier
+        let targetAppPid = targetAppPid
         let activeProjectId = projectStore?.settings.activeProjectId
         let activeProjectName = projectStore?.activeProject?.name
         let audioPath = activeAudioPath
@@ -465,6 +472,7 @@ public final class RecordingEngine: ObservableObject {
                     audioPath: audioPath,
                     curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
                     activeProjectId: activeProjectId,
                     activeProjectName: activeProjectName
                 )
@@ -485,7 +493,7 @@ public final class RecordingEngine: ObservableObject {
         return trimmed.count < 12 || words.count <= 2
     }
 
-    private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, activeProjectId: String?, activeProjectName: String?) {
+    private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?) {
         log("finishWithText mode=\(curMode.rawValue) chars=\(text.count)")
         if curMode == .command {
             runCommandMode(instruction: text)
@@ -494,7 +502,7 @@ public final class RecordingEngine: ObservableObject {
 
         let shortcutText = voiceShortcuts?.match(text)
         let output = shortcutText ?? text
-        pasteIntoFrontApp(output, targetAppBundleIdentifier: targetAppBundleIdentifier)
+        pasteIntoFrontApp(output, targetAppBundleIdentifier: targetAppBundleIdentifier, targetAppPid: targetAppPid)
         recentTranscriptions.insert(
             TranscriptionResult(
                 rawText: text,
@@ -576,7 +584,7 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Fallback Transcription
 
-    private func fallbackTranscribe(audioPath: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, activeProjectId: String?, activeProjectName: String?) {
+    private func fallbackTranscribe(audioPath: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?) {
         let homePath = home
 
         isTranscribing = true
@@ -608,6 +616,7 @@ public final class RecordingEngine: ObservableObject {
                     text,
                     curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
                     activeProjectId: activeProjectId,
                     activeProjectName: activeProjectName
                 )
@@ -698,8 +707,8 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil) {
-        log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") accessibility=\(AXIsProcessTrusted())")
+    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil) {
+        log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") pid=\(targetAppPid.map(String.init) ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
@@ -715,13 +724,22 @@ public final class RecordingEngine: ObservableObject {
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
-        let targetApp = runningApps.first(where: {
-            guard $0.processIdentifier != myPID, $0.activationPolicy == .regular else { return false }
-            guard let bundleIdentifier = targetAppBundleIdentifier else { return false }
-            return $0.bundleIdentifier == bundleIdentifier
-        }) ?? runningApps.first(where: {
-            $0.activationPolicy == .regular && $0.processIdentifier != myPID
-        })
+        let candidates = runningApps.map {
+            PasteTargetCandidate(
+                pid: $0.processIdentifier,
+                bundleIdentifier: $0.bundleIdentifier,
+                isRegularApp: $0.activationPolicy == .regular
+            )
+        }
+        let selectedTarget = Self.selectPasteTarget(
+            candidates: candidates,
+            currentPid: myPID,
+            targetBundleIdentifier: targetAppBundleIdentifier,
+            targetPid: targetAppPid
+        )
+        let targetApp = selectedTarget.flatMap { selected in
+            runningApps.first { $0.processIdentifier == selected.pid }
+        }
 
         guard let app = targetApp else {
             log("paste target app not found")
@@ -729,8 +747,8 @@ public final class RecordingEngine: ObservableObject {
             return
         }
 
-        // Activate target app and wait for focus to stabilize
-        app.activate()
+        // Activate the exact app that owned focus when recording started, then paste after focus settles.
+        app.activate(options: [.activateIgnoringOtherApps])
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             let src = CGEventSource(stateID: .hidSystemState)
@@ -743,6 +761,24 @@ public final class RecordingEngine: ObservableObject {
             }
             self.log("paste event posted")
             self.statusMessage = "Pasted (\(text.count) chars)"
+        }
+    }
+
+    nonisolated static func selectPasteTarget(
+        candidates: [PasteTargetCandidate],
+        currentPid: pid_t,
+        targetBundleIdentifier: String?,
+        targetPid: pid_t?
+    ) -> PasteTargetCandidate? {
+        candidates.first {
+            guard let targetPid else { return false }
+            return $0.pid == targetPid && $0.pid != currentPid
+        } ?? candidates.first {
+            guard $0.pid != currentPid, $0.isRegularApp else { return false }
+            guard let targetBundleIdentifier else { return false }
+            return $0.bundleIdentifier == targetBundleIdentifier
+        } ?? candidates.first {
+            $0.isRegularApp && $0.pid != currentPid
         }
     }
 

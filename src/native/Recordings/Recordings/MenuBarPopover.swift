@@ -214,11 +214,10 @@ struct MenuBarPopover: View {
                                 showProject: filterProjectId == nil,
                                 isCopied: copiedIndex == i
                             ) {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(item.displayText, forType: .string)
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     copiedIndex = i
                                 }
+                                engine.pasteIntoFrontApp(item.displayText)
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                                     withAnimation { if copiedIndex == i { copiedIndex = nil } }
                                 }
