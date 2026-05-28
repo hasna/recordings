@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isHttpMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
+import { isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
 import { registerCloudTools } from "@hasna/cloud";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
@@ -524,12 +524,13 @@ return server;
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (isHttpMode(args)) {
-    startMcpHttpServer({ name: "recordings", port: resolveMcpHttpPort(args), buildServer });
+  if (isStdioMode(args)) {
+    const transport = new StdioServerTransport();
+    await buildServer().connect(transport);
     return;
   }
-  const transport = new StdioServerTransport();
-  await buildServer().connect(transport);
+  // Default: shared Streamable HTTP server (one process per MCP, many agents).
+  startMcpHttpServer({ name: "recordings", port: resolveMcpHttpPort(args), buildServer });
 }
 
 if (import.meta.main) {

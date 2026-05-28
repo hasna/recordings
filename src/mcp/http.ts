@@ -1,11 +1,15 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-export const DEFAULT_MCP_HTTP_PORT = 8829;
+export const DEFAULT_MCP_HTTP_PORT = 8873;
 export const MCP_HTTP_HOST = "127.0.0.1";
 
 export function isHttpMode(args: string[]): boolean {
   return args.includes("--http") || process.env.MCP_HTTP === "1";
+}
+
+export function isStdioMode(args: string[]): boolean {
+  return args.includes("--stdio") || process.env.MCP_STDIO === "1";
 }
 
 export function resolveMcpHttpPort(args: string[]): number {

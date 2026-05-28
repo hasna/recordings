@@ -30,9 +30,9 @@ describe("recordings MCP HTTP transport", () => {
     httpServer.stop();
   });
 
-  test("default port is 8829", () => {
-    expect(DEFAULT_MCP_HTTP_PORT).toBe(8829);
-    expect(resolveMcpHttpPort([])).toBe(8829);
+  test("default port is 8873", () => {
+    expect(DEFAULT_MCP_HTTP_PORT).toBe(8873);
+    expect(resolveMcpHttpPort([])).toBe(8873);
   });
 
   test("GET /health returns 200", async () => {
