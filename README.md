@@ -33,7 +33,14 @@ recordings --help
 recordings-mcp
 ```
 
-17 tools available.
+## HTTP mode
+
+```bash
+recordings-mcp --http              # default port 8829
+MCP_HTTP=1 MCP_HTTP_PORT=8829 recordings-mcp
+```
+
+Endpoints: `GET /health` → `{"status":"ok","name":"recordings"}`, MCP at `/mcp`.
 
 ## Cloud Sync
 

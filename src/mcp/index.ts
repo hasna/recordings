@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { isHttpMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
 import { registerCloudTools } from "@hasna/cloud";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
@@ -30,6 +31,7 @@ const config = loadConfig();
 ensureDataDir(config);
 getDatabase(config.db_path);
 
+export function buildServer(): McpServer {
 const server = new McpServer({
   name: "recordings",
   version: VERSION,
@@ -516,6 +518,20 @@ registerTool(
   }
 );
 
-const transport = new StdioServerTransport();
 registerCloudTools(server, "recordings");
-await server.connect(transport);
+return server;
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  if (isHttpMode(args)) {
+    startMcpHttpServer({ name: "recordings", port: resolveMcpHttpPort(args), buildServer });
+    return;
+  }
+  const transport = new StdioServerTransport();
+  await buildServer().connect(transport);
+}
+
+if (import.meta.main) {
+  await main();
+}
