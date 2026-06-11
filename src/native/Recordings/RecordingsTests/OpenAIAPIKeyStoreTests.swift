@@ -74,6 +74,55 @@ struct OpenAIAPIKeyStoreTests {
         #expect(key == "secret-key")
     }
 
+    @Test("Saving a key writes it to config.json so the CLI uses the same key")
+    func saveWritesConfig() throws {
+        let home = try makeHome()
+
+        try OpenAIAPIKeyStore.save(key: "sk-new-key", homePath: home.path)
+
+        let key = OpenAIAPIKeyStore.load(
+            homePath: home.path,
+            environment: [:],
+            userDefaultKey: nil
+        )
+        #expect(key == "sk-new-key")
+    }
+
+    @Test("Saving a key preserves unrelated config.json fields")
+    func savePreservesOtherFields() throws {
+        let home = try makeHome()
+        try writeConfig(home: home, [
+            "openai_api_key": "old-key",
+            "transcription_model": "gpt-4o-mini-transcribe",
+        ])
+
+        try OpenAIAPIKeyStore.save(key: "sk-rotated", homePath: home.path)
+
+        let configURL = home
+            .appendingPathComponent(".hasna")
+            .appendingPathComponent("recordings")
+            .appendingPathComponent("config.json")
+        let data = try Data(contentsOf: configURL)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["openai_api_key"] as? String == "sk-rotated")
+        #expect(json["transcription_model"] as? String == "gpt-4o-mini-transcribe")
+    }
+
+    @Test("Saving an empty key removes it from config.json")
+    func saveEmptyRemovesKey() throws {
+        let home = try makeHome()
+        try writeConfig(home: home, ["openai_api_key": "old-key"])
+
+        try OpenAIAPIKeyStore.save(key: "   ", homePath: home.path)
+
+        let key = OpenAIAPIKeyStore.load(
+            homePath: home.path,
+            environment: [:],
+            userDefaultKey: nil
+        )
+        #expect(key == "")
+    }
+
     private func makeHome() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("recordings-key-store-\(UUID().uuidString)")

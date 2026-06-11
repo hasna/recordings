@@ -29,7 +29,11 @@ public struct SettingsView: View {
             Section("OpenAI") {
                 SecureField("API key", text: $openAIAPIKey)
                     .textFieldStyle(.roundedBorder)
-                Text("Used for realtime transcription in the menu bar app.")
+                    .onChange(of: openAIAPIKey) {
+                        // Keep the CLI config in sync — final transcription shells out to it.
+                        try? OpenAIAPIKeyStore.save(key: openAIAPIKey, homePath: engine.home)
+                    }
+                Text("Used for live transcription and the final paste. Stored in ~/.hasna/recordings/config.json.")
                     .foregroundStyle(.secondary)
             }
 

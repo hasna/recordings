@@ -21,6 +21,32 @@ enum OpenAIAPIKeyStore {
         return ""
     }
 
+    /// Persist the key into ~/.hasna/recordings/config.json so the CLI (which the app
+    /// shells out to for final transcription) uses the same key as the app itself.
+    static func save(key: String, homePath: String) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dir = URL(fileURLWithPath: homePath)
+            .appendingPathComponent(".hasna")
+            .appendingPathComponent("recordings")
+        let url = dir.appendingPathComponent("config.json")
+
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        }
+
+        if trimmed.isEmpty {
+            json.removeValue(forKey: "openai_api_key")
+        } else {
+            json["openai_api_key"] = trimmed
+        }
+
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+
     private static func loadConfigKey(homePath: String, environment: [String: String]) -> String? {
         let url = URL(fileURLWithPath: homePath)
             .appendingPathComponent(".hasna")
