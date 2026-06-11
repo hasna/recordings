@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync, rmSync, existsSync } from "fs";
-import { buildVerbatimPrompt, resetClient } from "../lib/transcriber.js";
+import { buildVerbatimPrompt, describeTranscriptionFailure, resetClient } from "../lib/transcriber.js";
 import { TranscriptionError } from "../types/index.js";
 import { DEFAULT_CONFIG } from "../lib/config.js";
 import type { RecordingsConfig } from "../types/index.js";
@@ -288,6 +288,34 @@ describe("transcribeAudioStream", () => {
     expect(capturedOpts.stream).toBeUndefined();
 
     resetClient();
+  });
+});
+
+describe("describeTranscriptionFailure", () => {
+  test("maps 401 invalid key errors to a clear expired-key message without echoing the key", () => {
+    const raw =
+      "401 Incorrect API key provided: sk-proj-************************vosA. You can find your API key at https://platform.openai.com/account/api-keys.";
+    const result = describeTranscriptionFailure(raw);
+    expect(result).toBe(
+      "OpenAI API key invalid or expired (401). Update it in ~/.hasna/recordings/config.json, the OPENAI_API_KEY env var, or the Recordings app Settings."
+    );
+    expect(result).not.toContain("sk-proj");
+  });
+
+  test("maps invalid_api_key error codes", () => {
+    const raw = 'Error: { "code": "invalid_api_key" }';
+    expect(describeTranscriptionFailure(raw)).toContain("invalid or expired (401)");
+  });
+
+  test("maps 429 quota errors to a clear billing message", () => {
+    const raw = "429 You exceeded your current quota, please check your plan and billing details.";
+    expect(describeTranscriptionFailure(raw)).toBe(
+      "OpenAI quota exceeded (429). Check the OpenAI account plan and billing."
+    );
+  });
+
+  test("passes through other errors verbatim", () => {
+    expect(describeTranscriptionFailure("connection refused")).toBe("connection refused");
   });
 });
 

@@ -55,7 +55,7 @@ export async function transcribeAudio(
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    throw new TranscriptionError(`Transcription failed: ${msg}`);
+    throw new TranscriptionError(`Transcription failed: ${describeTranscriptionFailure(msg)}`);
   }
 }
 
@@ -91,7 +91,7 @@ export async function transcribeBuffer(
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    throw new TranscriptionError(`Transcription failed: ${msg}`);
+    throw new TranscriptionError(`Transcription failed: ${describeTranscriptionFailure(msg)}`);
   }
 }
 
@@ -140,10 +140,20 @@ export async function transcribeAudioStream(
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    throw new TranscriptionError(`Streaming transcription failed: ${msg}`);
+    throw new TranscriptionError(`Streaming transcription failed: ${describeTranscriptionFailure(msg)}`);
   } finally {
     fileStream.destroy();
   }
+}
+
+export function describeTranscriptionFailure(message: string): string {
+  if (/401|incorrect api key|invalid_api_key/i.test(message)) {
+    return "OpenAI API key invalid or expired (401). Update it in ~/.hasna/recordings/config.json, the OPENAI_API_KEY env var, or the Recordings app Settings.";
+  }
+  if (/429|exceeded your current quota|insufficient_quota/i.test(message)) {
+    return "OpenAI quota exceeded (429). Check the OpenAI account plan and billing.";
+  }
+  return message;
 }
 
 export function buildVerbatimPrompt(context?: string): string {

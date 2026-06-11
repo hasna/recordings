@@ -4,6 +4,7 @@ import type {
   EnhancementResult,
 } from "../types/index.js";
 import { EnhancementError } from "../types/index.js";
+import { describeTranscriptionFailure } from "./transcriber.js";
 
 let _enhancementClient: OpenAI | null = null;
 
@@ -148,7 +149,7 @@ Rules:
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    throw new EnhancementError(`Enhancement failed: ${msg}`);
+    throw new EnhancementError(`Enhancement failed: ${describeTranscriptionFailure(msg)}`);
   }
 }
 
