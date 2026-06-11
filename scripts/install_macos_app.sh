@@ -105,4 +105,21 @@ APP_CDHASH="$(current_cdhash "$APP_DEST" || true)"
 reset_stale_permission "Microphone" "kTCCServiceMicrophone" "${HOME}/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
 reset_stale_permission "Accessibility" "kTCCServiceAccessibility" "/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
 
+# A second copy in ~/Applications splits TCC permissions and leaves users running
+# stale builds. Keep that launch point but always point it at the fresh build.
+ALT_COPY="${HOME}/Applications/Recordings.app"
+if [ -d "$ALT_COPY" ]; then
+  rm -rf "$ALT_COPY"
+  cp -R "$APP_SOURCE" "$ALT_COPY" || true
+  echo "Updated stale copy at ${ALT_COPY} to the freshly built app."
+fi
+
+# If an old instance is running, restart it on the new build.
+if pgrep -x Recordings >/dev/null 2>&1; then
+  pkill -x Recordings || true
+  sleep 1
+  open "$APP_DEST" || true
+  echo "Restarted Recordings.app on the new build."
+fi
+
 echo "Installed Recordings.app from package: ${APP_DEST}"
