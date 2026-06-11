@@ -12,6 +12,8 @@ final class FnKeyMonitor: @unchecked Sendable {
     private var healthCheckTimer: Timer?
     private var fnIsDown = false
 
+    var isRunning: Bool { eventTap != nil }
+
     private static let fnKeyCode: UInt16 = 63
 
     /// Start monitoring. Returns true if successful.

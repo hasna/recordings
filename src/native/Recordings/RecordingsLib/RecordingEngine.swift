@@ -137,6 +137,7 @@ public final class RecordingEngine: ObservableObject {
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
+    private var permissionRetryTimer: Timer?
 
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     private var audioDir: String { "\(home)/.hasna/recordings/audio" }
@@ -190,6 +191,16 @@ public final class RecordingEngine: ObservableObject {
                 self.keyboardShortcutIsDown = false
                 guard self.isRecording, self.activeTrigger == .keyboardShortcut else { return }
                 self.stopAndTranscribe()
+            }
+        }
+
+        // Granting Accessibility does not revive a tap that failed to create,
+        // so retry until permissions arrive instead of requiring a relaunch.
+        permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.useFnKey, !self.fnMonitor.isRunning, AXIsProcessTrusted() else { return }
+                self.log("accessibility granted — retrying fn monitor")
+                self.updateFnMonitor()
             }
         }
 
