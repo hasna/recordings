@@ -166,6 +166,12 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     /// Returns the final accumulated transcription text.
     @discardableResult
     public func stop() -> String {
+        if isStreaming {
+            NativeAppLog.write(
+                "realtime session summary items=\(itemOrder.count) committed=\(committedItemIDs.count) completed=\(completedItemIDs.count) deltaChars=\(deltaTextByItem.values.map(\.count).reduce(0, +)) finalChars=\(accumulatedText.count) error=\(error ?? "none")",
+                homePath: homePath
+            )
+        }
         isStreaming = false
         isConfigured = false
         receiveTask?.cancel()
@@ -256,7 +262,13 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
             if let detail = json["error"] as? [String: Any],
                let msg = detail["message"] as? String {
                 fputs("[RealtimeClient] Error: \(msg)\n", stderr)
-                self.error = msg
+                // "buffer too small" on commit just means server VAD already consumed
+                // the audio — the transcript is intact, so don't surface it as a failure.
+                if msg.localizedCaseInsensitiveContains("buffer too small") {
+                    NativeAppLog.write("realtime benign commit error: \(msg)", homePath: homePath)
+                } else {
+                    self.error = msg
+                }
             }
 
         default:

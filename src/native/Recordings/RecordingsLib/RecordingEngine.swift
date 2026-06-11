@@ -411,7 +411,9 @@ public final class RecordingEngine: ObservableObject {
             if let message = client.error, !message.isEmpty {
                 await MainActor.run {
                     self.log("realtime unavailable message=\(message)")
-                    self.statusMessage = "Realtime unavailable — will transcribe after recording"
+                    if self.isRecording {
+                        self.statusMessage = "Live preview unavailable — will transcribe after recording"
+                    }
                 }
             }
         }
@@ -464,21 +466,33 @@ public final class RecordingEngine: ObservableObject {
             self.liveTranscriptionText = ""
 
             if let audioPath, self.writeCapturedWAV(to: audioPath) {
-                if let realtimeText {
-                    self.log("realtime preview ignored for final chars=\(realtimeText.count)")
-                }
-                self.log("transcribing captured full audio audioPath=\(audioPath)")
+                self.log("transcribing captured full audio audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
                     curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
                     activeProjectId: activeProjectId,
-                    activeProjectName: activeProjectName
+                    activeProjectName: activeProjectName,
+                    realtimeText: realtimeText
                 )
             } else {
-                self.log("no audio captured")
-                self.finish("No audio captured")
+                let resolved = Self.resolveFinalTranscript(cliText: nil, cliError: "No audio captured", realtimeText: realtimeText)
+                if let text = resolved.text {
+                    self.log("no audio file written; using realtime transcript chars=\(text.count)")
+                    self.isTranscribing = false
+                    self.finishWithText(
+                        text,
+                        curMode: curMode,
+                        targetAppBundleIdentifier: targetAppBundleIdentifier,
+                        targetAppPid: targetAppPid,
+                        activeProjectId: activeProjectId,
+                        activeProjectName: activeProjectName
+                    )
+                } else {
+                    self.log("no audio captured")
+                    self.finish(resolved.failureStatus ?? "No audio captured")
+                }
             }
 
             self.activeAudioPath = nil
@@ -502,7 +516,7 @@ public final class RecordingEngine: ObservableObject {
 
         let shortcutText = voiceShortcuts?.match(text)
         let output = shortcutText ?? text
-        pasteIntoFrontApp(output, targetAppBundleIdentifier: targetAppBundleIdentifier, targetAppPid: targetAppPid)
+        pasteIntoFrontApp(output, targetAppBundleIdentifier: targetAppBundleIdentifier, targetAppPid: targetAppPid, restoreClipboard: true)
         recentTranscriptions.insert(
             TranscriptionResult(
                 rawText: text,
@@ -584,7 +598,7 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Fallback Transcription
 
-    private func fallbackTranscribe(audioPath: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?) {
+    private func fallbackTranscribe(audioPath: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?, realtimeText: String? = nil) {
         let homePath = home
 
         isTranscribing = true
@@ -592,25 +606,27 @@ public final class RecordingEngine: ObservableObject {
 
         Task.detached {
             let output = CLIRunner.run(["--json", "transcribe", audioPath, "--no-enhance"], home: homePath)
-            if let error = CLIRunner.parseError(output) {
-                await MainActor.run {
-                    self.log("fallback transcription failed error=\(error)")
-                    self.finish(error)
-                }
-                return
-            }
-
-            let text = CLIRunner.parseJSON(output)
-            guard let text, !text.isEmpty else {
-                await MainActor.run {
-                    self.log("fallback transcription empty output=\(output.prefix(160))")
-                    self.finish("Empty transcription")
-                }
-                return
-            }
+            let cliError = CLIRunner.parseError(output)
+            let cliText = cliError == nil ? CLIRunner.parseJSON(output) : nil
 
             await MainActor.run {
-                self.log("fallback transcription succeeded chars=\(text.count)")
+                if let cliError {
+                    self.log("cli transcription failed error=\(cliError)")
+                } else if cliText == nil {
+                    self.log("cli transcription empty output=\(output.prefix(160))")
+                }
+
+                let resolved = Self.resolveFinalTranscript(cliText: cliText, cliError: cliError, realtimeText: realtimeText)
+                guard let text = resolved.text else {
+                    self.finish(resolved.failureStatus ?? "Transcription failed")
+                    return
+                }
+
+                if cliText == nil {
+                    self.log("using realtime transcript fallback chars=\(text.count)")
+                } else {
+                    self.log("cli transcription succeeded chars=\(text.count)")
+                }
                 self.isTranscribing = false
                 self.finishWithText(
                     text,
@@ -707,9 +723,10 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil) {
+    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
         log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") pid=\(targetAppPid.map(String.init) ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
+        let previousClipboard = restoreClipboard ? pb.string(forType: .string) : nil
         pb.clearContents()
         pb.setString(text, forType: .string)
 
@@ -724,6 +741,7 @@ public final class RecordingEngine: ObservableObject {
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
+        let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let candidates = runningApps.map {
             PasteTargetCandidate(
                 pid: $0.processIdentifier,
@@ -735,7 +753,8 @@ public final class RecordingEngine: ObservableObject {
             candidates: candidates,
             currentPid: myPID,
             targetBundleIdentifier: targetAppBundleIdentifier,
-            targetPid: targetAppPid
+            targetPid: targetAppPid,
+            frontmostPid: frontmostPid
         )
         let targetApp = selectedTarget.flatMap { selected in
             runningApps.first { $0.processIdentifier == selected.pid }
@@ -748,9 +767,13 @@ public final class RecordingEngine: ObservableObject {
         }
 
         // Activate the exact app that owned focus when recording started, then paste after focus settles.
-        app.activate(options: [.activateIgnoringOtherApps])
+        let alreadyFrontmost = app.processIdentifier == frontmostPid
+        if !alreadyFrontmost {
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        let pasteDelay: TimeInterval = alreadyFrontmost ? 0.15 : 0.5
+        DispatchQueue.main.asyncAfter(deadline: .now() + pasteDelay) {
             let src = CGEventSource(stateID: .hidSystemState)
             if let down = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true),
                let up = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) {
@@ -759,8 +782,19 @@ public final class RecordingEngine: ObservableObject {
                 down.post(tap: .cgSessionEventTap)
                 up.post(tap: .cgSessionEventTap)
             }
-            self.log("paste event posted")
+            self.log("paste event posted target=\(app.bundleIdentifier ?? "?") alreadyFrontmost=\(alreadyFrontmost)")
             self.statusMessage = "Pasted (\(text.count) chars)"
+
+            if let previousClipboard {
+                // Give the target app time to consume the paste, then hand the clipboard back.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    let pb = NSPasteboard.general
+                    if pb.string(forType: .string) == text {
+                        pb.clearContents()
+                        pb.setString(previousClipboard, forType: .string)
+                    }
+                }
+            }
         }
     }
 
@@ -768,7 +802,8 @@ public final class RecordingEngine: ObservableObject {
         candidates: [PasteTargetCandidate],
         currentPid: pid_t,
         targetBundleIdentifier: String?,
-        targetPid: pid_t?
+        targetPid: pid_t?,
+        frontmostPid: pid_t? = nil
     ) -> PasteTargetCandidate? {
         candidates.first {
             guard let targetPid else { return false }
@@ -778,8 +813,25 @@ public final class RecordingEngine: ObservableObject {
             guard let targetBundleIdentifier else { return false }
             return $0.bundleIdentifier == targetBundleIdentifier
         } ?? candidates.first {
+            guard let frontmostPid else { return false }
+            return $0.pid == frontmostPid && $0.pid != currentPid && $0.isRegularApp
+        } ?? candidates.first {
             $0.isRegularApp && $0.pid != currentPid
         }
+    }
+
+    nonisolated static func resolveFinalTranscript(
+        cliText: String?,
+        cliError: String?,
+        realtimeText: String?
+    ) -> (text: String?, failureStatus: String?) {
+        if let cliText, !cliText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (cliText, nil)
+        }
+        if let realtimeText, !realtimeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (realtimeText, nil)
+        }
+        return (nil, cliError ?? "Empty transcription")
     }
 
     private func ensureAccessibilityPermission(prompt: Bool) -> Bool {
@@ -861,6 +913,15 @@ enum CLIRunner: Sendable {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("ERROR:") else { return nil }
         let message = trimmed.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = message.lowercased()
+        if lowercased.contains("401") || lowercased.contains("incorrect api key")
+            || lowercased.contains("invalid_api_key") || lowercased.contains("invalid or expired") {
+            return "OpenAI API key invalid or expired — update it in Recordings Settings"
+        }
+        if lowercased.contains("429") || lowercased.contains("exceeded your current quota")
+            || lowercased.contains("insufficient_quota") || lowercased.contains("quota exceeded") {
+            return "OpenAI quota exceeded — check the OpenAI account billing"
+        }
         if message.contains("OpenAI API key not configured") {
             return "OpenAI API key not configured on this Mac"
         }

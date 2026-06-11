@@ -17,6 +17,18 @@ struct CLIRunnerTests {
         #expect(CLIRunner.parseError("ERROR: OpenAI API key not configured") == "OpenAI API key not configured on this Mac")
     }
 
+    @Test("parseError maps invalid API key (401) to a friendly message")
+    func invalidKeyError() {
+        let input = "ERROR: Transcription failed: 401 Incorrect API key provided: sk-proj-****vosA. You can find your API key at https://platform.openai.com."
+        #expect(CLIRunner.parseError(input) == "OpenAI API key invalid or expired — update it in Recordings Settings")
+    }
+
+    @Test("parseError maps quota errors (429) to a friendly message")
+    func quotaError() {
+        let input = "ERROR: Transcription failed: 429 You exceeded your current quota, please check your plan and billing details."
+        #expect(CLIRunner.parseError(input) == "OpenAI quota exceeded — check the OpenAI account billing")
+    }
+
     @Test("parseError truncates long messages to 120 chars")
     func truncation() {
         let longMsg = String(repeating: "a", count: 200)
