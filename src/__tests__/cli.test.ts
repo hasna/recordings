@@ -15,6 +15,66 @@ afterEach(() => {
 });
 
 describe("recordings CLI", () => {
+  test("--help advertises storage sync without legacy cloud command", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--help"],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("storage");
+    expect(stdout).not.toContain("cloud");
+  });
+
+  test("storage status reports local mode as JSON", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "storage", "status"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          HASNA_RECORDINGS_DATABASE_URL: "",
+          RECORDINGS_DATABASE_URL: "",
+          HASNA_RECORDINGS_STORAGE_MODE: "",
+          RECORDINGS_STORAGE_MODE: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+
+    const status = JSON.parse(stdout) as { mode: string; enabled: boolean; service: string; tables: Array<{ table: string; rows: number }> };
+    expect(status.mode).toBe("local");
+    expect(status.enabled).toBe(false);
+    expect(status.service).toBe("recordings");
+    expect(status.tables.some((table) => table.table === "recordings")).toBe(true);
+  });
+
   test("--json app status reports package installer paths", async () => {
     const proc = Bun.spawn(
       [process.execPath, "src/cli/index.ts", "--json", "app", "status"],

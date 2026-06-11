@@ -1,6 +1,6 @@
 {
   "name": "@hasna/recordings",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "type": "module",
   "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
   "repository": {
@@ -17,13 +17,18 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./storage": {
+      "import": "./dist/storage.js",
+      "types": "./dist/storage.d.ts"
     }
   },
   "scripts": {
-    "build": "bun run build:cli && bun run build:mcp && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bun run build:cli && bun run build:mcp && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
     "build:cli": "bun build src/cli/index.ts --target=bun --outfile=dist/cli/index.js --external=commander --external=chalk --external=openai",
     "build:mcp": "bun build src/mcp/index.ts --target=bun --outfile=dist/mcp/index.js --external=@modelcontextprotocol/sdk --external=openai",
-    "build:lib": "bun build src/index.ts --target=bun --outfile=dist/index.js --external=openai",
+    "build:lib": "bun build src/index.ts src/storage.ts --target=bun --outdir=dist --external=openai",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
@@ -45,15 +50,16 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@hasna/cloud": "^0.1.24",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "openai": "^5.1.0",
+    "pg": "^8.13.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/bun": "^1.2.5",
+    "@types/pg": "^8.11.11",
     "typescript": "^5.8.2"
   },
   "publishConfig": {

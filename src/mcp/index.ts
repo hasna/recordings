@@ -2,7 +2,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
-import { registerCloudTools } from "@hasna/cloud";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
 import { getDatabase, getAdapter } from "../db/database.js";
@@ -24,6 +23,7 @@ import { transcribeAudio, transcribeBuffer } from "../lib/transcriber.js";
 import { processText, needsEnhancement } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
+import { registerRecordingsStorageTools } from "./storage-tools.js";
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 
@@ -518,7 +518,7 @@ registerTool(
   }
 );
 
-registerCloudTools(server, "recordings");
+registerRecordingsStorageTools(server);
 return server;
 }
 

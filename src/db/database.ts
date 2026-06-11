@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { SqliteAdapter } from "@hasna/cloud";
+import { SqliteAdapter } from "./sqlite-adapter.js";
 import { mkdirSync } from "fs";
 import { dirname } from "path";
 import { loadConfig } from "../lib/config.js";

@@ -26,6 +26,36 @@ export {
   getDbPath,
   shortUuid,
 } from "./db/database.js";
+export { PgAdapterAsync } from "./db/remote-storage.js";
+export {
+  RECORDINGS_STORAGE_ENV,
+  RECORDINGS_STORAGE_FALLBACK_ENV,
+  RECORDINGS_STORAGE_MODE_ENV,
+  RECORDINGS_STORAGE_MODE_FALLBACK_ENV,
+  STORAGE_DATABASE_ENV,
+  STORAGE_MODE_ENV,
+  getStorageConfig,
+  getStorageConnectionString,
+  getConnectionString,
+  getStorageDatabaseEnv,
+  getStorageDatabaseEnvName,
+  getStorageDatabaseUrl,
+  type StorageConfig,
+  type StorageEnv,
+  type StorageMode,
+} from "./db/storage-config.js";
+export {
+  RECORDINGS_STORAGE_TABLES,
+  STORAGE_TABLES,
+  getStorageStatus,
+  pushStorageChanges,
+  pullStorageChanges,
+  syncStorageChanges,
+  parseStorageTables,
+  type StorageStatus,
+  type SyncResult,
+} from "./db/storage-sync.js";
+export { applyPgMigrations, type PgMigrationResult } from "./db/pg-migrate.js";
 
 // ── Recordings CRUD ─────────────────────────────────────────────────────────
 export {

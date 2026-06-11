@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
 import { loadConfig, getDataDir, ensureDataDir, DEFAULT_CONFIG } from "../lib/config.js";
+import { getStorageConfig, getStorageConnectionString } from "../db/storage-config.js";
 
 let tempDir: string;
 
@@ -18,6 +19,10 @@ const envKeys = [
   "RECORDINGS_DB_PATH",
   "RECORDINGS_AUDIO_DIR",
   "RECORDINGS_MAX_SECONDS",
+  "HASNA_RECORDINGS_DATABASE_URL",
+  "RECORDINGS_DATABASE_URL",
+  "HASNA_RECORDINGS_STORAGE_MODE",
+  "RECORDINGS_STORAGE_MODE",
 ];
 
 beforeEach(() => {
@@ -29,6 +34,30 @@ beforeEach(() => {
     savedEnv[key] = process.env[key];
     delete process.env[key];
   }
+});
+
+describe("storage sync config", () => {
+  test("canonical storage database env wins over fallback env", () => {
+    process.env.HASNA_RECORDINGS_DATABASE_URL = "postgres://new.example/recordings";
+    process.env.RECORDINGS_DATABASE_URL = "postgres://fallback.example/recordings";
+
+    expect(getStorageConnectionString()).toBe("postgres://new.example/recordings");
+    expect(getStorageConfig().mode).toBe("hybrid");
+  });
+
+  test("fallback storage database env is accepted", () => {
+    process.env.RECORDINGS_DATABASE_URL = "postgres://fallback.example/recordings";
+
+    expect(getStorageConnectionString()).toBe("postgres://fallback.example/recordings");
+    expect(getStorageConfig().mode).toBe("hybrid");
+  });
+
+  test("canonical storage mode wins over fallback mode", () => {
+    process.env.HASNA_RECORDINGS_STORAGE_MODE = "remote";
+    process.env.RECORDINGS_STORAGE_MODE = "hybrid";
+
+    expect(getStorageConfig().mode).toBe("remote");
+  });
 });
 
 afterEach(() => {

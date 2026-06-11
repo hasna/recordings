@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-recordings cloud sync.
+ * PostgreSQL migrations for open-recordings storage sync.
  *
  * Equivalent to the SQLite schema in database.ts, translated for PostgreSQL.
  */
@@ -39,6 +39,7 @@ export const PG_MIGRATIONS: string[] = [
     agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
     project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
     session_id TEXT,
+    machine_id TEXT,
     metadata TEXT DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT NOW()::text
   )`,
@@ -65,6 +66,7 @@ export const PG_MIGRATIONS: string[] = [
   `ALTER TABLE recordings ADD COLUMN IF NOT EXISTS goal TEXT`,
   `ALTER TABLE recordings ADD COLUMN IF NOT EXISTS role TEXT`,
   `ALTER TABLE recordings ADD COLUMN IF NOT EXISTS task_list_id TEXT`,
+  `ALTER TABLE recordings ADD COLUMN IF NOT EXISTS machine_id TEXT`,
 
   // Migration 3: feedback table
   `CREATE TABLE IF NOT EXISTS feedback (

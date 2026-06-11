@@ -31,6 +31,7 @@ import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
 import { enhanceText, processText } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
+import { registerStorageCommands } from "./storage.js";
 
 const program = new Command();
 
@@ -44,6 +45,8 @@ program
   .option("--agent <name>", "Agent name or ID")
   .option("--project <name>", "Project name or ID")
   .option("--session <id>", "Session ID");
+
+registerStorageCommands(program);
 
 // ── record ──────────────────────────────────────────────────────────────────
 

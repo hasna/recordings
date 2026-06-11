@@ -42,15 +42,21 @@ MCP_HTTP=1 MCP_HTTP_PORT=8829 recordings-mcp
 
 Endpoints: `GET /health` → `{"status":"ok","name":"recordings"}`, MCP at `/mcp`.
 
-## Cloud Sync
+## Storage Sync
 
-This package supports cloud sync via `@hasna/cloud`:
+This package has native local/remote sync. Local data stays in SQLite under
+`~/.hasna/recordings/`; remote sync uses PostgreSQL when
+`HASNA_RECORDINGS_DATABASE_URL` is set or `~/.hasna/recordings/storage/config.json` is
+configured.
 
 ```bash
-cloud setup
-cloud sync push --service recordings
-cloud sync pull --service recordings
+recordings storage status
+recordings storage migrate
+recordings storage push
+recordings storage pull
 ```
+
+`RECORDINGS_DATABASE_URL` is accepted as the non-Hasna fallback database URL.
 
 ## Data Directory
 
