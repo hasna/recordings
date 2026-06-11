@@ -15,6 +15,38 @@ afterEach(() => {
 });
 
 describe("recordings CLI", () => {
+  test("command failures print a clean ERROR line instead of a stack trace", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-err-${Date.now()}`);
+    tempDirs.push(home);
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "transcribe", "/nonexistent/audio.wav", "--no-enhance"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          OPENAI_API_KEY: "sk-test-invalid",
+          RECORDINGS_API_KEY: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(1);
+    const combined = `${stdout}\n${stderr}`;
+    expect(combined).toContain("ERROR:");
+    expect(combined).not.toContain("at async");
+    expect(combined).not.toContain("Bun v");
+  });
+
   test("--help advertises storage sync without legacy cloud command", async () => {
     const proc = Bun.spawn(
       [process.execPath, "src/cli/index.ts", "--help"],

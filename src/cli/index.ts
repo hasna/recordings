@@ -1331,4 +1331,8 @@ function findPackageRoot(): string {
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
-program.parse();
+program.parseAsync().catch((error: unknown) => {
+  const msg = error instanceof Error ? error.message : String(error);
+  console.error(`ERROR: ${msg}`);
+  process.exit(1);
+});
