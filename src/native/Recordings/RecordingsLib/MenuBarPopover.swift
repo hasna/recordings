@@ -28,11 +28,10 @@ public struct MenuBarPopover: View {
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
-            Divider()
             modePicker
-                .padding(.horizontal, 16).padding(.top, 10)
+                .padding(.horizontal, 16).padding(.top, 2)
             recordingArea
-                .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 12)
+                .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 12)
             Divider()
             if !engine.recentTranscriptions.isEmpty {
                 filterBar
@@ -44,6 +43,8 @@ public struct MenuBarPopover: View {
             Divider()
             footerMenu
         }
+        .animation(.smooth(duration: 0.25), value: engine.isRecording)
+        .animation(.smooth(duration: 0.25), value: engine.isTranscribing)
     }
 
     // MARK: - Header
@@ -54,16 +55,21 @@ public struct MenuBarPopover: View {
                 Image(systemName: "mic.fill")
                     .foregroundStyle(.tint)
                 Text("Hasna Recordings")
+                    .font(.headline)
                 Spacer()
                 if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
                     Text(shortcut.description)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .glassEffect(.regular, in: .capsule)
                 }
             }
             if !projectStore.settings.projects.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.fill")
-                        .foregroundColor(projectStore.activeProject != nil ? .accentColor : .secondary)
+                        .foregroundStyle(projectStore.activeProject != nil ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     Menu {
                         Button("None") { projectStore.setActive(nil) }
                         Divider()
@@ -102,91 +108,103 @@ public struct MenuBarPopover: View {
             }
         }
         .pickerStyle(.segmented)
+        .help(engine.mode.hint)
     }
 
     @ViewBuilder
     private var recordingArea: some View {
         if engine.isRecording {
-                VStack(spacing: 6) {
-                    HStack {
-                        Circle().fill(.red).frame(width: 8, height: 8)
-                        Text(fmt(engine.recordingDuration))
-                            .monospacedDigit()
-                        Spacer()
-                        Button("Stop") { engine.stopAndTranscribe() }
-                            .controlSize(.small)
-                    }
-                    // Live streaming transcription text
-                    if !engine.liveTranscriptionText.isEmpty {
-                        Text(engine.liveTranscriptionText)
-                            .font(.callout)
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.leading)
-                            .lineLimit(3)
-                            .padding(.vertical, 4)
-                        Text("Listening...")
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                    }
-                    if let project = projectStore.activeProject {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder.fill").foregroundStyle(.tint)
-                            Text(project.name).foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                    }
+            VStack(spacing: 8) {
+                HStack {
+                    Image(systemName: "waveform")
+                        .symbolEffect(.variableColor.iterative, isActive: true)
+                        .foregroundStyle(.red)
+                    Text(fmt(engine.recordingDuration))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                        .font(.title3.weight(.medium))
+                    Spacer()
+                    Button("Stop", systemImage: "stop.fill") { engine.stopAndTranscribe() }
+                        .buttonStyle(.glassProminent)
+                        .tint(.red)
+                        .controlSize(.small)
                 }
-                .padding(10)
-                .glassEffect(.regular)
-        } else if engine.isTranscribing {
-                VStack(spacing: 6) {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Transcribing...")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    // Show accumulated text during transcribing
-                    if !engine.liveTranscriptionText.isEmpty {
-                        Text(engine.liveTranscriptionText)
-                            .font(.callout)
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.leading)
-                            .lineLimit(3)
-                            .padding(.vertical, 4)
-                    }
-                    if let project = projectStore.activeProject {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder.fill").foregroundStyle(.tint)
-                            Text(project.name).foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(10)
-                .glassEffect(.regular)
-        } else {
-                VStack(spacing: 6) {
-                    Button { engine.startRecording() } label: {
-                        Label("Record", systemImage: "mic.circle.fill")
-                    }
-                    .controlSize(.regular)
-
-                    if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
-                        Text("or hold \(shortcut.description)")
-                            .foregroundStyle(.tertiary)
-                    }
-                    Text(engine.statusMessage)
+                if !engine.liveTranscriptionText.isEmpty {
+                    Text(engine.liveTranscriptionText)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(3)
+                        .contentTransition(.opacity)
+                } else {
+                    Text("Listening…")
                         .font(.caption)
-                        .foregroundStyle(engine.statusMessage == "Ready" ? Color.secondary : Color.orange)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(10)
-                .glassEffect(.regular)
+                if let project = projectStore.activeProject {
+                    activeProjectTag(project)
+                }
+            }
+            .padding(12)
+            .glassEffect(.regular.tint(.red.opacity(0.1)), in: .rect(cornerRadius: 14))
+        } else if engine.isTranscribing {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Transcribing…")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                if !engine.liveTranscriptionText.isEmpty {
+                    Text(engine.liveTranscriptionText)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(3)
+                }
+                if let project = projectStore.activeProject {
+                    activeProjectTag(project)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(12)
+            .glassEffect(.regular, in: .rect(cornerRadius: 14))
+        } else {
+            VStack(spacing: 8) {
+                Button {
+                    engine.startRecording()
+                } label: {
+                    Label("Record", systemImage: "mic.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+
+                if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) {
+                    Text("or hold \(shortcut.description)")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                Text(engine.statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(engine.statusMessage == "Ready" ? Color.secondary : Color.orange)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(12)
+            .glassEffect(.regular, in: .rect(cornerRadius: 14))
         }
+    }
+
+    private func activeProjectTag(_ project: RecProject) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "folder.fill").foregroundStyle(.tint)
+            Text(project.name).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .font(.caption)
     }
 
     // MARK: - Filter Bar
@@ -300,13 +318,16 @@ struct FilterChip: View {
     var body: some View {
         Button(action: action) {
             Text(label)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .font(.caption)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
         }
         .buttonStyle(.plain)
         .foregroundStyle(isActive ? .primary : .secondary)
+        .glassEffect(
+            isActive ? .regular.tint(.accentColor.opacity(0.25)).interactive() : .regular.interactive(),
+            in: .capsule
+        )
     }
 }
 

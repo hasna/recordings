@@ -25,10 +25,11 @@ struct RecordingsApp: App {
                 }
         } label: {
             if engine.isRecording {
-                Image(systemName: "record.circle.fill")
-                    .symbolRenderingMode(.multicolor)
+                Image(systemName: "waveform")
+                    .symbolEffect(.variableColor.iterative, isActive: true)
             } else if engine.isTranscribing {
                 Image(systemName: "ellipsis.circle")
+                    .symbolEffect(.pulse, isActive: true)
             } else {
                 Image(systemName: "mic.fill")
             }
