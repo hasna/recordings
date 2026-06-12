@@ -32,6 +32,7 @@ import { enhanceText, processText } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { registerStorageCommands } from "./storage.js";
+import { applyEnhancementOptions } from "./options.js";
 
 const program = new Command();
 
@@ -62,7 +63,7 @@ program
     ensureDataDir(config);
 
     if (opts.language) config.language = opts.language;
-    if (opts.noEnhance === false) config.auto_enhance = false;
+    applyEnhancementOptions(config, opts);
 
     // Check dependencies
     const deps = await checkRecordingDeps();
@@ -162,7 +163,7 @@ program
   .action(async (file, opts) => {
     const config = loadConfig();
     ensureDataDir(config);
-    if (opts.noEnhance === false) config.auto_enhance = false;
+    applyEnhancementOptions(config, opts);
 
     const parentOpts = program.opts();
     if (!parentOpts.json) {
@@ -696,7 +697,7 @@ program
     const config = loadConfig();
     ensureDataDir(config);
     if (opts.language) config.language = opts.language;
-    if (opts.noEnhance === false) config.auto_enhance = false;
+    applyEnhancementOptions(config, opts);
 
     const deps = await checkRecordingDeps();
     if (!deps.available) {

@@ -44,7 +44,7 @@ public struct TranscriptionResult: Sendable {
     var displayText: String { processedText ?? rawText }
 }
 
-public enum RecordingTrigger {
+public enum RecordingTrigger: Equatable, Sendable {
     case manual
     case fnKey
     case keyboardShortcut
@@ -121,6 +121,7 @@ public final class RecordingEngine: ObservableObject {
     private var recordingTimer: Timer?
     private var activeTrigger: RecordingTrigger?
     private var keyboardShortcutIsDown = false
+    private var fnKeyIsDown = false
     private var targetAppBundleIdentifier: String?
     private var targetAppPid: pid_t?
     public var projectStore: ProjectStore?
@@ -165,13 +166,23 @@ public final class RecordingEngine: ObservableObject {
         // Set up fn key monitor — hold fn to record, release to stop (like WisprFlow)
         fnMonitor.onFnKeyDown = { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, self.useFnKey, !self.isRecording else { return }
+                guard let self else { return }
+                self.fnKeyIsDown = true
+                guard self.useFnKey, Self.canBeginRecording(isRecording: self.isRecording, isTranscribing: self.isTranscribing) else { return }
                 self.startRecording(trigger: .fnKey)
             }
         }
         fnMonitor.onFnKeyUp = { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, self.useFnKey, self.isRecording, self.activeTrigger == .fnKey else { return }
+                guard let self else { return }
+                self.fnKeyIsDown = false
+                guard self.useFnKey, self.activeTrigger == .fnKey else { return }
+                guard self.isRecording else {
+                    self.log("fn released before recording started; cancelling pending start")
+                    self.resetRecordingIntent()
+                    self.updateStatus()
+                    return
+                }
                 self.stopAndTranscribe()
             }
         }
@@ -181,7 +192,7 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, !self.keyboardShortcutIsDown else { return }
                 self.keyboardShortcutIsDown = true
-                guard !self.isRecording else { return }
+                guard Self.canBeginRecording(isRecording: self.isRecording, isTranscribing: self.isTranscribing) else { return }
                 self.startRecording(trigger: .keyboardShortcut)
             }
         }
@@ -189,7 +200,13 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.keyboardShortcutIsDown else { return }
                 self.keyboardShortcutIsDown = false
-                guard self.isRecording, self.activeTrigger == .keyboardShortcut else { return }
+                guard self.activeTrigger == .keyboardShortcut else { return }
+                guard self.isRecording else {
+                    self.log("shortcut released before recording started; cancelling pending start")
+                    self.resetRecordingIntent()
+                    self.updateStatus()
+                    return
+                }
                 self.stopAndTranscribe()
             }
         }
@@ -289,7 +306,12 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Start Recording (Streaming)
 
     public func startRecording(trigger: RecordingTrigger = .manual) {
-        guard !isRecording else { return }
+        guard Self.canBeginRecording(isRecording: isRecording, isTranscribing: isTranscribing) else {
+            if isTranscribing {
+                statusMessage = "Finish transcribing before recording again"
+            }
+            return
+        }
         log("startRecording trigger=\(trigger) microphoneStatus=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) accessibility=\(AXIsProcessTrusted())")
         activeTrigger = trigger
         keyboardShortcutIsDown = trigger == .keyboardShortcut
@@ -320,6 +342,12 @@ public final class RecordingEngine: ObservableObject {
                     guard let self else { return }
                     self.log("microphone access response granted=\(granted)")
                     if granted {
+                        guard self.shouldContinueStarting(trigger: trigger) else {
+                            self.log("recording start cancelled before microphone permission completed trigger=\(trigger)")
+                            self.resetRecordingIntent()
+                            self.updateStatus()
+                            return
+                        }
                         self.startNativeRecording()
                     } else {
                         self.resetRecordingIntent()
@@ -335,6 +363,33 @@ public final class RecordingEngine: ObservableObject {
             resetRecordingIntent()
             statusMessage = "Microphone permission unavailable"
         }
+    }
+
+    nonisolated static func canBeginRecording(isRecording: Bool, isTranscribing: Bool) -> Bool {
+        !isRecording && !isTranscribing
+    }
+
+    nonisolated static func shouldContinueStartingAfterPermission(
+        trigger: RecordingTrigger,
+        keyboardShortcutIsDown: Bool,
+        fnKeyIsDown: Bool
+    ) -> Bool {
+        switch trigger {
+        case .manual:
+            return true
+        case .keyboardShortcut:
+            return keyboardShortcutIsDown
+        case .fnKey:
+            return fnKeyIsDown
+        }
+    }
+
+    private func shouldContinueStarting(trigger: RecordingTrigger) -> Bool {
+        activeTrigger == trigger && Self.shouldContinueStartingAfterPermission(
+            trigger: trigger,
+            keyboardShortcutIsDown: keyboardShortcutIsDown,
+            fnKeyIsDown: fnKeyIsDown
+        )
     }
 
     private func startNativeRecording() {
@@ -667,6 +722,7 @@ public final class RecordingEngine: ObservableObject {
     private func resetRecordingIntent() {
         activeTrigger = nil
         keyboardShortcutIsDown = false
+        fnKeyIsDown = false
         targetAppBundleIdentifier = nil
         targetAppPid = nil
     }
