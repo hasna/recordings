@@ -133,6 +133,12 @@ public final class RecordingEngine: ObservableObject {
     @Published public var isTranscribing = false
     @Published public var recordingDuration: TimeInterval = 0
     @Published public var liveTranscriptionText = ""
+    @Published public var transcriptionLanguage = OpenAIAPIKeyStore.defaultLanguage {
+        didSet {
+            UserDefaults.standard.set(transcriptionLanguage, forKey: "recordingsLanguage")
+            try? OpenAIAPIKeyStore.saveLanguage(language: transcriptionLanguage, homePath: home)
+        }
+    }
 
     private var nativeRecorder: NativePCMRecorder?
     private var recordingTimer: Timer?
@@ -178,6 +184,7 @@ public final class RecordingEngine: ObservableObject {
            let parsedMode = RecordingMode(rawValue: savedMode) {
             mode = parsedMode
         }
+        transcriptionLanguage = OpenAIAPIKeyStore.loadLanguage(homePath: home)
         useFnKey = UserDefaults.standard.object(forKey: "useFnKey") as? Bool ?? false
         if KeyboardShortcuts.getShortcut(for: .toggleRecording) == nil {
             KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
@@ -471,10 +478,11 @@ public final class RecordingEngine: ObservableObject {
     private func startRealtimeStreaming(apiKey: String) {
         let client = RealtimeTranscriptionClient(apiKey: apiKey, homePath: home)
         realtimeClient = client
-        log("realtime streaming task starting")
+        let language = OpenAIAPIKeyStore.apiLanguageHint(for: transcriptionLanguage)
+        log("realtime streaming task starting language=\(language.isEmpty ? "auto" : language)")
 
         streamingTask = Task {
-            await client.startStreaming()
+            await client.startStreaming(language: language)
             self.log("realtime start completed streaming=\(client.isStreaming) error=\(client.error ?? "")")
 
             var lastPeriodicCommitAt = Date.distantPast
@@ -492,7 +500,7 @@ public final class RecordingEngine: ObservableObject {
                 if text != streamingText {
                     await MainActor.run {
                         self.streamingText = text
-                        self.liveTranscriptionText = text
+                        self.liveTranscriptionText = Self.cleanRealtimeArtifactText(text)
                     }
                 }
             }
@@ -533,6 +541,7 @@ public final class RecordingEngine: ObservableObject {
         let audioPath = activeAudioPath
         let pcmStreamPipe = pcmStreamPipe
         let client = realtimeClient
+        let transcriptionLanguage = transcriptionLanguage
         resetRecordingIntent()
         self.pcmStreamPipe = nil
 
@@ -552,7 +561,11 @@ public final class RecordingEngine: ObservableObject {
 
             self.liveTranscriptionText = ""
 
-            if Self.shouldUseRealtimeFastPath(realtimeText: realtimeText, pcmByteCount: self.recordedPCM.count),
+            if Self.shouldUseRealtimeFastPath(
+                realtimeText: streamingResult,
+                pcmByteCount: self.recordedPCM.count,
+                language: transcriptionLanguage
+            ),
                let realtimeText {
                 let releaseToTextMS = Int(Date().timeIntervalSince(stopStartedAt) * 1_000)
                 self.log("using realtime fast path chars=\(realtimeText.count) releaseToTextMs=\(releaseToTextMS)")
@@ -621,9 +634,37 @@ public final class RecordingEngine: ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    public nonisolated static func shouldUseRealtimeFastPath(realtimeText: String?, pcmByteCount: Int) -> Bool {
+    public nonisolated static func shouldUseRealtimeFastPath(
+        realtimeText: String?,
+        pcmByteCount: Int,
+        language: String = "en"
+    ) -> Bool {
         guard let text = normalizedRealtimeTranscript(realtimeText) else { return false }
+        guard isSafeRealtimeFastPathText(rawText: realtimeText ?? "", cleanedText: text, language: language) else {
+            return false
+        }
         return !shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount)
+    }
+
+    public nonisolated static func isSafeRealtimeFastPathText(rawText: String, cleanedText: String, language: String) -> Bool {
+        guard !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let languageHint = OpenAIAPIKeyStore.apiLanguageHint(for: language)
+        guard languageHint == "en" else { return true }
+
+        let rawTrimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !containsCJKArtifact(in: rawTrimmed) else { return false }
+
+        let rawNormalized = rawTrimmed.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        let cleanedNormalized = cleanedText.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        return rawNormalized == cleanedNormalized
     }
 
     public nonisolated static func cleanRealtimeArtifactText(_ text: String) -> String {
@@ -653,11 +694,17 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static func removeStandaloneRealtimeArtifacts(from text: String) -> String {
         let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
+        let englishDominant = latinLetterCount(in: text) >= max(12, cjkLetterCount(in: text) * 3)
         let words = text.split(separator: " ").compactMap { rawWord -> String? in
             let normalized = rawWord
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
                 .lowercased()
             return artifactTokens.contains(normalized) ? nil : String(rawWord)
+        }.compactMap { word -> String? in
+            guard englishDominant else { return word }
+            let normalized = word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+            guard !normalized.isEmpty else { return word }
+            return isMostlyCJKArtifact(normalized) ? nil : word
         }
         return words.joined(separator: " ")
     }
@@ -705,6 +752,36 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static func normalizedTranscriptWord(_ word: String) -> String {
         word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines)).lowercased()
+    }
+
+    private nonisolated static func isMostlyCJKArtifact(_ word: String) -> Bool {
+        let cjkCount = word.unicodeScalars.filter(isCJKScalar).count
+        guard cjkCount > 0 else { return false }
+        let letterCount = word.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        return cjkCount >= max(1, letterCount - cjkCount)
+    }
+
+    private nonisolated static func latinLetterCount(in text: String) -> Int {
+        text.unicodeScalars.filter { scalar in
+            (65...90).contains(Int(scalar.value)) || (97...122).contains(Int(scalar.value))
+        }.count
+    }
+
+    private nonisolated static func cjkLetterCount(in text: String) -> Int {
+        text.unicodeScalars.filter(isCJKScalar).count
+    }
+
+    private nonisolated static func containsCJKArtifact(in text: String) -> Bool {
+        cjkLetterCount(in: text) > 0
+    }
+
+    private nonisolated static func isCJKScalar(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xAC00...0xD7AF:
+            return true
+        default:
+            return false
+        }
     }
 
     private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?) {

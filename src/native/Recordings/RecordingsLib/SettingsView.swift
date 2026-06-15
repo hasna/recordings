@@ -33,6 +33,10 @@ public struct SettingsView: View {
                         // Keep the CLI config in sync — final transcription shells out to it.
                         try? OpenAIAPIKeyStore.save(key: openAIAPIKey, homePath: engine.home)
                     }
+                Picker("Language", selection: $engine.transcriptionLanguage) {
+                    Text("English").tag("en")
+                    Text("Auto Detect").tag("auto")
+                }
                 Text("Used for live transcription and the final paste. Stored in ~/.hasna/recordings/config.json.")
                     .foregroundStyle(.secondary)
             }

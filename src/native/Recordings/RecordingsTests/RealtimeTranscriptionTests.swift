@@ -132,6 +132,16 @@ struct RealtimeTranscriptionTests {
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 12_000))
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 96_000) == false)
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "   ", pcmByteCount: 96_000) == false)
+        #expect(RecordingEngine.shouldUseRealtimeFastPath(
+            realtimeText: "Actually 리수 Zoom your goal",
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == false)
+        #expect(RecordingEngine.shouldUseRealtimeFastPath(
+            realtimeText: "Actually Zoom your goal",
+            pcmByteCount: 96_000,
+            language: "en"
+        ))
     }
 
     @Test("Realtime artifact cleanup removes duplicated chunks and filler tokens")
@@ -140,5 +150,13 @@ struct RealtimeTranscriptionTests {
             "어 Okay I don't know if this This is working어 Okay I don't know if this This is working"
         )
         #expect(cleaned == "Okay I don't know if this is working")
+    }
+
+    @Test("Realtime artifact cleanup removes CJK tokens from English-dominant text")
+    func realtimeCJKArtifactCleanup() {
+        let cleaned = RecordingEngine.cleanRealtimeArtifactText(
+            "Actually 리수 Zoom your goal and do this work with sabi 度扫 agents actually"
+        )
+        #expect(cleaned == "Actually Zoom your goal and do this work with sabi agents actually")
     }
 }

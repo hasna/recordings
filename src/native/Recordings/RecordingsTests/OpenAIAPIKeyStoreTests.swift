@@ -52,6 +52,32 @@ struct OpenAIAPIKeyStoreTests {
         #expect(key == "referenced-key")
     }
 
+    @Test("Language defaults to English and can be loaded from config")
+    func languageConfig() throws {
+        let home = try makeHome()
+        #expect(OpenAIAPIKeyStore.loadLanguage(homePath: home.path, environment: [:], userDefaultLanguage: nil) == "en")
+
+        try writeConfig(home: home, ["language": "FR"])
+        #expect(OpenAIAPIKeyStore.loadLanguage(homePath: home.path, environment: [:], userDefaultLanguage: nil) == "fr")
+        #expect(OpenAIAPIKeyStore.apiLanguageHint(for: "auto") == "")
+        #expect(OpenAIAPIKeyStore.apiLanguageHint(for: "en") == "en")
+    }
+
+    @Test("Saving language writes the CLI language config")
+    func saveLanguageWritesConfig() throws {
+        let home = try makeHome()
+
+        try OpenAIAPIKeyStore.saveLanguage(language: "en", homePath: home.path)
+
+        let configURL = home
+            .appendingPathComponent(".hasna")
+            .appendingPathComponent("recordings")
+            .appendingPathComponent("config.json")
+        let data = try Data(contentsOf: configURL)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["language"] as? String == "en")
+    }
+
     @Test("Secrets env files are searched recursively")
     func recursiveSecrets() throws {
         let home = try makeHome()

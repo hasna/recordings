@@ -1,6 +1,8 @@
 import Foundation
 
 enum OpenAIAPIKeyStore {
+    static let defaultLanguage = "en"
+
     static func load(
         homePath: String,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -19,6 +21,23 @@ enum OpenAIAPIKeyStore {
             return key
         }
         return ""
+    }
+
+    static func loadLanguage(
+        homePath: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        userDefaultLanguage: String? = UserDefaults.standard.string(forKey: "recordingsLanguage")
+    ) -> String {
+        if let language = firstNonEmpty(environment["RECORDINGS_LANGUAGE"]) {
+            return normalizedStoredLanguage(language)
+        }
+        if let language = firstNonEmpty(userDefaultLanguage) {
+            return normalizedStoredLanguage(language)
+        }
+        if let language = loadConfigValue(homePath: homePath, key: "language", environment: environment) {
+            return normalizedStoredLanguage(language)
+        }
+        return defaultLanguage
     }
 
     /// Persist the key into ~/.hasna/recordings/config.json so the CLI (which the app
@@ -47,23 +66,59 @@ enum OpenAIAPIKeyStore {
         try data.write(to: url, options: .atomic)
     }
 
+    static func saveLanguage(language: String, homePath: String) throws {
+        let normalized = normalizedStoredLanguage(language)
+        var json = loadMutableConfig(homePath: homePath)
+
+        if apiLanguageHint(for: normalized).isEmpty {
+            json.removeValue(forKey: "language")
+        } else {
+            json["language"] = normalized
+        }
+
+        try writeConfig(json, homePath: homePath)
+    }
+
+    static func apiLanguageHint(for storedLanguage: String) -> String {
+        let normalized = normalizedStoredLanguage(storedLanguage)
+        return normalized == "auto" ? "" : normalized
+    }
+
     private static func loadConfigKey(homePath: String, environment: [String: String]) -> String? {
-        let url = URL(fileURLWithPath: homePath)
+        for key in ["openai_api_key", "api_key"] {
+            if let resolved = loadConfigValue(homePath: homePath, key: key, environment: environment) {
+                return resolved
+            }
+        }
+        return nil
+    }
+
+    private static func loadConfigValue(homePath: String, key: String, environment: [String: String]) -> String? {
+        let json = loadMutableConfig(homePath: homePath)
+        guard let value = json[key] as? String else { return nil }
+        return resolve(value: value, environment: environment)
+    }
+
+    private static func loadMutableConfig(homePath: String) -> [String: Any] {
+        let url = configURL(homePath: homePath)
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return json
+    }
+
+    private static func writeConfig(_ json: [String: Any], homePath: String) throws {
+        let url = configURL(homePath: homePath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+
+    private static func configURL(homePath: String) -> URL {
+        URL(fileURLWithPath: homePath)
             .appendingPathComponent(".hasna")
             .appendingPathComponent("recordings")
             .appendingPathComponent("config.json")
-
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-
-        for key in ["openai_api_key", "api_key"] {
-            guard let value = json[key] as? String,
-                  let resolved = resolve(value: value, environment: environment)
-            else { continue }
-            return resolved
-        }
-        return nil
     }
 
     private static func loadSecretKey(homePath: String) -> String? {
@@ -125,6 +180,11 @@ enum OpenAIAPIKeyStore {
             return String(value.dropFirst().dropLast())
         }
         return value
+    }
+
+    private static func normalizedStoredLanguage(_ language: String) -> String {
+        let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.isEmpty ? defaultLanguage : trimmed
     }
 
     private static func firstNonEmpty(_ values: String?...) -> String? {

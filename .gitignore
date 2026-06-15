@@ -2,6 +2,7 @@ node_modules/
 dist/
 .build/
 .recordings/
+.hasna/
 *.db
 *.db-wal
 *.db-shm
