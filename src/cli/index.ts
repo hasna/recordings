@@ -569,16 +569,41 @@ appCommand
       console.error(chalk.red("Permission reset is only available on macOS"));
       process.exit(1);
     }
-    const services = ["Microphone", "Accessibility"];
-    for (const service of services) {
-      const result = spawnSync("tccutil", ["reset", service, "com.hasna.recordings"], {
-        stdio: "inherit",
-      });
-      if (result.error) {
-        console.error(chalk.red(result.error.message));
-        process.exit(1);
-      }
+    resetMacOSPermissions();
+  });
+
+appCommand
+  .command("request-permissions")
+  .description("Open Recordings.app and trigger macOS Microphone and Accessibility permission prompts")
+  .option("--reset", "Reset existing Microphone and Accessibility decisions before requesting")
+  .action((opts: { reset?: boolean }) => {
+    if (process.platform !== "darwin") {
+      console.error(chalk.red("Permission prompts are only available on macOS"));
+      process.exit(1);
     }
+
+    const status = getMacOSAppStatus();
+    if (!status.installed) {
+      console.error(chalk.red("Recordings.app is not installed. Run: recordings app install"));
+      process.exit(1);
+    }
+
+    if (opts.reset) {
+      resetMacOSPermissions();
+    }
+
+    const result = spawnSync("open", [
+      "-n",
+      status.installed_app_path,
+      "--args",
+      "--request-permissions",
+      "--open-permission-settings",
+    ], { stdio: "inherit" });
+    if (result.error) {
+      console.error(chalk.red(result.error.message));
+      process.exit(1);
+    }
+    process.exit(result.status ?? 1);
   });
 
 appCommand
@@ -1239,6 +1264,19 @@ function getMacOSAppStatus(): MacOSAppStatus {
     accessibility_permission: getTccPermission("kTCCServiceAccessibility", home, permissionCodeHash),
     log_path: logPath,
   };
+}
+
+function resetMacOSPermissions(): void {
+  const services = ["Microphone", "Accessibility"];
+  for (const service of services) {
+    const result = spawnSync("tccutil", ["reset", service, "com.hasna.recordings"], {
+      stdio: "inherit",
+    });
+    if (result.error) {
+      console.error(chalk.red(result.error.message));
+      process.exit(1);
+    }
+  }
 }
 
 function getCodeSigningInfo(appPath: string): { cdHash: string | null; adHoc: boolean } {

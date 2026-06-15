@@ -185,6 +185,28 @@ describe("recordings CLI", () => {
     expect(permissions.log_path).toContain(".hasna/recordings/Recordings.log");
   });
 
+  test("app help advertises permission request command", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "app", "--help"],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("request-permissions");
+  });
+
   test("--json check emits machine-readable dependency status", async () => {
     const home = join(tmpdir(), `open-recordings-cli-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);

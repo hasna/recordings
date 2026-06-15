@@ -1,4 +1,5 @@
 @preconcurrency import Cocoa
+import AVFoundation
 import SwiftUI
 import KeyboardShortcuts
 import RecordingsLib
@@ -14,6 +15,7 @@ struct RecordingsApp: App {
         AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
+        Self.handlePermissionRequestArguments()
     }
 
     var body: some Scene {
@@ -47,6 +49,31 @@ struct RecordingsApp: App {
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.hasna.recordings")
             where app.processIdentifier != currentPID {
             app.terminate()
+        }
+    }
+
+    private static func handlePermissionRequestArguments() {
+        let arguments = CommandLine.arguments
+        guard arguments.contains("--request-permissions") else { return }
+
+        NativeAppLog.write("request-permissions argument received")
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            NativeAppLog.write("request-permissions microphone granted=\(granted)")
+        }
+
+        let trusted = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        )
+        NativeAppLog.write("request-permissions accessibility trusted=\(trusted)")
+
+        guard arguments.contains("--open-permission-settings") else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let microphone = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(microphone)
+            }
+            if let accessibility = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(accessibility)
+            }
         }
     }
 }

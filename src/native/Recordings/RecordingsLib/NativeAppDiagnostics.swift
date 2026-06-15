@@ -1,9 +1,9 @@
 import Foundation
 
-enum NativeAppLog {
+public enum NativeAppLog {
     private static let lock = NSLock()
 
-    static func write(_ message: String, homePath: String = FileManager.default.homeDirectoryForCurrentUser.path) {
+    public static func write(_ message: String, homePath: String = FileManager.default.homeDirectoryForCurrentUser.path) {
         lock.lock()
         defer { lock.unlock() }
 
