@@ -26,9 +26,9 @@ public enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
     }
     public var hint: String {
         switch self {
-        case .pushToTalk: return "Hold F5 or your chosen shortcut to record, then release to paste"
-        case .dictation: return "Hold F5 or your chosen shortcut to dictate, then release to paste"
-        case .command: return "Select text, then hold F5 or your chosen shortcut and release to rewrite"
+        case .pushToTalk: return "Hold your recording shortcut, then release to paste"
+        case .dictation: return "Hold your recording shortcut to dictate, then release to paste"
+        case .command: return "Select text, hold your recording shortcut, then release to rewrite"
         }
     }
 }
@@ -56,33 +56,50 @@ struct PasteTargetCandidate: Equatable, Sendable {
     let isRegularApp: Bool
 }
 
-private actor PCMStreamState {
-    private var recordedPCM = Data()
-    private var pendingChunk = Data()
+private final class PCMStreamPipe: @unchecked Sendable {
+    private let continuation: AsyncStream<Data>.Continuation
+    private let processor: Task<Data, Never>
 
-    func append(_ data: Data, chunkSize: Int) -> [Data] {
-        guard !data.isEmpty else { return [] }
-
-        recordedPCM.append(data)
-        pendingChunk.append(data)
-
-        var chunks: [Data] = []
-        while pendingChunk.count >= chunkSize {
-            chunks.append(pendingChunk.prefixData(count: chunkSize))
-            pendingChunk.removeFirst(chunkSize)
+    init(chunkSize: Int, client: RealtimeTranscriptionClient?) {
+        var streamContinuation: AsyncStream<Data>.Continuation!
+        let stream = AsyncStream<Data>(bufferingPolicy: .unbounded) { continuation in
+            streamContinuation = continuation
         }
-        return chunks
+        continuation = streamContinuation
+        processor = Task {
+            var recordedPCM = Data()
+            var pendingChunk = Data()
+
+            for await data in stream {
+                guard !data.isEmpty else { continue }
+                recordedPCM.append(data)
+                pendingChunk.append(data)
+
+                while pendingChunk.count >= chunkSize {
+                    await client?.sendAudio(pendingChunk.prefixData(count: chunkSize))
+                    pendingChunk.removeFirst(chunkSize)
+                }
+            }
+
+            if !pendingChunk.isEmpty {
+                await client?.sendAudio(pendingChunk)
+            }
+            return recordedPCM
+        }
     }
 
-    func flushPendingChunk() -> Data? {
-        guard !pendingChunk.isEmpty else { return nil }
-        let chunk = pendingChunk
-        pendingChunk.removeAll(keepingCapacity: true)
-        return chunk
+    func append(_ data: Data) {
+        continuation.yield(data)
     }
 
-    func capturedPCM() -> Data {
-        recordedPCM
+    func finish() async -> Data {
+        continuation.finish()
+        return await processor.value
+    }
+
+    func cancel() {
+        continuation.finish()
+        processor.cancel()
     }
 }
 
@@ -130,11 +147,14 @@ public final class RecordingEngine: ObservableObject {
     // Real-time streaming
     private var realtimeClient: RealtimeTranscriptionClient?
     private var streamingTask: Task<Void, Never>?
-    private var pcmStreamState: PCMStreamState?
+    private var pcmStreamPipe: PCMStreamPipe?
     private var streamingText = ""
     private var recordedPCM = Data()
     private var activeAudioPath: String?
     private var lastAccessibilityPromptAt: Date?
+
+    private nonisolated static let realtimePeriodicCommitInterval: TimeInterval = 0.9
+    private nonisolated static let realtimeFinishTimeoutMilliseconds: UInt64 = 700
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -393,9 +413,6 @@ public final class RecordingEngine: ObservableObject {
     }
 
     private func startNativeRecording() {
-        let streamState = PCMStreamState()
-        pcmStreamState = streamState
-
         let apiKey = openAIAPIKey
         log("startNativeRecording apiKeyConfigured=\(!apiKey.isEmpty)")
         if !apiKey.isEmpty {
@@ -403,18 +420,15 @@ public final class RecordingEngine: ObservableObject {
         }
 
         let client = realtimeClient
+        let streamPipe = PCMStreamPipe(chunkSize: 4_800, client: client)
+        pcmStreamPipe = streamPipe
         let homePath = home
         let firstChunkLogged = LockedFlag()
-        let recorder = NativePCMRecorder { [weak client] data in
+        let recorder = NativePCMRecorder { data in
             if firstChunkLogged.take() {
                 NativeAppLog.write("native recorder received first PCM chunk bytes=\(data.count)", homePath: homePath)
             }
-            Task {
-                let chunks = await streamState.append(data, chunkSize: 4_800)
-                for chunk in chunks {
-                    await client?.sendAudio(chunk)
-                }
-            }
+            streamPipe.append(data)
         }
 
         do {
@@ -445,7 +459,8 @@ public final class RecordingEngine: ObservableObject {
             realtimeClient = nil
             streamingTask?.cancel()
             streamingTask = nil
-            pcmStreamState = nil
+            pcmStreamPipe?.cancel()
+            pcmStreamPipe = nil
             resetRecordingIntent()
             statusMessage = "Failed: \(error.localizedDescription)"
         }
@@ -462,9 +477,17 @@ public final class RecordingEngine: ObservableObject {
             await client.startStreaming()
             self.log("realtime start completed streaming=\(client.isStreaming) error=\(client.error ?? "")")
 
+            var lastPeriodicCommitAt = Date.distantPast
+
             // Receive deltas
             while client.isStreaming {
                 try? await Task.sleep(for: .milliseconds(100))
+                if self.isRecording,
+                   Date().timeIntervalSince(lastPeriodicCommitAt) >= Self.realtimePeriodicCommitInterval {
+                    if await client.commitInput(reason: "periodic") {
+                        lastPeriodicCommitAt = Date()
+                    }
+                }
                 let text = client.accumulatedText
                 if text != streamingText {
                     await MainActor.run {
@@ -489,6 +512,7 @@ public final class RecordingEngine: ObservableObject {
 
     public func stopAndTranscribe() {
         guard isRecording else { return }
+        let stopStartedAt = Date()
         log("stopAndTranscribe")
 
         recordingTimer?.invalidate()
@@ -507,29 +531,47 @@ public final class RecordingEngine: ObservableObject {
         let activeProjectId = projectStore?.settings.activeProjectId
         let activeProjectName = projectStore?.activeProject?.name
         let audioPath = activeAudioPath
-        let pcmStreamState = pcmStreamState
+        let pcmStreamPipe = pcmStreamPipe
         let client = realtimeClient
         resetRecordingIntent()
-        self.pcmStreamState = nil
+        self.pcmStreamPipe = nil
 
         Task {
-            if let pcmStreamState {
-                if let finalChunk = await pcmStreamState.flushPendingChunk() {
-                    client?.sendAudio(finalChunk)
-                }
-                self.recordedPCM = await pcmStreamState.capturedPCM()
+            if let pcmStreamPipe {
+                self.recordedPCM = await pcmStreamPipe.finish()
             }
             self.log("captured pcm bytes=\(self.recordedPCM.count)")
 
-            let streamingResult = await client?.finish() ?? ""
+            let streamingResult = await client?.finish(timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds) ?? ""
 
             self.realtimeClient = nil
             self.streamingTask?.cancel()
             self.streamingTask = nil
 
-            let realtimeText = streamingResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : streamingResult
+            let realtimeText = Self.normalizedRealtimeTranscript(streamingResult)
 
             self.liveTranscriptionText = ""
+
+            if Self.shouldUseRealtimeFastPath(realtimeText: realtimeText, pcmByteCount: self.recordedPCM.count),
+               let realtimeText {
+                let releaseToTextMS = Int(Date().timeIntervalSince(stopStartedAt) * 1_000)
+                self.log("using realtime fast path chars=\(realtimeText.count) releaseToTextMs=\(releaseToTextMS)")
+                self.isTranscribing = false
+                self.finishWithText(
+                    realtimeText,
+                    curMode: curMode,
+                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
+                    activeProjectId: activeProjectId,
+                    activeProjectName: activeProjectName
+                )
+                if let audioPath, !self.recordedPCM.isEmpty {
+                    Self.saveCapturedWAVInBackground(pcmData: self.recordedPCM, audioPath: audioPath, homePath: self.home)
+                }
+                self.activeAudioPath = nil
+                self.recordedPCM.removeAll(keepingCapacity: true)
+                return
+            }
 
             if let audioPath, self.writeCapturedWAV(to: audioPath) {
                 self.log("transcribing captured full audio audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
@@ -573,10 +615,102 @@ public final class RecordingEngine: ObservableObject {
         return trimmed.count < 12 || words.count <= 2
     }
 
+    public nonisolated static func normalizedRealtimeTranscript(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let trimmed = cleanRealtimeArtifactText(text).trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public nonisolated static func shouldUseRealtimeFastPath(realtimeText: String?, pcmByteCount: Int) -> Bool {
+        guard let text = normalizedRealtimeTranscript(realtimeText) else { return false }
+        return !shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount)
+    }
+
+    public nonisolated static func cleanRealtimeArtifactText(_ text: String) -> String {
+        var cleaned = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?i)(?<=[A-Za-z])어\b"#,
+            with: "",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = removeStandaloneRealtimeArtifacts(from: cleaned)
+        cleaned = collapseAdjacentDuplicateWords(in: cleaned)
+        cleaned = collapseAdjacentDuplicatePhrases(in: cleaned)
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+([,.;:!?])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func removeStandaloneRealtimeArtifacts(from text: String) -> String {
+        let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
+        let words = text.split(separator: " ").compactMap { rawWord -> String? in
+            let normalized = rawWord
+                .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+                .lowercased()
+            return artifactTokens.contains(normalized) ? nil : String(rawWord)
+        }
+        return words.joined(separator: " ")
+    }
+
+    private nonisolated static func collapseAdjacentDuplicateWords(in text: String) -> String {
+        let words = text.split(separator: " ").map(String.init)
+        guard words.count > 1 else { return text }
+
+        var output: [String] = []
+        for word in words {
+            if let last = output.last,
+               normalizedTranscriptWord(last) == normalizedTranscriptWord(word) {
+                continue
+            }
+            output.append(word)
+        }
+        return output.joined(separator: " ")
+    }
+
+    private nonisolated static func collapseAdjacentDuplicatePhrases(in text: String) -> String {
+        var words = text.split(separator: " ").map(String.init)
+        guard words.count >= 6 else { return text }
+
+        var i = 0
+        while i < words.count {
+            let maxLength = min(24, (words.count - i) / 2)
+            var removedDuplicate = false
+            if maxLength >= 3 {
+                for length in stride(from: maxLength, through: 3, by: -1) {
+                    let first = words[i..<(i + length)].map(normalizedTranscriptWord)
+                    let second = words[(i + length)..<(i + (2 * length))].map(normalizedTranscriptWord)
+                    if first == second {
+                        words.removeSubrange((i + length)..<(i + (2 * length)))
+                        removedDuplicate = true
+                        break
+                    }
+                }
+            }
+            if !removedDuplicate {
+                i += 1
+            }
+        }
+        return words.joined(separator: " ")
+    }
+
+    private nonisolated static func normalizedTranscriptWord(_ word: String) -> String {
+        word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines)).lowercased()
+    }
+
     private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?) {
         log("finishWithText mode=\(curMode.rawValue) chars=\(text.count)")
         if curMode == .command {
-            runCommandMode(instruction: text)
+            runCommandMode(instruction: text, targetAppBundleIdentifier: targetAppBundleIdentifier, targetAppPid: targetAppPid)
             return
         }
 
@@ -615,7 +749,24 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
-    private static func writeWAV(pcmData: Data, sampleRate: UInt32, channelCount: UInt16, bitsPerSample: UInt16, to url: URL) throws {
+    private nonisolated static func saveCapturedWAVInBackground(pcmData: Data, audioPath: String, homePath: String) {
+        Task.detached(priority: .utility) {
+            do {
+                try Self.writeWAV(
+                    pcmData: pcmData,
+                    sampleRate: 24_000,
+                    channelCount: 1,
+                    bitsPerSample: 16,
+                    to: URL(fileURLWithPath: audioPath)
+                )
+                NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
+            } catch {
+                NativeAppLog.write("failed to save wav after realtime fast path error=\(error.localizedDescription)", homePath: homePath)
+            }
+        }
+    }
+
+    private nonisolated static func writeWAV(pcmData: Data, sampleRate: UInt32, channelCount: UInt16, bitsPerSample: UInt16, to url: URL) throws {
         let byteRate = sampleRate * UInt32(channelCount) * UInt32(bitsPerSample / 8)
         let blockAlign = channelCount * (bitsPerSample / 8)
         let dataSize = UInt32(pcmData.count)
@@ -729,17 +880,35 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Command Mode
 
-    private func runCommandMode(instruction: String) {
+    private func runCommandMode(instruction: String, targetAppBundleIdentifier: String?, targetAppPid: pid_t?) {
         guard ensureAccessibilityPermission(prompt: shouldPromptAccessibility()) else {
             log("command mode blocked by accessibility permission")
             statusMessage = "Enable Accessibility permission for Recordings to rewrite selected text"
             return
         }
-        postKey(0x08, flags: .maskCommand) // Cmd+C
-        let homePath = home
+        let targetApp = selectedRunningPasteTarget(
+            targetAppBundleIdentifier: targetAppBundleIdentifier,
+            targetAppPid: targetAppPid,
+            frontmostPid: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        )
+        guard let targetApp else {
+            log("command mode target app not found")
+            statusMessage = "No target app found"
+            return
+        }
+        let alreadyFrontmost = targetApp.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if !alreadyFrontmost {
+            targetApp.activate(options: [.activateIgnoringOtherApps])
+        }
 
+        let copyDelay: TimeInterval = alreadyFrontmost ? 0.15 : 0.5
+        DispatchQueue.main.asyncAfter(deadline: .now() + copyDelay) {
+            self.postKey(0x08, flags: .maskCommand) // Cmd+C
+        }
+
+        let homePath = home
         Task {
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: .milliseconds(Int((copyDelay + 0.25) * 1_000)))
             let selected = NSPasteboard.general.string(forType: .string) ?? ""
             guard !selected.isEmpty else {
                 statusMessage = "No text selected"
@@ -793,7 +962,7 @@ public final class RecordingEngine: ObservableObject {
     func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
         log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") pid=\(targetAppPid.map(String.init) ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
-        let previousClipboard = restoreClipboard ? pb.string(forType: .string) : nil
+        let previousClipboard = restoreClipboard ? ClipboardSnapshot(pasteboard: pb) : nil
         pb.clearContents()
         pb.setString(text, forType: .string)
 
@@ -806,30 +975,16 @@ public final class RecordingEngine: ObservableObject {
             return
         }
 
-        let myPID = ProcessInfo.processInfo.processIdentifier
-        let runningApps = NSWorkspace.shared.runningApplications
         let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let candidates = runningApps.map {
-            PasteTargetCandidate(
-                pid: $0.processIdentifier,
-                bundleIdentifier: $0.bundleIdentifier,
-                isRegularApp: $0.activationPolicy == .regular
-            )
-        }
-        let selectedTarget = Self.selectPasteTarget(
-            candidates: candidates,
-            currentPid: myPID,
-            targetBundleIdentifier: targetAppBundleIdentifier,
-            targetPid: targetAppPid,
+        let targetApp = selectedRunningPasteTarget(
+            targetAppBundleIdentifier: targetAppBundleIdentifier,
+            targetAppPid: targetAppPid,
             frontmostPid: frontmostPid
         )
-        let targetApp = selectedTarget.flatMap { selected in
-            runningApps.first { $0.processIdentifier == selected.pid }
-        }
 
         guard let app = targetApp else {
             log("paste target app not found")
-            self.statusMessage = "No target app found"
+            self.statusMessage = "Copied — no target app found"
             return
         }
 
@@ -857,11 +1012,32 @@ public final class RecordingEngine: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     let pb = NSPasteboard.general
                     if pb.string(forType: .string) == text {
-                        pb.clearContents()
-                        pb.setString(previousClipboard, forType: .string)
+                        previousClipboard.restore(to: pb)
                     }
                 }
             }
+        }
+    }
+
+    private func selectedRunningPasteTarget(targetAppBundleIdentifier: String?, targetAppPid: pid_t?, frontmostPid: pid_t?) -> NSRunningApplication? {
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let runningApps = NSWorkspace.shared.runningApplications
+        let candidates = runningApps.map {
+            PasteTargetCandidate(
+                pid: $0.processIdentifier,
+                bundleIdentifier: $0.bundleIdentifier,
+                isRegularApp: $0.activationPolicy == .regular
+            )
+        }
+        let selectedTarget = Self.selectPasteTarget(
+            candidates: candidates,
+            currentPid: myPID,
+            targetBundleIdentifier: targetAppBundleIdentifier,
+            targetPid: targetAppPid,
+            frontmostPid: frontmostPid
+        )
+        return selectedTarget.flatMap { selected in
+            runningApps.first { $0.processIdentifier == selected.pid }
         }
     }
 
@@ -882,8 +1058,6 @@ public final class RecordingEngine: ObservableObject {
         } ?? candidates.first {
             guard let frontmostPid else { return false }
             return $0.pid == frontmostPid && $0.pid != currentPid && $0.isRegularApp
-        } ?? candidates.first {
-            $0.isRegularApp && $0.pid != currentPid
         }
     }
 
@@ -938,6 +1112,35 @@ private final class LockedFlag: @unchecked Sendable {
         guard value else { return false }
         value = false
         return true
+    }
+}
+
+private struct ClipboardSnapshot {
+    private let items: [[NSPasteboard.PasteboardType: Data]]
+
+    init?(pasteboard: NSPasteboard) {
+        let capturedItems = pasteboard.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
+            let dataByType = item.types.reduce(into: [NSPasteboard.PasteboardType: Data]()) { result, type in
+                if let data = item.data(forType: type) {
+                    result[type] = data
+                }
+            }
+            return dataByType.isEmpty ? nil : dataByType
+        } ?? []
+        guard !capturedItems.isEmpty else { return nil }
+        items = capturedItems
+    }
+
+    func restore(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        let pasteboardItems = items.map { itemData in
+            let item = NSPasteboardItem()
+            for (type, data) in itemData {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+        pasteboard.writeObjects(pasteboardItems)
     }
 }
 

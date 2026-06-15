@@ -4,9 +4,10 @@ import Testing
 // MARK: - RealtimeTranscriptionClient Event Parsing Tests
 
 struct RealtimeTranscriptionTests {
-    @Test("Model ID is set to latest gpt-4o-transcribe")
+    @Test("Model ID is set to low-latency realtime transcription model")
     func modelID() {
-        #expect(RealtimeTranscriptionClient.modelID == "gpt-4o-transcribe")
+        #expect(RealtimeTranscriptionClient.modelID == "gpt-realtime-whisper")
+        #expect(RealtimeTranscriptionClient.transcriptionDelay == "low")
     }
 
     @Test("Parses transcription delta events")
@@ -94,15 +95,16 @@ struct RealtimeTranscriptionTests {
         #expect(format?["rate"] as? Int == 24_000)
 
         let transcription = input?["transcription"] as? [String: Any]
-        #expect(transcription?["model"] as? String == "gpt-4o-transcribe")
-        #expect(transcription?["prompt"] as? String == "Use Alumia as vocabulary")
+        #expect(transcription?["model"] as? String == "gpt-realtime-whisper")
+        #expect(transcription?["delay"] as? String == "low")
+        #expect(transcription?["prompt"] as? String == nil)
         #expect(transcription?["language"] as? String == "en")
 
         let turnDetection = input?["turn_detection"] as? [String: Any]
-        #expect(turnDetection?["type"] as? String == "server_vad")
+        #expect(turnDetection == nil)
 
         let include = session?["include"] as? [String]
-        #expect(include?.contains("item.input_audio_transcription.logprobs") == true)
+        #expect(include == nil)
     }
 
     @Test("Joins transcript parts without dropping spoken text")
@@ -122,5 +124,21 @@ struct RealtimeTranscriptionTests {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 96_000) == true)
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "This is a complete sentence.", pcmByteCount: 96_000) == false)
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 12_000) == false)
+    }
+
+    @Test("Realtime fast path accepts useful text and rejects empty or suspicious partial output")
+    func realtimeFastPathDecision() {
+        #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "  this is a useful transcript  ", pcmByteCount: 96_000))
+        #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 12_000))
+        #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 96_000) == false)
+        #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "   ", pcmByteCount: 96_000) == false)
+    }
+
+    @Test("Realtime artifact cleanup removes duplicated chunks and filler tokens")
+    func realtimeArtifactCleanup() {
+        let cleaned = RecordingEngine.cleanRealtimeArtifactText(
+            "어 Okay I don't know if this This is working어 Okay I don't know if this This is working"
+        )
+        #expect(cleaned == "Okay I don't know if this is working")
     }
 }

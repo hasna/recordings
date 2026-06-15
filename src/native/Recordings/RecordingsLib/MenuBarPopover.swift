@@ -52,8 +52,7 @@ public struct MenuBarPopover: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Image(systemName: "mic.fill")
-                    .foregroundStyle(.tint)
+                HasnaLogoMark(size: 22)
                 Text("Hasna Recordings")
                     .font(.headline)
                 Spacer()

@@ -55,4 +55,12 @@ struct TranscriptResolutionTests {
         #expect(resolved.text == nil)
         #expect(resolved.failureStatus == "Empty transcription")
     }
+
+    @Test("Realtime transcripts are normalized before fast-path use")
+    func realtimeNormalization() {
+        #expect(RecordingEngine.normalizedRealtimeTranscript("  hello world\n") == "hello world")
+        #expect(RecordingEngine.normalizedRealtimeTranscript("working어") == "working")
+        #expect(RecordingEngine.normalizedRealtimeTranscript(" \n ") == nil)
+        #expect(RecordingEngine.normalizedRealtimeTranscript(nil) == nil)
+    }
 }

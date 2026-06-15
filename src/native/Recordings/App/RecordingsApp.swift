@@ -10,6 +10,7 @@ struct RecordingsApp: App {
     @StateObject private var projectStore = ProjectStore()
 
     init() {
+        Self.terminateDuplicateInstances()
         AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
@@ -38,6 +39,14 @@ struct RecordingsApp: App {
 
         Settings {
             SettingsView(engine: engine, shortcuts: shortcuts, projectStore: projectStore)
+        }
+    }
+
+    private static func terminateDuplicateInstances() {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.hasna.recordings")
+            where app.processIdentifier != currentPID {
+            app.terminate()
         }
     }
 }

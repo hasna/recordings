@@ -16,15 +16,23 @@ BUILD_DIR=".build/$MODE"
 APP_DIR="$BUILD_DIR/Recordings.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
+RESOURCES="$CONTENTS/Resources"
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS"
+mkdir -p "$MACOS" "$RESOURCES"
 
 # Copy binary
 cp "$BUILD_DIR/App" "$MACOS/Recordings"
 
 # Copy Info.plist
 cp RecordingsLib/Info.plist "$CONTENTS/Info.plist"
+
+# Copy SwiftPM resource bundles used by Bundle.module.
+for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.resources .build/*/"$MODE"/*.bundle; do
+    [ -e "$bundle" ] || continue
+    rm -rf "$RESOURCES/$(basename "$bundle")"
+    ditto "$bundle" "$RESOURCES/$(basename "$bundle")"
+done
 
 # Copy entitlements (for codesigning)
 if [ -f RecordingsLib/Recordings.entitlements ]; then

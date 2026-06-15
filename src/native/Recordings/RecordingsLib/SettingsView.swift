@@ -44,7 +44,12 @@ public struct SettingsView: View {
                     KeyboardShortcuts.Recorder(for: .toggleRecording) { _ in
                         engine.updateStatus()
                     }
+                    Button("Reset to F5") {
+                        KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
+                        engine.updateStatus()
+                    }
                 }
+                Toggle("Use fn/Globe as recording key", isOn: $engine.useFnKey)
                 Text("Hold to record, release to transcribe and paste.")
                     .foregroundStyle(.secondary)
             }

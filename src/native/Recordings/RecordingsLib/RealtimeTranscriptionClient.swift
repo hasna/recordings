@@ -6,8 +6,9 @@ import Foundation
 /// Receives transcription deltas in real time.
 @MainActor
 public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sendable {
-    /// Latest stable transcription model.
-    public nonisolated static let modelID = "gpt-4o-transcribe"
+    /// Low-latency model for realtime transcript deltas.
+    public nonisolated static let modelID = "gpt-realtime-whisper"
+    public nonisolated static let transcriptionDelay = "low"
     private nonisolated static let transcriptionURL = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
 
     @Published public var accumulatedText = ""
@@ -80,7 +81,7 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
         var transcription: [String: Any] = [
             "model": Self.modelID,
-            "prompt": Self.verbatimPrompt(context: systemPrompt),
+            "delay": Self.transcriptionDelay,
         ]
         let trimmedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedLanguage.isEmpty {
@@ -141,7 +142,7 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     }
 
     /// Commit buffered input, wait briefly for a final completed event, then close.
-    public func finish(timeoutMilliseconds: UInt64 = 2_800) async -> String {
+    public func finish(timeoutMilliseconds: UInt64 = 700) async -> String {
         guard isStreaming else { return accumulatedText }
         let completedCountBeforeCommit = completedEventCount
         let didManualCommit = await commitInput()
@@ -379,18 +380,8 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
                             "rate": 24_000,
                         ],
                         "transcription": transcription,
-                        "turn_detection": [
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 350,
-                        ],
-                        "noise_reduction": [
-                            "type": "near_field",
-                        ],
                     ],
                 ],
-                "include": ["item.input_audio_transcription.logprobs"],
             ],
         ]
     }
@@ -442,7 +433,7 @@ extension RealtimeTranscriptionClient {
     public nonisolated static func sessionUpdateTestHelper(prompt: String, language: String = "") -> [String: Any] {
         var transcription: [String: Any] = [
             "model": modelID,
-            "prompt": prompt,
+            "delay": transcriptionDelay,
         ]
         if !language.isEmpty {
             transcription["language"] = language

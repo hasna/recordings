@@ -19,8 +19,8 @@ struct PasteTargetTests {
         #expect(selected?.pid == 20)
     }
 
-    @Test("paste target ignores current app when falling back")
-    func ignoresCurrentApp() {
+    @Test("paste target does not choose arbitrary apps without a captured or frontmost target")
+    func noArbitraryFallback() {
         let candidates = [
             PasteTargetCandidate(pid: 99, bundleIdentifier: "com.hasna.recordings", isRegularApp: true),
             PasteTargetCandidate(pid: 30, bundleIdentifier: "com.notes", isRegularApp: true),
@@ -33,7 +33,7 @@ struct PasteTargetTests {
             targetPid: nil
         )
 
-        #expect(selected?.pid == 30)
+        #expect(selected == nil)
     }
 
     @Test("paste target prefers the frontmost app over an arbitrary regular app")
@@ -69,7 +69,7 @@ struct PasteTargetTests {
             frontmostPid: 99
         )
 
-        #expect(selected?.pid == 30)
+        #expect(selected == nil)
     }
 
     @Test("captured pid wins over frontmost fallback")
