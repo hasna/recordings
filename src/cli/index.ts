@@ -475,7 +475,7 @@ program
 
     if (!existsSync(configFile)) {
       const defaultConf = {
-        transcription_model: "gpt-4o-mini-transcribe",
+        transcription_model: "gpt-4o-transcribe",
         enhancement_model: "gpt-4o",
         language: "en",
         auto_enhance: true,

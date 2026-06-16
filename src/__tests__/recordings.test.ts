@@ -46,7 +46,7 @@ describe("createRecording", () => {
     expect(rec.id).toBeDefined();
     expect(rec.raw_text).toBe("hello world");
     expect(rec.processing_mode).toBe("raw");
-    expect(rec.model_used).toBe("gpt-4o-mini-transcribe");
+    expect(rec.model_used).toBe("gpt-4o-transcribe");
     expect(rec.tags).toEqual([]);
     expect(rec.metadata).toEqual({});
     expect(rec.audio_path).toBeNull();
@@ -346,10 +346,10 @@ describe("getRecordingStats", () => {
   test("groups by model correctly", () => {
     createRecording({ raw_text: "a", model_used: "whisper-1" }, db);
     createRecording({ raw_text: "b", model_used: "whisper-1" }, db);
-    createRecording({ raw_text: "c", model_used: "gpt-4o-mini-transcribe" }, db);
+    createRecording({ raw_text: "c", model_used: "gpt-4o-transcribe" }, db);
 
     const stats = getRecordingStats(db);
     expect(stats.by_model["whisper-1"]).toBe(2);
-    expect(stats.by_model["gpt-4o-mini-transcribe"]).toBe(1);
+    expect(stats.by_model["gpt-4o-transcribe"]).toBe(1);
   });
 });

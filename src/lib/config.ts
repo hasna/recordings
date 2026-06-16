@@ -6,7 +6,7 @@ import type { RecordingsConfig } from "../types/index.js";
 export const DEFAULT_CONFIG: RecordingsConfig = {
   openai_api_key: "",
   enhancement_api_key: "",
-  transcription_model: "gpt-4o-mini-transcribe",
+  transcription_model: "gpt-4o-transcribe",
   enhancement_model: "gpt-4o",
   language: "en",
   audio_format: "wav",

@@ -77,7 +77,7 @@ afterEach(() => {
 
 describe("DEFAULT_CONFIG", () => {
   test("has expected default values", () => {
-    expect(DEFAULT_CONFIG.transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(DEFAULT_CONFIG.transcription_model).toBe("gpt-4o-transcribe");
     expect(DEFAULT_CONFIG.enhancement_model).toBe("gpt-4o");
     expect(DEFAULT_CONFIG.language).toBe("en");
     expect(DEFAULT_CONFIG.audio_format).toBe("wav");
@@ -94,7 +94,7 @@ describe("DEFAULT_CONFIG", () => {
 describe("loadConfig", () => {
   test("returns defaults when no config file or env vars", () => {
     const config = loadConfig(join(tempDir, "nonexistent.json"));
-    expect(config.transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(config.transcription_model).toBe("gpt-4o-transcribe");
     expect(config.enhancement_model).toBe("gpt-4o");
     expect(config.language).toBe("en");
     expect(config.audio_format).toBe("wav");
@@ -126,7 +126,7 @@ describe("loadConfig", () => {
 
     const config = loadConfig(configPath);
     // Should fall back to defaults
-    expect(config.transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(config.transcription_model).toBe("gpt-4o-transcribe");
   });
 
   test("env var OPENAI_API_KEY overrides config", () => {

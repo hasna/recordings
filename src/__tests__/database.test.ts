@@ -139,7 +139,7 @@ describe("getDatabase", () => {
         raw_text TEXT NOT NULL,
         processed_text TEXT,
         processing_mode TEXT NOT NULL DEFAULT 'raw',
-        model_used TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+        model_used TEXT NOT NULL DEFAULT 'gpt-4o-transcribe',
         enhancement_model TEXT,
         duration_ms INTEGER DEFAULT 0,
         language TEXT,
@@ -184,7 +184,7 @@ describe("getDatabase", () => {
     db.query(
       `INSERT INTO recordings (id, raw_text, processing_mode, model_used, tags, machine_id, metadata)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run("legacy-ok", "hello", "raw", "gpt-4o-mini-transcribe", "[]", "apple03", "{}");
+    ).run("legacy-ok", "hello", "raw", "gpt-4o-transcribe", "[]", "apple03", "{}");
     const row = db.query("SELECT machine_id FROM recordings WHERE id = ?").get("legacy-ok") as {
       machine_id: string;
     };
@@ -222,7 +222,7 @@ describe("getDatabase", () => {
         raw_text TEXT NOT NULL,
         processed_text TEXT,
         processing_mode TEXT NOT NULL DEFAULT 'raw',
-        model_used TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+        model_used TEXT NOT NULL DEFAULT 'gpt-4o-transcribe',
         enhancement_model TEXT,
         duration_ms INTEGER DEFAULT 0,
         language TEXT,

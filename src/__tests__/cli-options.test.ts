@@ -6,7 +6,7 @@ function config(auto_enhance = true): RecordingsConfig {
   return {
     openai_api_key: "sk-test",
     enhancement_api_key: "sk-enhance",
-    transcription_model: "gpt-4o-mini-transcribe",
+    transcription_model: "gpt-4o-transcribe",
     enhancement_model: "gpt-4o",
     language: "en",
     audio_format: "wav",

@@ -31,7 +31,7 @@ export const PG_MIGRATIONS: string[] = [
     raw_text TEXT NOT NULL,
     processed_text TEXT,
     processing_mode TEXT NOT NULL DEFAULT 'raw' CHECK(processing_mode IN ('raw', 'enhanced')),
-    model_used TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+    model_used TEXT NOT NULL DEFAULT 'gpt-4o-transcribe',
     enhancement_model TEXT,
     duration_ms INTEGER DEFAULT 0,
     language TEXT,

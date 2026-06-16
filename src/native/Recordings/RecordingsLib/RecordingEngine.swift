@@ -520,7 +520,6 @@ public final class RecordingEngine: ObservableObject {
 
     public func stopAndTranscribe() {
         guard isRecording else { return }
-        let stopStartedAt = Date()
         log("stopAndTranscribe")
 
         recordingTimer?.invalidate()
@@ -541,7 +540,6 @@ public final class RecordingEngine: ObservableObject {
         let audioPath = activeAudioPath
         let pcmStreamPipe = pcmStreamPipe
         let client = realtimeClient
-        let transcriptionLanguage = transcriptionLanguage
         resetRecordingIntent()
         self.pcmStreamPipe = nil
 
@@ -558,37 +556,11 @@ public final class RecordingEngine: ObservableObject {
             self.streamingTask = nil
 
             let realtimeText = Self.normalizedRealtimeTranscript(streamingResult)
-            let fastPathText = Self.realtimeFastPathTranscript(
-                realtimeText: streamingResult,
-                pcmByteCount: self.recordedPCM.count,
-                language: transcriptionLanguage
-            )
 
             self.liveTranscriptionText = ""
 
-            if let fastPathText {
-                let releaseToTextMS = Int(Date().timeIntervalSince(stopStartedAt) * 1_000)
-                let repaired = Self.wasRealtimeTranscriptRepaired(rawText: streamingResult, cleanedText: fastPathText)
-                self.log("using realtime fast path chars=\(fastPathText.count) repaired=\(repaired) releaseToTextMs=\(releaseToTextMS)")
-                self.isTranscribing = false
-                self.finishWithText(
-                    fastPathText,
-                    curMode: curMode,
-                    targetAppBundleIdentifier: targetAppBundleIdentifier,
-                    targetAppPid: targetAppPid,
-                    activeProjectId: activeProjectId,
-                    activeProjectName: activeProjectName
-                )
-                if let audioPath, !self.recordedPCM.isEmpty {
-                    Self.saveCapturedWAVInBackground(pcmData: self.recordedPCM, audioPath: audioPath, homePath: self.home)
-                }
-                self.activeAudioPath = nil
-                self.recordedPCM.removeAll(keepingCapacity: true)
-                return
-            }
-
             if let audioPath, self.writeCapturedWAV(to: audioPath) {
-                self.log("transcribing captured full audio audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
+                self.log("transcribing captured full audio with quality model audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
                     curMode: curMode,

@@ -119,7 +119,7 @@ struct OpenAIAPIKeyStoreTests {
         let home = try makeHome()
         try writeConfig(home: home, [
             "openai_api_key": "old-key",
-            "transcription_model": "gpt-4o-mini-transcribe",
+            "transcription_model": "gpt-4o-transcribe",
         ])
 
         try OpenAIAPIKeyStore.save(key: "sk-rotated", homePath: home.path)
@@ -131,7 +131,7 @@ struct OpenAIAPIKeyStoreTests {
         let data = try Data(contentsOf: configURL)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(json["openai_api_key"] as? String == "sk-rotated")
-        #expect(json["transcription_model"] as? String == "gpt-4o-mini-transcribe")
+        #expect(json["transcription_model"] as? String == "gpt-4o-transcribe")
     }
 
     @Test("Saving an empty key removes it from config.json")
