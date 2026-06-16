@@ -126,22 +126,32 @@ struct RealtimeTranscriptionTests {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 12_000) == false)
     }
 
-    @Test("Realtime fast path accepts useful text and rejects empty or suspicious partial output")
+    @Test("Realtime fast path accepts useful and safely repaired text")
     func realtimeFastPathDecision() {
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "  this is a useful transcript  ", pcmByteCount: 96_000))
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 12_000))
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 96_000) == false)
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "   ", pcmByteCount: 96_000) == false)
-        #expect(RecordingEngine.shouldUseRealtimeFastPath(
+        #expect(RecordingEngine.realtimeFastPathTranscript(
             realtimeText: "Actually 리수 Zoom your goal",
             pcmByteCount: 96_000,
             language: "en"
-        ) == false)
-        #expect(RecordingEngine.shouldUseRealtimeFastPath(
+        ) == "Actually Zoom your goal")
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "어 Okay I don't know if this This is working어 Okay I don't know if this This is working",
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == "Okay I don't know if this is working")
+        #expect(RecordingEngine.realtimeFastPathTranscript(
             realtimeText: "Actually Zoom your goal",
             pcmByteCount: 96_000,
             language: "en"
-        ))
+        ) == "Actually Zoom your goal")
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "리수 度扫 開けたの 어",
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
     }
 
     @Test("Realtime artifact cleanup removes duplicated chunks and filler tokens")

@@ -64,17 +64,26 @@ struct TranscriptResolutionTests {
         #expect(RecordingEngine.normalizedRealtimeTranscript(nil) == nil)
     }
 
-    @Test("Unsafe English realtime text is not eligible for fast-path paste")
-    func unsafeRealtimeTextRejectedForFastPath() {
+    @Test("English realtime text can be safely repaired before fast-path paste")
+    func realtimeTextRepairedForFastPath() {
         #expect(RecordingEngine.isSafeRealtimeFastPathText(
             rawText: "Actually 리수 Zoom your goal",
             cleanedText: "Actually Zoom your goal",
             language: "en"
-        ) == false)
+        ))
         #expect(RecordingEngine.isSafeRealtimeFastPathText(
             rawText: "Actually Zoom your goal",
             cleanedText: "Actually Zoom your goal",
             language: "en"
+        ))
+        #expect(RecordingEngine.isSafeRealtimeFastPathText(
+            rawText: "Actually Zoom your goal",
+            cleanedText: "Actually invented Zoom your goal",
+            language: "en"
+        ) == false)
+        #expect(RecordingEngine.wasRealtimeTranscriptRepaired(
+            rawText: "working어",
+            cleanedText: "working"
         ))
     }
 }

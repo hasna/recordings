@@ -558,20 +558,21 @@ public final class RecordingEngine: ObservableObject {
             self.streamingTask = nil
 
             let realtimeText = Self.normalizedRealtimeTranscript(streamingResult)
-
-            self.liveTranscriptionText = ""
-
-            if Self.shouldUseRealtimeFastPath(
+            let fastPathText = Self.realtimeFastPathTranscript(
                 realtimeText: streamingResult,
                 pcmByteCount: self.recordedPCM.count,
                 language: transcriptionLanguage
-            ),
-               let realtimeText {
+            )
+
+            self.liveTranscriptionText = ""
+
+            if let fastPathText {
                 let releaseToTextMS = Int(Date().timeIntervalSince(stopStartedAt) * 1_000)
-                self.log("using realtime fast path chars=\(realtimeText.count) releaseToTextMs=\(releaseToTextMS)")
+                let repaired = Self.wasRealtimeTranscriptRepaired(rawText: streamingResult, cleanedText: fastPathText)
+                self.log("using realtime fast path chars=\(fastPathText.count) repaired=\(repaired) releaseToTextMs=\(releaseToTextMS)")
                 self.isTranscribing = false
                 self.finishWithText(
-                    realtimeText,
+                    fastPathText,
                     curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
@@ -639,11 +640,23 @@ public final class RecordingEngine: ObservableObject {
         pcmByteCount: Int,
         language: String = "en"
     ) -> Bool {
-        guard let text = normalizedRealtimeTranscript(realtimeText) else { return false }
+        realtimeFastPathTranscript(
+            realtimeText: realtimeText,
+            pcmByteCount: pcmByteCount,
+            language: language
+        ) != nil
+    }
+
+    public nonisolated static func realtimeFastPathTranscript(
+        realtimeText: String?,
+        pcmByteCount: Int,
+        language: String = "en"
+    ) -> String? {
+        guard let text = normalizedRealtimeTranscript(realtimeText) else { return nil }
         guard isSafeRealtimeFastPathText(rawText: realtimeText ?? "", cleanedText: text, language: language) else {
-            return false
+            return nil
         }
-        return !shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount)
+        return shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount) ? nil : text
     }
 
     public nonisolated static func isSafeRealtimeFastPathText(rawText: String, cleanedText: String, language: String) -> Bool {
@@ -652,19 +665,31 @@ public final class RecordingEngine: ObservableObject {
         guard languageHint == "en" else { return true }
 
         let rawTrimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !containsCJKArtifact(in: rawTrimmed) else { return false }
+        let rawNormalized = normalizedTranscriptText(rawTrimmed)
+        let cleanedNormalized = normalizedTranscriptText(cleanedText)
+        guard !cleanedNormalized.isEmpty else { return false }
+        guard rawNormalized != cleanedNormalized else { return true }
+        guard cjkLetterCount(in: cleanedNormalized) == 0 else { return false }
 
-        let rawNormalized = rawTrimmed.replacingOccurrences(
-            of: #"\s+"#,
-            with: " ",
-            options: .regularExpression
-        )
-        let cleanedNormalized = cleanedText.replacingOccurrences(
-            of: #"\s+"#,
-            with: " ",
-            options: .regularExpression
-        )
-        return rawNormalized == cleanedNormalized
+        let cleanedWords = canonicalTranscriptWords(cleanedNormalized, droppingArtifacts: false)
+        guard !cleanedWords.isEmpty else { return false }
+
+        let rawWords = canonicalTranscriptWords(rawNormalized, droppingArtifacts: true)
+        guard isSubsequence(cleanedWords, of: rawWords) else { return false }
+
+        let rawCJKCount = cjkLetterCount(in: rawNormalized)
+        if rawCJKCount > 0 {
+            let cleanedLatinCount = latinLetterCount(in: cleanedNormalized)
+            guard cleanedLatinCount >= max(2, rawCJKCount * 2) else { return false }
+            guard rawCJKCount <= max(6, cleanedLatinCount / 3) else { return false }
+        }
+
+        let removedWordCount = max(0, rawWords.count - cleanedWords.count)
+        return removedWordCount <= max(8, cleanedWords.count + 3)
+    }
+
+    public nonisolated static func wasRealtimeTranscriptRepaired(rawText: String, cleanedText: String) -> Bool {
+        normalizedTranscriptText(rawText) != normalizedTranscriptText(cleanedText)
     }
 
     public nonisolated static func cleanRealtimeArtifactText(_ text: String) -> String {
@@ -707,6 +732,55 @@ public final class RecordingEngine: ObservableObject {
             return isMostlyCJKArtifact(normalized) ? nil : word
         }
         return words.joined(separator: " ")
+    }
+
+    private nonisolated static func normalizedTranscriptText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(
+                of: #"\s+"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func canonicalTranscriptWords(_ text: String, droppingArtifacts: Bool) -> [String] {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).compactMap { rawWord in
+            var normalized = String(rawWord)
+                .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+                .lowercased()
+            if droppingArtifacts {
+                normalized = normalized.unicodeScalars.reduce(into: "") { output, scalar in
+                    if !isCJKScalar(scalar) {
+                        output.unicodeScalars.append(scalar)
+                    }
+                }
+            }
+            guard !normalized.isEmpty else { return nil }
+            if droppingArtifacts, isStandaloneRealtimeArtifact(normalized) {
+                return nil
+            }
+            return normalized
+        }
+    }
+
+    private nonisolated static func isSubsequence(_ needle: [String], of haystack: [String]) -> Bool {
+        guard !needle.isEmpty else { return true }
+        var index = 0
+        for word in haystack where word == needle[index] {
+            index += 1
+            if index == needle.count {
+                return true
+            }
+        }
+        return false
+    }
+
+    private nonisolated static func isStandaloneRealtimeArtifact(_ word: String) -> Bool {
+        let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
+        return artifactTokens.contains(word) || isMostlyCJKArtifact(word)
     }
 
     private nonisolated static func collapseAdjacentDuplicateWords(in text: String) -> String {
