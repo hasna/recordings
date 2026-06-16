@@ -66,7 +66,9 @@ describe("recordings CLI", () => {
 
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
+    expect(stdout).toContain("events");
     expect(stdout).toContain("storage");
+    expect(stdout).toContain("webhooks");
     expect(stdout).not.toContain("cloud");
   });
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
+import { registerEventsCommands } from "@hasna/events/commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
@@ -48,6 +49,7 @@ program
   .option("--session <id>", "Session ID");
 
 registerStorageCommands(program);
+registerEventsCommands(program, { source: "recordings" });
 
 // ── record ──────────────────────────────────────────────────────────────────
 
