@@ -194,6 +194,34 @@ describe("transcribeAudio", () => {
     resetClient();
   });
 
+  test("recreates OpenAI client when API key changes in the same process", async () => {
+    const constructedApiKeys: string[] = [];
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        constructor(options: { apiKey: string }) {
+          constructedApiKeys.push(options.apiKey);
+        }
+        audio = {
+          transcriptions: {
+            create: mock(() => Promise.resolve({ text: "ok", language: "en" })),
+          },
+        };
+      },
+    }));
+
+    resetClient();
+    const { transcribeAudio } = await import("../lib/transcriber.js");
+    resetClient();
+
+    await transcribeAudio(tempAudioFile, { ...config, openai_api_key: "sk-one" });
+    await transcribeAudio(tempAudioFile, { ...config, openai_api_key: "sk-two" });
+    await transcribeAudio(tempAudioFile, { ...config, openai_api_key: "sk-two" });
+
+    expect(constructedApiKeys).toEqual(["sk-one", "sk-two"]);
+
+    resetClient();
+  });
+
   test("omits language when not in config", async () => {
     let capturedOpts: any = null;
     mock.module("openai", () => ({

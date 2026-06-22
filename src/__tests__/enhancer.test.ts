@@ -469,6 +469,38 @@ describe("enhanceText", () => {
 
     resetEnhancementClient();
   });
+
+  test("recreates OpenAI client when enhancement key changes in the same process", async () => {
+    const constructedApiKeys: string[] = [];
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        constructor(opts: { apiKey: string }) {
+          constructedApiKeys.push(opts.apiKey);
+        }
+        chat = {
+          completions: {
+            create: mock(() =>
+              Promise.resolve({
+                choices: [{ message: { content: "enhanced" } }],
+              })
+            ),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { enhanceText: enhance } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    await enhance("text", "instruction", { ...config, enhancement_api_key: "sk-one" });
+    await enhance("text", "instruction", { ...config, enhancement_api_key: "sk-two" });
+    await enhance("text", "instruction", { ...config, enhancement_api_key: "sk-two" });
+
+    expect(constructedApiKeys).toEqual(["sk-one", "sk-two"]);
+
+    resetEnhancementClient();
+  });
 });
 
 // ── processText ─────────────────────────────────────────────────────────────

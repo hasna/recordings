@@ -4,6 +4,7 @@ import type { RecordingsConfig, TranscriptionResult } from "../types/index.js";
 import { TranscriptionError } from "../types/index.js";
 
 let _client: OpenAI | null = null;
+let _clientApiKey: string | null = null;
 
 export interface TranscriptionOptions {
   prompt?: string;
@@ -11,18 +12,20 @@ export interface TranscriptionOptions {
 }
 
 function getClient(config: RecordingsConfig): OpenAI {
-  if (_client) return _client;
   if (!config.openai_api_key) {
     throw new TranscriptionError(
       "OpenAI API key not configured. Set OPENAI_API_KEY env var or add to ~/.secrets"
     );
   }
+  if (_client && _clientApiKey === config.openai_api_key) return _client;
   _client = new OpenAI({ apiKey: config.openai_api_key });
+  _clientApiKey = config.openai_api_key;
   return _client;
 }
 
 export function resetClient(): void {
   _client = null;
+  _clientApiKey = null;
 }
 
 export async function transcribeAudio(

@@ -53,6 +53,62 @@ describe("recordings MCP HTTP transport", () => {
     expect(content?.[0]?.type).toBe("text");
     await client.close();
   });
+
+  test("recordings_status exposes safe agent diagnostics", async () => {
+    const client = new Client({ name: "recordings-http-test", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${port}/mcp`),
+    );
+    await client.connect(transport);
+    const result = await client.callTool({ name: "recordings_status", arguments: {} });
+    expect(result.isError).not.toBe(true);
+    const content = result.content as Array<{ type: string; text?: string }> | undefined;
+    expect(content?.[0]?.type).toBe("text");
+    const status = JSON.parse(content?.[0]?.text ?? "{}") as {
+      service: string;
+      version: string;
+      mcp: { default_http_port: number; endpoint: string };
+      config: {
+        transcription_model: string;
+        openai_api_key_configured: boolean;
+      };
+      stats: { total: number };
+    };
+    expect(status.service).toBe("recordings");
+    expect(status.mcp.default_http_port).toBe(8873);
+    expect(status.mcp.endpoint).toBe("/mcp");
+    expect(status.config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(typeof status.config.openai_api_key_configured).toBe("boolean");
+    expect(typeof status.stats.total).toBe("number");
+    expect(content?.[0]?.text).not.toContain("sk-");
+    await client.close();
+  });
+
+  test("recordings_status reloads runtime model config without restarting server", async () => {
+    const previousModel = process.env.RECORDINGS_MODEL;
+    process.env.RECORDINGS_MODEL = "whisper-1";
+    const client = new Client({ name: "recordings-http-test", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${port}/mcp`),
+    );
+
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: "recordings_status", arguments: {} });
+      const content = result.content as Array<{ type: string; text?: string }> | undefined;
+      const status = JSON.parse(content?.[0]?.text ?? "{}") as {
+        config: { transcription_model: string };
+      };
+      expect(status.config.transcription_model).toBe("whisper-1");
+    } finally {
+      await client.close();
+      if (previousModel === undefined) {
+        delete process.env.RECORDINGS_MODEL;
+      } else {
+        process.env.RECORDINGS_MODEL = previousModel;
+      }
+    }
+  });
 });
 
 describe("recordings buildServer", () => {

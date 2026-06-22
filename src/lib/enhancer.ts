@@ -7,21 +7,24 @@ import { EnhancementError } from "../types/index.js";
 import { describeTranscriptionFailure } from "./transcriber.js";
 
 let _enhancementClient: OpenAI | null = null;
+let _enhancementClientApiKey: string | null = null;
 
 function getEnhancementClient(config: RecordingsConfig): OpenAI {
-  if (_enhancementClient) return _enhancementClient;
   const key = config.enhancement_api_key || config.openai_api_key;
   if (!key) {
     throw new EnhancementError(
       "API key not configured for enhancement. Set OPENAI_API_KEY or RECORDINGS_ENHANCEMENT_KEY"
     );
   }
+  if (_enhancementClient && _enhancementClientApiKey === key) return _enhancementClient;
   _enhancementClient = new OpenAI({ apiKey: key });
+  _enhancementClientApiKey = key;
   return _enhancementClient;
 }
 
 export function resetEnhancementClient(): void {
   _enhancementClient = null;
+  _enhancementClientApiKey = null;
 }
 
 /**

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
+import { DEFAULT_MCP_HTTP_PORT, isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
 import { getDatabase, getAdapter } from "../db/database.js";
@@ -30,6 +30,14 @@ import { registerRecordingsStorageTools } from "./storage-tools.js";
 const config = loadConfig();
 ensureDataDir(config);
 getDatabase(config.db_path);
+
+function runtimeConfig(): typeof config {
+  return {
+    ...loadConfig(),
+    db_path: config.db_path,
+    audio_dir: config.audio_dir,
+  };
+}
 
 export function buildServer(): McpServer {
 const server = new McpServer({
@@ -113,6 +121,7 @@ async function saveRecordingMemento(args: {
 // ── Full tool schemas for describe_tool ─────────────────────────────────────
 
 const toolDocs: Record<string, string> = {
+  recordings_status: "Show safe service status for agents.\nParams: none\nReturns: JSON with package version, MCP HTTP defaults, active transcription/enhancement models, language, data paths, key-presence booleans, and recording counts. Never returns secret values.",
   transcribe_audio: "Transcribe audio file. Auto-enhances if needed.\nParams: audio_path (string, required): path to wav/mp3/m4a/webm | language (string): ISO code e.g. en/es/fr | no_enhance (bool): skip AI enhancement | tags (string[]): tags | agent_id (string) | project_id (string) | session_id (string)",
   save_recording: "Save text as recording. Auto-enhances if needed.\nParams: text (string, required): text to save | enhance (bool): force enhancement | tags (string[]) | agent_id (string) | project_id (string) | session_id (string) | metadata (object)",
   get_recording: "Get recording by ID or prefix.\nParams: id (string, required): recording ID or prefix",
@@ -142,6 +151,40 @@ registerTool(
   }
 );
 
+registerTool(
+  "recordings_status",
+  "Show safe service status for agents.",
+  {},
+  async () => {
+    try {
+      const cfg = runtimeConfig();
+      const stats = getRecordingStats();
+      return text(JSON.stringify({
+        service: "recordings",
+        version: VERSION,
+        mcp: {
+          default_http_port: DEFAULT_MCP_HTTP_PORT,
+          endpoint: "/mcp",
+        },
+        config: {
+          transcription_model: cfg.transcription_model,
+          enhancement_model: cfg.enhancement_model,
+          language: cfg.language,
+          auto_enhance: cfg.auto_enhance,
+          max_recording_seconds: cfg.max_recording_seconds,
+          db_path: cfg.db_path,
+          audio_dir: cfg.audio_dir,
+          openai_api_key_configured: Boolean(cfg.openai_api_key),
+          enhancement_api_key_configured: Boolean(cfg.enhancement_api_key || cfg.openai_api_key),
+        },
+        stats,
+      }, null, 2));
+    } catch (e) {
+      return errorResult(e);
+    }
+  }
+);
+
 // ── Recording Tools (lean stubs — no param descriptions) ────────────────────
 
 registerTool(
@@ -158,7 +201,7 @@ registerTool(
   },
   async (args) => {
     try {
-      const cfg = { ...config };
+      const cfg = { ...runtimeConfig() };
       if (args.language) cfg.language = args.language;
       if (args.no_enhance) cfg.auto_enhance = false;
 
@@ -221,12 +264,13 @@ registerTool(
   },
   async (args) => {
     try {
+      const cfg = runtimeConfig();
       let processedText: string | undefined;
       let mode: "raw" | "enhanced" = "raw";
       let enhModel: string | undefined;
 
       if (args.enhance !== false) {
-        const processed = await processText(args.text, config);
+        const processed = await processText(args.text, cfg);
         if (processed.mode === "enhanced") {
           processedText = processed.text;
           mode = "enhanced";
@@ -382,7 +426,7 @@ registerTool(
   { text: z.string() },
   async (args) => {
     try {
-      const r = needsEnhancement(args.text, config);
+      const r = needsEnhancement(args.text, runtimeConfig());
       return text(`${r.needs ? "Yes" : "No"}: ${r.reason}`);
     } catch (e) {
       return errorResult(e);

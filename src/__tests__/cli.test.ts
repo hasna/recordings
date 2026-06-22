@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -247,5 +247,110 @@ describe("recordings CLI", () => {
     expect(report.openai_api_key_configured).toBe(true);
     expect(report.enhancement_api_key_configured).toBe(true);
     expect(report.enhancement_model).toBe("gpt-4o");
+  });
+
+  test("--json transcribe emits only one JSON payload on stdout", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-json-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const audioPath = join(home, "sample.wav");
+    writeFileSync(audioPath, "fake wav bytes");
+
+    const apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname.endsWith("/audio/transcriptions")) {
+          return Response.json({ text: "mock transcript", language: "en" });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    try {
+      const proc = Bun.spawn(
+        [process.execPath, "src/cli/index.ts", "--json", "transcribe", audioPath, "--no-enhance"],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: home,
+            OPENAI_API_KEY: "sk-test-key",
+            RECORDINGS_API_KEY: "",
+            RECORDINGS_ENHANCEMENT_KEY: "",
+            OPENAI_BASE_URL: `http://127.0.0.1:${apiServer.port}`,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).not.toContain("Transcribing");
+      expect(stdout).not.toContain("Transcription:");
+      expect(stdout.trim().startsWith("{")).toBe(true);
+
+      const recording = JSON.parse(stdout) as {
+        raw_text: string;
+        processing_mode: string;
+        model_used: string;
+      };
+      expect(recording.raw_text).toBe("mock transcript");
+      expect(recording.processing_mode).toBe("raw");
+      expect(recording.model_used).toBe("gpt-4o-transcribe");
+    } finally {
+      apiServer.stop(true);
+    }
+  });
+
+  test("mcp installer configures stdio args for Codex and Gemini", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-mcp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    const codexDir = join(home, ".codex");
+    const geminiDir = join(home, ".gemini");
+    mkdirSync(codexDir, { recursive: true });
+    mkdirSync(geminiDir, { recursive: true });
+    const codexConfig = join(codexDir, "config.toml");
+    const geminiConfig = join(geminiDir, "settings.json");
+    writeFileSync(codexConfig, "");
+    writeFileSync(geminiConfig, "{}");
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "mcp", "--codex", "--gemini"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("Codex");
+    expect(stdout).toContain("Gemini");
+    expect(readFileSync(codexConfig, "utf-8")).toContain('args = ["--stdio"]');
+
+    const gemini = JSON.parse(readFileSync(geminiConfig, "utf-8")) as {
+      mcpServers: { recordings: { command: string; args: string[] } };
+    };
+    expect(gemini.mcpServers.recordings.args).toEqual(["--stdio"]);
   });
 });

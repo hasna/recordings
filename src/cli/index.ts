@@ -63,6 +63,7 @@ program
   .action(async (opts) => {
     const config = loadConfig();
     ensureDataDir(config);
+    const parentOpts = program.opts();
 
     if (opts.language) config.language = opts.language;
     applyEnhancementOptions(config, opts);
@@ -79,18 +80,22 @@ program
     if (opts.duration) {
       // Fixed duration recording
       const seconds = parseInt(opts.duration, 10);
-      console.log(
-        chalk.blue(`Recording for ${seconds} seconds...`)
-      );
+      if (!parentOpts.json) {
+        console.log(chalk.blue(`Recording for ${seconds} seconds...`));
+      }
       audioPath = await recordDuration(seconds, config);
-      console.log(chalk.green("Recording complete."));
+      if (!parentOpts.json) {
+        console.log(chalk.green("Recording complete."));
+      }
     } else {
       // Interactive recording — press Enter to stop
-      console.log(
-        chalk.blue("Recording... Press") +
-          chalk.yellow(" Enter ") +
-          chalk.blue("to stop.")
-      );
+      if (!parentOpts.json) {
+        console.log(
+          chalk.blue("Recording... Press") +
+            chalk.yellow(" Enter ") +
+            chalk.blue("to stop.")
+        );
+      }
       audioPath = startRecording(config);
 
       // Wait for Enter key
@@ -105,28 +110,33 @@ program
       });
 
       stopRecording();
-      console.log(chalk.green("Recording stopped."));
+      if (!parentOpts.json) {
+        console.log(chalk.green("Recording stopped."));
+      }
     }
 
     // Transcribe
-    console.log(chalk.blue("Transcribing..."));
+    if (!parentOpts.json) {
+      console.log(chalk.blue("Transcribing..."));
+    }
     const transcription = await transcribeAudio(audioPath, config);
-    console.log(chalk.dim(`Raw: ${transcription.text}`));
+    if (!parentOpts.json) {
+      console.log(chalk.dim(`Raw: ${transcription.text}`));
+    }
 
     // Process (detect & enhance if needed)
     const processed = await processText(transcription.text, config);
 
-    if (processed.mode === "enhanced") {
+    if (!parentOpts.json && processed.mode === "enhanced") {
       console.log(chalk.green("\nEnhanced output:"));
       console.log(processed.text);
-    } else {
+    } else if (!parentOpts.json) {
       console.log(chalk.green("\nOutput:"));
       console.log(transcription.text);
     }
 
     // Save to database
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
-    const parentOpts = program.opts();
 
     const recording = createRecording({
       audio_path: audioPath,
@@ -199,7 +209,9 @@ program
       session_id: parentOpts.session || undefined,
     });
 
-    if (processed.mode === "enhanced") {
+    if (parentOpts.json) {
+      console.log(JSON.stringify(recording, null, 2));
+    } else if (processed.mode === "enhanced") {
       console.log(chalk.green("Enhanced:"));
       console.log(processed.text);
     } else {
@@ -207,9 +219,7 @@ program
       console.log(transcription.text);
     }
 
-    if (parentOpts.json) {
-      console.log(JSON.stringify(recording, null, 2));
-    } else {
+    if (!parentOpts.json) {
       console.log(chalk.dim(`Saved as ${recording.id.slice(0, 8)}`));
     }
   });
@@ -493,7 +503,7 @@ program
 
 const appCommand = program
   .command("app")
-  .description("Manage the macOS menu bar app installed from this package");
+  .description("Manage the macOS app installed from this package");
 
 appCommand
   .command("install")
@@ -1141,7 +1151,7 @@ program
             // Remove first if it exists, then add fresh
             try { execSync("claude mcp remove recordings", { stdio: "pipe" }); } catch { /* ignore if not found */ }
             execSync(
-              `claude mcp add --transport stdio --scope user recordings -- ${mcpCmd}`,
+              `claude mcp add --transport stdio --scope user recordings -- ${mcpCmd} --stdio`,
               { stdio: "pipe" }
             );
           }
@@ -1153,9 +1163,9 @@ program
           if (fileExists(configPath)) {
             let content = readFileSync(configPath, "utf-8");
             if (opts.uninstall) {
-              content = content.replace(/\n\[mcp_servers\.recordings\]\ncommand = "[^"]*"\nargs = \[\]\n?/g, "\n");
+              content = content.replace(/\n\[mcp_servers\.recordings\]\ncommand = "[^"]*"\nargs = \[[^\]]*\]\n?/g, "\n");
             } else if (!content.includes("[mcp_servers.recordings]")) {
-              content += `\n[mcp_servers.recordings]\ncommand = "${mcpCmd}"\nargs = []\n`;
+              content += `\n[mcp_servers.recordings]\ncommand = "${mcpCmd}"\nargs = ["--stdio"]\n`;
             }
             writeFileSync(configPath, content, "utf-8");
             console.log(chalk.green(`${action} Codex: ${configPath}`));
@@ -1174,7 +1184,7 @@ program
           if (opts.uninstall) {
             delete servers["recordings"];
           } else {
-            servers["recordings"] = { command: mcpCmd, args: [] };
+            servers["recordings"] = { command: mcpCmd, args: ["--stdio"] };
           }
           config["mcpServers"] = servers;
           writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
