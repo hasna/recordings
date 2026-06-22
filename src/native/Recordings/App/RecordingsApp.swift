@@ -4,14 +4,21 @@ import SwiftUI
 import KeyboardShortcuts
 import RecordingsLib
 
+/// Recordings — a full native macOS app. The main window is the Recordings workspace
+/// (record + library); global shortcuts and dictation/command modes still work while the
+/// window is in the background. (The former menu-bar-only surface has been removed.)
+/// Keeps the app (and therefore the RecordingEngine + global shortcuts) alive after the
+/// last window is closed, so background dictation/command shortcuts keep working.
+final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
 @main
 struct RecordingsApp: App {
-    @StateObject private var engine = RecordingEngine()
-    @StateObject private var shortcuts = VoiceShortcuts()
-    @StateObject private var projectStore = ProjectStore()
+    @NSApplicationDelegateAdaptor(RecordingsAppDelegate.self) private var appDelegate
+    @StateObject private var store = RecordingsStore()
 
     init() {
-        Self.terminateDuplicateInstances()
         AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
@@ -19,36 +26,27 @@ struct RecordingsApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarPopover(engine: engine, shortcuts: shortcuts, projectStore: projectStore)
-                .frame(width: 320, height: 420)
-                .onAppear {
-                    engine.projectStore = projectStore
-                    engine.voiceShortcuts = shortcuts
+        WindowGroup("Recordings") {
+            ContentView(store: store)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1180, height: 760)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Recording") {
+                    store.pane = .record
+                    store.engine.startRecording()
                 }
-        } label: {
-            if engine.isRecording {
-                Image(systemName: "waveform")
-                    .symbolEffect(.variableColor.iterative, isActive: true)
-            } else if engine.isTranscribing {
-                Image(systemName: "ellipsis.circle")
-                    .symbolEffect(.pulse, isActive: true)
-            } else {
-                Image(systemName: "mic.fill")
+                .keyboardShortcut("n", modifiers: .command)
+            }
+            CommandGroup(after: .toolbar) {
+                Button("Recordings Library") { store.pane = .library }
+                    .keyboardShortcut("l", modifiers: .command)
             }
         }
-        .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView(engine: engine, shortcuts: shortcuts, projectStore: projectStore)
-        }
-    }
-
-    private static func terminateDuplicateInstances() {
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.hasna.recordings")
-            where app.processIdentifier != currentPID {
-            app.terminate()
+            SettingsView(engine: store.engine, shortcuts: store.voiceShortcuts, projectStore: store.projectStore)
         }
     }
 

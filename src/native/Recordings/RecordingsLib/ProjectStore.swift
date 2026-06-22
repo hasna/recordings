@@ -17,9 +17,9 @@ public struct RecProject: Codable, Identifiable, Sendable {
 }
 
 public struct ProjectSettings: Codable, Sendable {
-    var globalSystemPrompt: String
-    var projects: [RecProject]
-    var activeProjectId: String?
+    public var globalSystemPrompt: String
+    public var projects: [RecProject]
+    public var activeProjectId: String?
 
     public init() {
         globalSystemPrompt = ""
@@ -74,25 +74,25 @@ public final class ProjectStore: ObservableObject {
         }
     }
 
-    func addProject(name: String, path: String? = nil, systemPrompt: String? = nil) {
+    public func addProject(name: String, path: String? = nil, systemPrompt: String? = nil) {
         let project = RecProject(name: name, path: path, systemPrompt: systemPrompt)
         settings.projects.append(project)
         save()
     }
 
-    func updateProject(_ project: RecProject) {
+    public func updateProject(_ project: RecProject) {
         guard let idx = settings.projects.firstIndex(where: { $0.id == project.id }) else { return }
         settings.projects[idx] = project
         save()
     }
 
-    func removeProject(id: String) {
+    public func removeProject(id: String) {
         settings.projects.removeAll { $0.id == id }
         if settings.activeProjectId == id { settings.activeProjectId = nil }
         save()
     }
 
-    func setActive(_ id: String?) {
+    public func setActive(_ id: String?) {
         settings.activeProjectId = id
         save()
     }

@@ -6,7 +6,7 @@ import SwiftUI
 // MARK: - Custom shortcut (not fn — fn is handled by FnKeyMonitor)
 
 extension KeyboardShortcuts.Name {
-    @MainActor static let toggleRecording = Self("toggleRecording", default: .init(.f5))
+    @MainActor public static let toggleRecording = Self("toggleRecording", default: .init(.f5))
 }
 
 // MARK: - Recording Mode
@@ -17,6 +17,13 @@ public enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
     case command = "Command"
 
     public var id: String { rawValue }
+    public var shortName: String {
+        switch self {
+        case .pushToTalk: return "Talk"
+        case .dictation: return "Dictate"
+        case .command: return "Command"
+        }
+    }
     public var icon: String {
         switch self {
         case .pushToTalk: return "hand.tap.fill"
@@ -35,13 +42,22 @@ public enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
 
 // MARK: - Transcription Result
 
-public struct TranscriptionResult: Sendable {
+public struct TranscriptionResult: Identifiable, Sendable {
+    public let id = UUID()
     let rawText: String
     let processedText: String?
     let timestamp: Date
     let projectId: String?
     let projectName: String?
-    var displayText: String { processedText ?? rawText }
+    public var displayText: String { processedText ?? rawText }
+
+    init(rawText: String, processedText: String?, timestamp: Date, projectId: String?, projectName: String?) {
+        self.rawText = rawText
+        self.processedText = processedText
+        self.timestamp = timestamp
+        self.projectId = projectId
+        self.projectName = projectName
+    }
 }
 
 public enum RecordingTrigger: Equatable, Sendable {
@@ -516,6 +532,35 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    // MARK: - Cancel (discard without transcribing)
+
+    public func cancelRecording() {
+        guard isRecording else { return }
+        log("cancelRecording")
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        let recorder = nativeRecorder
+        nativeRecorder = nil
+        recorder?.stop()
+
+        realtimeClient?.stop()
+        realtimeClient = nil
+        streamingTask?.cancel()
+        streamingTask = nil
+        pcmStreamPipe?.cancel()
+        pcmStreamPipe = nil
+
+        isRecording = false
+        isTranscribing = false
+        liveTranscriptionText = ""
+        recordedPCM.removeAll(keepingCapacity: true)
+        activeAudioPath = nil
+        resetRecordingIntent()
+        statusMessage = "Ready"
+    }
+
     // MARK: - Stop & Transcribe
 
     public func stopAndTranscribe() {
@@ -884,7 +929,7 @@ public final class RecordingEngine: ObservableObject {
                 )
                 NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
             } catch {
-                NativeAppLog.write("failed to save wav after realtime fast path error=\(error.localizedDescription)", homePath: homePath)
+                NativeAppLog.write("failed to save captured wav error=\(error.localizedDescription)", homePath: homePath)
             }
         }
     }
@@ -944,8 +989,14 @@ public final class RecordingEngine: ObservableObject {
         isTranscribing = true
         statusMessage = "Transcribing..."
 
+        // Tag the persisted recording with the active project so the app's library/filters
+        // (which use the same local project id) line up. Global flags precede the subcommand.
+        var transcribeArgs = ["--json"]
+        if let activeProjectId, !activeProjectId.isEmpty { transcribeArgs += ["--project", activeProjectId] }
+        transcribeArgs += ["transcribe", audioPath, "--no-enhance"]
+
         Task.detached {
-            let output = CLIRunner.run(["--json", "transcribe", audioPath, "--no-enhance"], home: homePath)
+            let output = CLIRunner.run(transcribeArgs, home: homePath)
             let cliError = CLIRunner.parseError(output)
             let cliText = cliError == nil ? CLIRunner.parseJSON(output) : nil
 
@@ -1082,7 +1133,7 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
+    public func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
         log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") pid=\(targetAppPid.map(String.init) ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
         let previousClipboard = restoreClipboard ? ClipboardSnapshot(pasteboard: pb) : nil
