@@ -4,6 +4,7 @@ export type {
   CreateRecordingInput,
   RecordingFilter,
   ProcessingMode,
+  PostProcessingMode,
   Agent,
   Project,
   RecordingsConfig,
@@ -83,6 +84,8 @@ export {
   getDataDir,
   ensureDataDir,
   DEFAULT_CONFIG,
+  normalizePostProcessingConfig,
+  normalizePostProcessingMode,
 } from "./lib/config.js";
 
 // ── Transcription ───────────────────────────────────────────────────────────

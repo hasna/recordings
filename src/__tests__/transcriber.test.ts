@@ -194,6 +194,37 @@ describe("transcribeAudio", () => {
     resetClient();
   });
 
+  test("uses persisted transcription_prompt as STT vocabulary context", async () => {
+    let capturedOpts: any = null;
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        audio = {
+          transcriptions: {
+            create: mock((opts: any) => {
+              capturedOpts = opts;
+              return Promise.resolve({ text: "test", language: "en" });
+            }),
+          },
+        };
+      },
+    }));
+
+    resetClient();
+    const { transcribeAudio } = await import("../lib/transcriber.js");
+    resetClient();
+
+    await transcribeAudio(tempAudioFile, {
+      ...config,
+      transcription_prompt: "Hasna, Alumia",
+      transcriber_prompt: "Format as bullets",
+    });
+    expect(capturedOpts.prompt).toContain("vocabulary context");
+    expect(capturedOpts.prompt).toContain("Hasna");
+    expect(capturedOpts.prompt).not.toContain("Format as bullets");
+
+    resetClient();
+  });
+
   test("recreates OpenAI client when API key changes in the same process", async () => {
     const constructedApiKeys: string[] = [];
     mock.module("openai", () => ({

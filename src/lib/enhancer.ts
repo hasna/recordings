@@ -2,8 +2,10 @@ import OpenAI from "openai";
 import type {
   RecordingsConfig,
   EnhancementResult,
+  PostProcessingMode,
 } from "../types/index.js";
 import { EnhancementError } from "../types/index.js";
+import { normalizePostProcessingMode } from "./config.js";
 import { describeTranscriptionFailure } from "./transcriber.js";
 
 let _enhancementClient: OpenAI | null = null;
@@ -25,6 +27,11 @@ function getEnhancementClient(config: RecordingsConfig): OpenAI {
 export function resetEnhancementClient(): void {
   _enhancementClient = null;
   _enhancementClientApiKey = null;
+}
+
+export interface ProcessTextOptions {
+  systemPrompt?: string;
+  postProcessingMode?: PostProcessingMode;
 }
 
 /**
@@ -100,6 +107,7 @@ export async function enhanceText(
   systemPrompt?: string
 ): Promise<EnhancementResult> {
   const client = getEnhancementClient(config);
+  const model = resolveTranscriberModel(config);
 
   let basePrompt = `You are a writing assistant. The user has dictated speech that needs to be transformed into polished output.
 
@@ -122,11 +130,14 @@ Rules:
     basePrompt += `\n\nKeyword Transformations:\n${transformRules}`;
   }
 
-  const fullPrompt = systemPrompt ? `${basePrompt}\n\nAdditional context:\n${systemPrompt}` : basePrompt;
+  const transcriberPrompt = combinePrompts(config.transcriber_prompt, systemPrompt);
+  const fullPrompt = transcriberPrompt
+    ? `${basePrompt}\n\nTranscriber instructions:\n${transcriberPrompt}`
+    : basePrompt;
 
   try {
     const response = await client.chat.completions.create({
-      model: config.enhancement_model,
+      model,
       messages: [
         {
           role: "system",
@@ -147,7 +158,7 @@ Rules:
     return {
       original: rawText,
       enhanced,
-      model: config.enhancement_model,
+      model,
       reasoning: null,
     };
   } catch (error) {
@@ -162,27 +173,74 @@ Rules:
 export async function processText(
   rawText: string,
   config: RecordingsConfig,
-  systemPrompt?: string
+  systemPromptOrOptions?: string | ProcessTextOptions
 ): Promise<{
   text: string;
   mode: "raw" | "enhanced";
   enhancement_model: string | null;
+  post_processing_mode: PostProcessingMode;
+  enhancement_reason: string | null;
 }> {
-  if (!config.auto_enhance) {
-    return { text: rawText, mode: "raw", enhancement_model: null };
+  const options = normalizeProcessTextOptions(systemPromptOrOptions);
+  const postProcessingMode = options.postProcessingMode
+    ?? normalizePostProcessingMode(
+      config.post_processing_mode,
+      config.auto_enhance === false ? "off" : "auto"
+    );
+
+  if (postProcessingMode === "off") {
+    return {
+      text: rawText,
+      mode: "raw",
+      enhancement_model: null,
+      post_processing_mode: "off",
+      enhancement_reason: null,
+    };
   }
 
-  const detection = needsEnhancement(rawText, config);
+  const detection = postProcessingMode === "always"
+    ? {
+        needs: true,
+        reason: "Always-on post-processing",
+        instruction: rawText,
+      }
+    : needsEnhancement(rawText, config);
 
   if (!detection.needs) {
-    return { text: rawText, mode: "raw", enhancement_model: null };
+    return {
+      text: rawText,
+      mode: "raw",
+      enhancement_model: null,
+      post_processing_mode: postProcessingMode,
+      enhancement_reason: detection.reason,
+    };
   }
 
-  const result = await enhanceText(rawText, detection.instruction, config, systemPrompt);
+  const result = await enhanceText(rawText, detection.instruction, config, options.systemPrompt);
 
   return {
     text: result.enhanced,
     mode: "enhanced",
     enhancement_model: result.model,
+    post_processing_mode: postProcessingMode,
+    enhancement_reason: detection.reason,
   };
+}
+
+export function resolveTranscriberModel(config: RecordingsConfig): string {
+  return config.transcriber_model || config.enhancement_model;
+}
+
+function normalizeProcessTextOptions(
+  value?: string | ProcessTextOptions
+): ProcessTextOptions {
+  if (typeof value === "string") return { systemPrompt: value };
+  return value ?? {};
+}
+
+function combinePrompts(...prompts: Array<string | undefined>): string {
+  return prompts
+    .map((prompt) => prompt?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n\n");
 }

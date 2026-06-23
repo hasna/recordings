@@ -82,16 +82,22 @@ export interface Project {
 
 // ── Config Types ────────────────────────────────────────────────────────────
 
+export type PostProcessingMode = "off" | "auto" | "always";
+
 export interface RecordingsConfig {
   openai_api_key: string;
   enhancement_api_key: string;
   transcription_model: string;
   enhancement_model: string;
+  transcriber_model?: string;
   language: string;
   audio_format: "wav" | "mp3" | "m4a" | "webm";
   sample_rate: number;
   record_command: string;
   hotkey: string;
+  transcription_prompt?: string;
+  transcriber_prompt?: string;
+  post_processing_mode?: PostProcessingMode;
   auto_enhance: boolean;
   enhance_triggers: string[];
   keyword_transforms: Record<string, string>; // Map of phrases to their replacements

@@ -42,7 +42,7 @@ export async function transcribeAudio(
       file: stream,
       model: config.transcription_model,
       language: config.language || undefined,
-      prompt: buildVerbatimPrompt(options.prompt),
+      prompt: buildVerbatimPrompt(options.prompt ?? config.transcription_prompt),
       response_format: "json",
     });
     // Ensure stream is closed
@@ -80,7 +80,7 @@ export async function transcribeBuffer(
       file,
       model: config.transcription_model,
       language: config.language || undefined,
-      prompt: buildVerbatimPrompt(options.prompt),
+      prompt: buildVerbatimPrompt(options.prompt ?? config.transcription_prompt),
       response_format: "json",
     });
 
@@ -116,7 +116,7 @@ export async function transcribeAudioStream(
       file: fileStream,
       model: config.transcription_model,
       language: config.language || undefined,
-      prompt: buildVerbatimPrompt(options.prompt),
+      prompt: buildVerbatimPrompt(options.prompt ?? config.transcription_prompt),
       response_format: "text",
       stream: true,
     });

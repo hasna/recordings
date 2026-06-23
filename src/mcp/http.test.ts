@@ -70,6 +70,10 @@ describe("recordings MCP HTTP transport", () => {
       mcp: { default_http_port: number; endpoint: string };
       config: {
         transcription_model: string;
+        transcriber_model: string;
+        post_processing_mode: string;
+        transcription_prompt_configured: boolean;
+        transcriber_prompt_configured: boolean;
         openai_api_key_configured: boolean;
       };
       stats: { total: number };
@@ -78,6 +82,10 @@ describe("recordings MCP HTTP transport", () => {
     expect(status.mcp.default_http_port).toBe(8873);
     expect(status.mcp.endpoint).toBe("/mcp");
     expect(status.config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(status.config.transcriber_model).toBe("gpt-4o");
+    expect(status.config.post_processing_mode).toBe("auto");
+    expect(typeof status.config.transcription_prompt_configured).toBe("boolean");
+    expect(typeof status.config.transcriber_prompt_configured).toBe("boolean");
     expect(typeof status.config.openai_api_key_configured).toBe("boolean");
     expect(typeof status.stats.total).toBe("number");
     expect(content?.[0]?.text).not.toContain("sk-");
@@ -108,6 +116,25 @@ describe("recordings MCP HTTP transport", () => {
         process.env.RECORDINGS_MODEL = previousModel;
       }
     }
+  });
+
+  test("describe_tool documents separated transcription and transcriber prompts", async () => {
+    const client = new Client({ name: "recordings-http-test", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${port}/mcp`),
+    );
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "describe_tool",
+      arguments: { name: "transcribe_audio" },
+    });
+    expect(result.isError).not.toBe(true);
+    const content = result.content as Array<{ type: string; text?: string }> | undefined;
+    expect(content?.[0]?.text).toContain("transcription_prompt");
+    expect(content?.[0]?.text).toContain("STT vocabulary/context only");
+    expect(content?.[0]?.text).toContain("transcriber_prompt");
+    expect(content?.[0]?.text).toContain("post_processing_mode");
+    await client.close();
   });
 });
 

@@ -311,6 +311,97 @@ describe("recordings CLI", () => {
     }
   });
 
+  test("--json transcribe always post-processes and emits safe metadata", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-cleanup-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const audioPath = join(home, "sample.wav");
+    writeFileSync(audioPath, "fake wav bytes");
+
+    const apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname.endsWith("/audio/transcriptions")) {
+          return Response.json({ text: "hello world", language: "en" });
+        }
+        if (req.method === "POST" && url.pathname.endsWith("/chat/completions")) {
+          return Response.json({
+            choices: [{ message: { content: "Hello, world." } }],
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    try {
+      const proc = Bun.spawn(
+        [
+          process.execPath,
+          "src/cli/index.ts",
+          "--json",
+          "transcribe",
+          audioPath,
+          "--prompt",
+          "Hasna",
+          "--transcriber-prompt",
+          "Fix punctuation only",
+          "--post-processing",
+          "always",
+        ],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: home,
+            OPENAI_API_KEY: "sk-test-key",
+            RECORDINGS_API_KEY: "",
+            RECORDINGS_ENHANCEMENT_KEY: "",
+            OPENAI_BASE_URL: `http://127.0.0.1:${apiServer.port}`,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      const recording = JSON.parse(stdout) as {
+        raw_text: string;
+        processed_text: string;
+        processing_mode: string;
+        metadata: {
+          transcription_prompt: { configured: boolean; source: string };
+          transcriber_prompt: { configured: boolean; source: string };
+          post_processing: { mode: string; applied: boolean; model: string };
+        };
+      };
+      expect(recording.raw_text).toBe("hello world");
+      expect(recording.processed_text).toBe("Hello, world.");
+      expect(recording.processing_mode).toBe("enhanced");
+      expect(recording.metadata.transcription_prompt).toEqual({
+        configured: true,
+        source: "request",
+      });
+      expect(recording.metadata.transcriber_prompt).toEqual({
+        configured: true,
+        source: "request",
+      });
+      expect(recording.metadata.post_processing.mode).toBe("always");
+      expect(recording.metadata.post_processing.applied).toBe(true);
+      expect(JSON.stringify(recording.metadata)).not.toContain("Fix punctuation only");
+    } finally {
+      apiServer.stop(true);
+    }
+  });
+
   test("mcp installer configures stdio args for Codex and Gemini", async () => {
     const home = join(tmpdir(), `open-recordings-cli-mcp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);

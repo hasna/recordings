@@ -45,6 +45,12 @@ swift test                    # run the native test suite
 Requires macOS 26+ and a Swift toolchain (Xcode or Command Line Tools). Set the OpenAI API
 key in **Settings** or via `recordings` config; transcription/enhancement use it.
 
+The app's **Transcription Cleanup** setting controls the same post-processing pipeline as
+the CLI and MCP server. Use **Raw** to keep verbatim text only, **Auto** to clean up only
+when trigger phrases or instruction patterns are detected, or **Always** to run the
+transcriber cleanup prompt for every recording. Global cleanup instructions can be set in
+Settings, and project-specific instructions are appended when a project is active.
+
 ## CLI Usage
 
 ```bash
@@ -54,12 +60,66 @@ recordings --help
 - `recordings record`
 - `recordings transcribe <file>`
 - `recordings transcribe <file> --stream`
+- `recordings transcribe <file> --prompt "DALL-E, Hasna, gpt-4o"`
+- `recordings transcribe <file> --transcriber-prompt "Clean up punctuation only" --post-processing always`
 - `recordings rewrite <text> --instruction "<instruction>"`
 - `recordings list`
 - `recordings show <id>`
 - `recordings search <query>`
 - `recordings delete <id>`
 - `recordings stats`
+
+### Transcription Prompts
+
+Recordings separates speech-to-text context from post-transcription cleanup:
+
+- `--prompt` / `transcription_prompt` is passed to the OpenAI audio transcription
+  request as vocabulary or context. Use it for names, acronyms, technical terms, or
+  preceding segment context.
+- `--transcriber-prompt` / `transcriber_prompt` is used after raw transcription by the
+  text transcriber pipeline. Use it for cleanup, formatting, tone, summaries, or
+  transformations.
+- `--post-processing off|auto|always` controls whether cleanup runs. `--no-enhance` is a
+  compatibility alias for `off`.
+
+Examples:
+
+```bash
+# Verbatim dictation, no cleanup
+recordings transcribe meeting.wav --post-processing off
+
+# Better STT recognition for names and acronyms, still verbatim
+recordings transcribe demo.wav --prompt "Hasna, Alumia, DALL-E, gpt-4o"
+
+# Always clean up punctuation and paragraphs after raw transcription
+recordings transcribe note.wav \
+  --post-processing always \
+  --transcriber-prompt "Fix punctuation and paragraph breaks. Preserve the speaker's meaning."
+
+# Auto mode only cleans up when the transcript asks for it, such as "say it better"
+recordings transcribe draft.wav --post-processing auto
+```
+
+Persistent config can be stored in `~/.hasna/recordings/config.json` or a project-local
+`.recordings/config.json`:
+
+```json
+{
+  "transcription_prompt": "Hasna, Alumia, gpt-4o",
+  "transcriber_prompt": "Clean up grammar and format as concise Markdown notes.",
+  "post_processing_mode": "always",
+  "enhancement_model": "gpt-4o"
+}
+```
+
+Environment overrides are also supported:
+
+```bash
+export RECORDINGS_TRANSCRIPTION_PROMPT="Hasna, DALL-E, gpt-4o"
+export RECORDINGS_TRANSCRIBER_PROMPT="Format as polished meeting notes"
+export RECORDINGS_POST_PROCESSING_MODE=always
+export RECORDINGS_TRANSCRIBER_MODEL=gpt-4o
+```
 
 ## MCP Server
 
@@ -79,6 +139,11 @@ Endpoints: `GET /health` → `{"status":"ok","name":"recordings"}`, MCP at `/mcp
 Useful agent tools include `recordings_status` for safe service/config diagnostics,
 `transcribe_audio`, `save_recording`, `list_recordings`, `search_recordings`,
 `register_agent`, `heartbeat`, and `set_focus`.
+
+For MCP, `transcribe_audio` accepts `transcription_prompt` (or legacy `prompt`) for STT
+context, `transcriber_prompt` for cleanup instructions, and `post_processing_mode` with
+`off`, `auto`, or `always`. Tool results preserve `raw_text` and return `processed_text`
+only when post-processing actually produced enhanced output.
 
 ## Storage Sync
 

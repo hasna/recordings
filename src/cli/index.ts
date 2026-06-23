@@ -29,7 +29,7 @@ import {
   recordDuration,
 } from "../lib/recorder.js";
 import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
-import { enhanceText, processText } from "../lib/enhancer.js";
+import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { registerStorageCommands } from "./storage.js";
@@ -58,6 +58,11 @@ program
   .description("Record from microphone, transcribe, and optionally enhance")
   .option("-d, --duration <seconds>", "Record for specific duration")
   .option("--no-enhance", "Skip AI enhancement")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
   .option("-t, --tags <tags>", "Comma-separated tags")
   .option("-l, --language <lang>", "Language code (e.g. en, es, fr)")
   .action(async (opts) => {
@@ -66,6 +71,7 @@ program
     const parentOpts = program.opts();
 
     if (opts.language) config.language = opts.language;
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
     // Check dependencies
@@ -151,6 +157,11 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      metadata: buildTranscriptionMetadata(config, processed, {
+        transcriptionPromptFromRequest: opts.prompt !== undefined,
+        transcriberPromptFromRequest:
+          opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+      }),
     });
 
     if (parentOpts.json) {
@@ -171,10 +182,14 @@ program
   .option("--stream", "Stream transcription deltas while the file is processed")
   .option("-t, --tags <tags>", "Comma-separated tags")
   .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
-  .option("--system-prompt <prompt>", "System prompt for enhancement context")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
   .action(async (file, opts) => {
     const config = loadConfig();
     ensureDataDir(config);
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
     const parentOpts = program.opts();
@@ -183,15 +198,14 @@ program
     }
     const transcription = opts.stream
       ? await transcribeAudioStream(file, config, {
-          prompt: opts.prompt,
           onDelta: parentOpts.json ? undefined : (delta) => process.stdout.write(delta),
         })
-      : await transcribeAudio(file, config, { prompt: opts.prompt });
+      : await transcribeAudio(file, config);
     if (opts.stream && !parentOpts.json) {
       process.stdout.write("\n");
     }
 
-    const processed = await processText(transcription.text, config, opts.systemPrompt);
+    const processed = await processText(transcription.text, config);
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
     const recording = createRecording({
@@ -207,6 +221,11 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      metadata: buildTranscriptionMetadata(config, processed, {
+        transcriptionPromptFromRequest: opts.prompt !== undefined,
+        transcriberPromptFromRequest:
+          opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+      }),
     });
 
     if (parentOpts.json) {
@@ -487,7 +506,11 @@ program
       const defaultConf = {
         transcription_model: "gpt-4o-transcribe",
         enhancement_model: "gpt-4o",
+        transcriber_model: "gpt-4o",
         language: "en",
+        transcription_prompt: "",
+        transcriber_prompt: "",
+        post_processing_mode: "auto",
         auto_enhance: true,
       };
       writeFileSync(configFile, JSON.stringify(defaultConf, null, 2));
@@ -685,6 +708,10 @@ program
         openai_api_key_configured: Boolean(config.openai_api_key),
         enhancement_api_key_configured: Boolean(enhKey),
         enhancement_model: config.enhancement_model,
+        transcriber_model: resolveTranscriberModel(config),
+        post_processing_mode: config.post_processing_mode,
+        transcription_prompt_configured: Boolean(config.transcription_prompt?.trim()),
+        transcriber_prompt_configured: Boolean(config.transcriber_prompt?.trim()),
       }, null, 2));
       return;
     }
@@ -711,7 +738,7 @@ program
     // Check enhancement key
     if (enhKey) {
       console.log(
-        chalk.green(`✓ Enhancement API key configured (model: ${config.enhancement_model})`)
+        chalk.green(`✓ Enhancement API key configured (model: ${resolveTranscriberModel(config)})`)
       );
     } else {
       console.log(
@@ -727,6 +754,11 @@ program
   .description("Push-to-talk mode — press Space to start/stop recording, Esc to quit")
   .option("-t, --tags <tags>", "Comma-separated tags for all recordings")
   .option("--no-enhance", "Skip AI enhancement")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
   .option("-l, --language <lang>", "Language code")
   .option("--copy", "Copy output to clipboard")
   .option("--paste", "Copy output to clipboard AND paste into frontmost app")
@@ -734,6 +766,7 @@ program
     const config = loadConfig();
     ensureDataDir(config);
     if (opts.language) config.language = opts.language;
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
     const deps = await checkRecordingDeps();
@@ -827,6 +860,11 @@ program
               agent_id: parentOpts.agent || undefined,
               project_id: parentOpts.project || undefined,
               session_id: parentOpts.session || undefined,
+              metadata: buildTranscriptionMetadata(config, processed, {
+                transcriptionPromptFromRequest: opts.prompt !== undefined,
+                transcriberPromptFromRequest:
+                  opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+              }),
             });
 
             // Clear line and show output
@@ -1047,6 +1085,46 @@ ${scriptPath}
     console.log(chalk.bold("  Alfred"));
     console.log(`    Create a workflow with a Hotkey trigger → Run Script: ${scriptPath}\n`);
   });
+
+// ── Transcription metadata ──────────────────────────────────────────────────
+
+function buildTranscriptionMetadata(
+  config: ReturnType<typeof loadConfig>,
+  processed: Awaited<ReturnType<typeof processText>>,
+  sources: {
+    transcriptionPromptFromRequest?: boolean;
+    transcriberPromptFromRequest?: boolean;
+  } = {}
+): Record<string, unknown> {
+  const transcriptionPromptConfigured = Boolean(config.transcription_prompt?.trim());
+  const transcriberPromptConfigured = Boolean(config.transcriber_prompt?.trim());
+
+  return {
+    transcription_prompt: {
+      configured: transcriptionPromptConfigured,
+      source: sources.transcriptionPromptFromRequest
+        ? "request"
+        : transcriptionPromptConfigured
+          ? "config"
+          : "none",
+    },
+    transcriber_prompt: {
+      configured: transcriberPromptConfigured,
+      source: sources.transcriberPromptFromRequest
+        ? "request"
+        : transcriberPromptConfigured
+          ? "config"
+          : "none",
+    },
+    post_processing: {
+      mode: processed.post_processing_mode,
+      applied: processed.mode === "enhanced",
+      reason: processed.enhancement_reason,
+      model: processed.enhancement_model,
+    },
+    transcriber_model: resolveTranscriberModel(config),
+  };
+}
 
 // ── Formatting helpers ──────────────────────────────────────────────────────
 

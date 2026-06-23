@@ -43,11 +43,8 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     // MARK: - Public API
 
     /// Start a streaming transcription session.
-    /// - Parameters:
-    ///   - systemPrompt: Optional system prompt for the transcription
-    ///   - audioFormat: Audio format. Defaults to pcm16 at 24kHz (OpenAI's preferred format).
     /// - Returns: The client is now streaming. Call `sendAudio(_:)` to send chunks.
-    public func startStreaming(systemPrompt: String = "", language: String = "") async {
+    public func startStreaming(language: String = "") async {
         guard !apiKey.isEmpty else {
             self.error = "OpenAI API key not configured"
             return

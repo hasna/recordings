@@ -991,9 +991,12 @@ public final class RecordingEngine: ObservableObject {
 
         // Tag the persisted recording with the active project so the app's library/filters
         // (which use the same local project id) line up. Global flags precede the subcommand.
-        var transcribeArgs = ["--json"]
-        if let activeProjectId, !activeProjectId.isEmpty { transcribeArgs += ["--project", activeProjectId] }
-        transcribeArgs += ["transcribe", audioPath, "--no-enhance"]
+        let transcribeArgs = Self.transcribeCLIArgs(
+            audioPath: audioPath,
+            activeProjectId: activeProjectId,
+            transcriberPrompt: projectStore?.effectiveSystemPrompt ?? "",
+            postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+        )
 
         Task.detached {
             let output = CLIRunner.run(transcribeArgs, home: homePath)
@@ -1035,6 +1038,29 @@ public final class RecordingEngine: ObservableObject {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: audioDir)) ?? []
         let wavFiles = files.filter { $0.hasSuffix(".wav") }.sorted().reversed()
         return wavFiles.first.map { "\(audioDir)/\($0)" }
+    }
+
+    nonisolated static func transcribeCLIArgs(
+        audioPath: String,
+        activeProjectId: String?,
+        transcriberPrompt: String,
+        postProcessingMode: String
+    ) -> [String] {
+        var args = ["--json"]
+        if let activeProjectId, !activeProjectId.isEmpty {
+            args += ["--project", activeProjectId]
+        }
+        args += ["transcribe", audioPath]
+
+        let mode = PostProcessingMode(rawValue: postProcessingMode)?.rawValue ?? PostProcessingMode.auto.rawValue
+        args += ["--post-processing", mode]
+
+        let prompt = transcriberPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !prompt.isEmpty {
+            args += ["--transcriber-prompt", prompt]
+        }
+
+        return args
     }
 
     private func finish(_ msg: String) {

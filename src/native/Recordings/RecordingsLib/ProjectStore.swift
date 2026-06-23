@@ -1,5 +1,21 @@
 import Foundation
 
+public enum PostProcessingMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case off
+    case auto
+    case always
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .off: return "Raw"
+        case .auto: return "Auto"
+        case .always: return "Always"
+        }
+    }
+}
+
 public struct RecProject: Codable, Identifiable, Sendable {
     public let id: String
     public var name: String
@@ -18,13 +34,30 @@ public struct RecProject: Codable, Identifiable, Sendable {
 
 public struct ProjectSettings: Codable, Sendable {
     public var globalSystemPrompt: String
+    public var postProcessingMode: String
     public var projects: [RecProject]
     public var activeProjectId: String?
 
     public init() {
         globalSystemPrompt = ""
+        postProcessingMode = PostProcessingMode.auto.rawValue
         projects = []
         activeProjectId = nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case globalSystemPrompt
+        case postProcessingMode
+        case projects
+        case activeProjectId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        globalSystemPrompt = try container.decodeIfPresent(String.self, forKey: .globalSystemPrompt) ?? ""
+        postProcessingMode = try container.decodeIfPresent(String.self, forKey: .postProcessingMode) ?? PostProcessingMode.auto.rawValue
+        projects = try container.decodeIfPresent([RecProject].self, forKey: .projects) ?? []
+        activeProjectId = try container.decodeIfPresent(String.self, forKey: .activeProjectId)
     }
 }
 
@@ -45,6 +78,11 @@ public final class ProjectStore: ObservableObject {
         if global.isEmpty { return project }
         if project.isEmpty { return global }
         return "\(global)\n\n\(project)"
+    }
+
+    public var effectivePostProcessingMode: String {
+        let mode = PostProcessingMode(rawValue: settings.postProcessingMode) ?? .auto
+        return mode.rawValue
     }
 
     public init() {
