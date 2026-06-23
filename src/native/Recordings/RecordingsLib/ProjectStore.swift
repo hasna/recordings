@@ -1,5 +1,21 @@
 import Foundation
 
+public enum PostProcessingMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case off
+    case auto
+    case always
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .off: return "Raw"
+        case .auto: return "Auto"
+        case .always: return "Always"
+        }
+    }
+}
+
 public struct RecProject: Codable, Identifiable, Sendable {
     public let id: String
     public var name: String
@@ -17,14 +33,31 @@ public struct RecProject: Codable, Identifiable, Sendable {
 }
 
 public struct ProjectSettings: Codable, Sendable {
-    var globalSystemPrompt: String
-    var projects: [RecProject]
-    var activeProjectId: String?
+    public var globalSystemPrompt: String
+    public var postProcessingMode: String
+    public var projects: [RecProject]
+    public var activeProjectId: String?
 
     public init() {
         globalSystemPrompt = ""
+        postProcessingMode = PostProcessingMode.auto.rawValue
         projects = []
         activeProjectId = nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case globalSystemPrompt
+        case postProcessingMode
+        case projects
+        case activeProjectId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        globalSystemPrompt = try container.decodeIfPresent(String.self, forKey: .globalSystemPrompt) ?? ""
+        postProcessingMode = try container.decodeIfPresent(String.self, forKey: .postProcessingMode) ?? PostProcessingMode.auto.rawValue
+        projects = try container.decodeIfPresent([RecProject].self, forKey: .projects) ?? []
+        activeProjectId = try container.decodeIfPresent(String.self, forKey: .activeProjectId)
     }
 }
 
@@ -45,6 +78,11 @@ public final class ProjectStore: ObservableObject {
         if global.isEmpty { return project }
         if project.isEmpty { return global }
         return "\(global)\n\n\(project)"
+    }
+
+    public var effectivePostProcessingMode: String {
+        let mode = PostProcessingMode(rawValue: settings.postProcessingMode) ?? .auto
+        return mode.rawValue
     }
 
     public init() {
@@ -74,25 +112,25 @@ public final class ProjectStore: ObservableObject {
         }
     }
 
-    func addProject(name: String, path: String? = nil, systemPrompt: String? = nil) {
+    public func addProject(name: String, path: String? = nil, systemPrompt: String? = nil) {
         let project = RecProject(name: name, path: path, systemPrompt: systemPrompt)
         settings.projects.append(project)
         save()
     }
 
-    func updateProject(_ project: RecProject) {
+    public func updateProject(_ project: RecProject) {
         guard let idx = settings.projects.firstIndex(where: { $0.id == project.id }) else { return }
         settings.projects[idx] = project
         save()
     }
 
-    func removeProject(id: String) {
+    public func removeProject(id: String) {
         settings.projects.removeAll { $0.id == id }
         if settings.activeProjectId == id { settings.activeProjectId = nil }
         save()
     }
 
-    func setActive(_ id: String?) {
+    public func setActive(_ id: String?) {
         settings.activeProjectId = id
         save()
     }

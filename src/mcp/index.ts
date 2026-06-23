@@ -1,9 +1,14 @@
 #!/usr/bin/env bun
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
+import { DEFAULT_MCP_HTTP_PORT, isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
 import { z } from "zod";
-import { loadConfig, ensureDataDir } from "../lib/config.js";
+import {
+  loadConfig,
+  ensureDataDir,
+  normalizePostProcessingConfig,
+  normalizePostProcessingMode,
+} from "../lib/config.js";
 import { getDatabase, getAdapter } from "../db/database.js";
 import {
   createRecording,
@@ -20,7 +25,7 @@ import {
   listProjects,
 } from "../db/projects.js";
 import { transcribeAudio, transcribeBuffer } from "../lib/transcriber.js";
-import { processText, needsEnhancement } from "../lib/enhancer.js";
+import { processText, needsEnhancement, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { registerRecordingsStorageTools } from "./storage-tools.js";
@@ -30,6 +35,14 @@ import { registerRecordingsStorageTools } from "./storage-tools.js";
 const config = loadConfig();
 ensureDataDir(config);
 getDatabase(config.db_path);
+
+function runtimeConfig(): typeof config {
+  return {
+    ...loadConfig(),
+    db_path: config.db_path,
+    audio_dir: config.audio_dir,
+  };
+}
 
 export function buildServer(): McpServer {
 const server = new McpServer({
@@ -76,6 +89,114 @@ function full(r: Recording): string {
   return lines.join("\n");
 }
 
+function applyTranscriptionArgs(
+  cfg: ReturnType<typeof runtimeConfig>,
+  args: {
+    language?: string;
+    prompt?: string;
+    transcription_prompt?: string;
+    transcriber_prompt?: string;
+    system_prompt?: string;
+    post_processing_mode?: "off" | "auto" | "always";
+    post_processing?: "off" | "auto" | "always";
+    no_enhance?: boolean;
+    enhance?: boolean;
+    transcriber_model?: string;
+    enhancement_model?: string;
+  }
+): ReturnType<typeof runtimeConfig> {
+  if (args.language) cfg.language = args.language;
+
+  const transcriptionPrompt = args.transcription_prompt ?? args.prompt;
+  if (transcriptionPrompt !== undefined) {
+    cfg.transcription_prompt = transcriptionPrompt;
+  }
+
+  const transcriberPrompt = args.transcriber_prompt ?? args.system_prompt;
+  if (transcriberPrompt !== undefined) {
+    cfg.transcriber_prompt = transcriberPrompt;
+  }
+
+  if (args.transcriber_model) {
+    cfg.transcriber_model = args.transcriber_model;
+  } else if (args.enhancement_model) {
+    cfg.enhancement_model = args.enhancement_model;
+    cfg.transcriber_model = args.enhancement_model;
+  }
+
+  const requestedMode = args.post_processing_mode ?? args.post_processing;
+  if (args.no_enhance || args.enhance === false) {
+    cfg.post_processing_mode = "off";
+    normalizePostProcessingConfig(cfg, true);
+  } else if (args.enhance === true) {
+    cfg.post_processing_mode = "always";
+    normalizePostProcessingConfig(cfg, true);
+  } else if (requestedMode) {
+    cfg.post_processing_mode = normalizePostProcessingMode(
+      requestedMode,
+      cfg.post_processing_mode ?? "auto"
+    );
+    normalizePostProcessingConfig(cfg, true);
+  } else {
+    normalizePostProcessingConfig(cfg, false);
+  }
+
+  return cfg;
+}
+
+function buildTranscriptionMetadata(
+  cfg: ReturnType<typeof runtimeConfig>,
+  processed: Awaited<ReturnType<typeof processText>>,
+  sources: {
+    transcriptionPromptFromRequest?: boolean;
+    transcriberPromptFromRequest?: boolean;
+  } = {}
+): Record<string, unknown> {
+  const transcriptionPromptConfigured = Boolean(cfg.transcription_prompt?.trim());
+  const transcriberPromptConfigured = Boolean(cfg.transcriber_prompt?.trim());
+
+  return {
+    transcription_prompt: {
+      configured: transcriptionPromptConfigured,
+      source: sources.transcriptionPromptFromRequest
+        ? "request"
+        : transcriptionPromptConfigured
+          ? "config"
+          : "none",
+    },
+    transcriber_prompt: {
+      configured: transcriberPromptConfigured,
+      source: sources.transcriberPromptFromRequest
+        ? "request"
+        : transcriberPromptConfigured
+          ? "config"
+          : "none",
+    },
+    post_processing: {
+      mode: processed.post_processing_mode,
+      applied: processed.mode === "enhanced",
+      reason: processed.enhancement_reason,
+      model: processed.enhancement_model,
+    },
+    transcriber_model: resolveTranscriberModel(cfg),
+  };
+}
+
+function recordingJson(r: Recording): string {
+  return JSON.stringify({
+    id: r.id,
+    raw_text: r.raw_text,
+    processed_text: r.processed_text,
+    processing_mode: r.processing_mode,
+    model_used: r.model_used,
+    enhancement_model: r.enhancement_model,
+    language: r.language,
+    tags: r.tags,
+    metadata: r.metadata,
+    created_at: r.created_at,
+  }, null, 2);
+}
+
 async function saveRecordingMemento(args: {
   key: string;
   value: string;
@@ -113,8 +234,9 @@ async function saveRecordingMemento(args: {
 // ── Full tool schemas for describe_tool ─────────────────────────────────────
 
 const toolDocs: Record<string, string> = {
-  transcribe_audio: "Transcribe audio file. Auto-enhances if needed.\nParams: audio_path (string, required): path to wav/mp3/m4a/webm | language (string): ISO code e.g. en/es/fr | no_enhance (bool): skip AI enhancement | tags (string[]): tags | agent_id (string) | project_id (string) | session_id (string)",
-  save_recording: "Save text as recording. Auto-enhances if needed.\nParams: text (string, required): text to save | enhance (bool): force enhancement | tags (string[]) | agent_id (string) | project_id (string) | session_id (string) | metadata (object)",
+  recordings_status: "Show safe service status for agents.\nParams: none\nReturns: JSON with package version, MCP HTTP defaults, active transcription/enhancement models, language, data paths, key-presence booleans, and recording counts. Never returns secret values.",
+  transcribe_audio: "Transcribe audio file and save raw plus optional processed text.\nParams: audio_path (string, required): path to wav/mp3/m4a/webm | language (string): ISO code e.g. en/es/fr | transcription_prompt or prompt (string): STT vocabulary/context only | transcriber_prompt or system_prompt (string): post-transcription cleanup instructions | post_processing_mode ('off'|'auto'|'always') | transcriber_model (string) | no_enhance (bool): alias for post_processing_mode=off | tags (string[]) | agent_id (string) | project_id (string) | session_id (string)\nReturns: JSON recording summary with raw_text, processed_text, processing_mode, and safe metadata.",
+  save_recording: "Save text as recording. Auto-enhances if needed.\nParams: text (string, required): text to save | enhance (bool): true forces always, false disables | transcriber_prompt or system_prompt (string): post-processing instructions | post_processing_mode ('off'|'auto'|'always') | tags (string[]) | agent_id (string) | project_id (string) | session_id (string) | metadata (object)",
   get_recording: "Get recording by ID or prefix.\nParams: id (string, required): recording ID or prefix",
   list_recordings: "List recordings, compact by default, most recent first.\nParams: limit (number, default 10) | offset (number) | processing_mode ('raw'|'enhanced') | tags (string[]) | search (string): text search | since/until (ISO date) | agent_id | project_id | session_id | full (bool): verbose output",
   search_recordings: "Search recordings by text content.\nParams: query (string, required) | limit (number, default 10) | agent_id | project_id | full (bool): verbose output",
@@ -142,6 +264,47 @@ registerTool(
   }
 );
 
+registerTool(
+  "recordings_status",
+  "Show safe service status for agents.",
+  {},
+  async () => {
+    try {
+      const cfg = runtimeConfig();
+      const stats = getRecordingStats();
+      return text(JSON.stringify({
+        service: "recordings",
+        version: VERSION,
+        mcp: {
+          default_http_port: DEFAULT_MCP_HTTP_PORT,
+          endpoint: "/mcp",
+        },
+        config: {
+          transcription_model: cfg.transcription_model,
+          realtime_session_model: cfg.realtime_session_model,
+          realtime_transcription_model: cfg.realtime_transcription_model,
+          enhancement_model: cfg.enhancement_model,
+          transcriber_model: resolveTranscriberModel(cfg),
+          language: cfg.language,
+          auto_enhance: cfg.auto_enhance,
+          post_processing_mode: cfg.post_processing_mode,
+          transcription_prompt_configured: Boolean(cfg.transcription_prompt?.trim()),
+          transcriber_prompt_configured: Boolean(cfg.transcriber_prompt?.trim()),
+          max_recording_seconds: cfg.max_recording_seconds,
+          db_path: cfg.db_path,
+          audio_dir: cfg.audio_dir,
+          openai_api_key_configured: Boolean(cfg.openai_api_key),
+          enhancement_api_key_configured: Boolean(cfg.enhancement_api_key || cfg.openai_api_key),
+          config_warnings: cfg.config_warnings ?? [],
+        },
+        stats,
+      }, null, 2));
+    } catch (e) {
+      return errorResult(e);
+    }
+  }
+);
+
 // ── Recording Tools (lean stubs — no param descriptions) ────────────────────
 
 registerTool(
@@ -150,6 +313,14 @@ registerTool(
   {
     audio_path: z.string(),
     language: z.string().optional(),
+    transcription_prompt: z.string().optional(),
+    prompt: z.string().optional(),
+    transcriber_prompt: z.string().optional(),
+    system_prompt: z.string().optional(),
+    post_processing_mode: z.enum(["off", "auto", "always"]).optional(),
+    post_processing: z.enum(["off", "auto", "always"]).optional(),
+    transcriber_model: z.string().optional(),
+    enhancement_model: z.string().optional(),
     no_enhance: z.boolean().optional(),
     tags: z.array(z.string()).optional(),
     agent_id: z.string().optional(),
@@ -158,12 +329,16 @@ registerTool(
   },
   async (args) => {
     try {
-      const cfg = { ...config };
-      if (args.language) cfg.language = args.language;
-      if (args.no_enhance) cfg.auto_enhance = false;
+      const cfg = applyTranscriptionArgs({ ...runtimeConfig() }, args);
 
       const transcription = await transcribeAudio(args.audio_path, cfg);
       const processed = await processText(transcription.text, cfg);
+      const metadata = buildTranscriptionMetadata(cfg, processed, {
+        transcriptionPromptFromRequest:
+          args.transcription_prompt !== undefined || args.prompt !== undefined,
+        transcriberPromptFromRequest:
+          args.transcriber_prompt !== undefined || args.system_prompt !== undefined,
+      });
 
       const recording = createRecording({
         audio_path: args.audio_path,
@@ -178,6 +353,7 @@ registerTool(
         agent_id: args.agent_id,
         project_id: args.project_id,
         session_id: args.session_id,
+        metadata,
       });
 
       // Create memory in Open Mementos if agent_id is provided
@@ -196,8 +372,7 @@ registerTool(
         });
       }
 
-      const output = processed.mode === "enhanced" ? processed.text : transcription.text;
-      return text(`${recording.id.slice(0, 8)} | ${processed.mode} | ${output}`);
+      return text(recordingJson(recording));
     } catch (e) {
       return errorResult(e);
     }
@@ -210,6 +385,12 @@ registerTool(
   {
     text: z.string(),
     enhance: z.boolean().optional(),
+    transcriber_prompt: z.string().optional(),
+    system_prompt: z.string().optional(),
+    post_processing_mode: z.enum(["off", "auto", "always"]).optional(),
+    post_processing: z.enum(["off", "auto", "always"]).optional(),
+    transcriber_model: z.string().optional(),
+    enhancement_model: z.string().optional(),
     tags: z.array(z.string()).optional(),
     agent_id: z.string().optional(),
     project_id: z.string().optional(),
@@ -221,18 +402,30 @@ registerTool(
   },
   async (args) => {
     try {
+      const cfg = applyTranscriptionArgs(runtimeConfig(), args);
       let processedText: string | undefined;
       let mode: "raw" | "enhanced" = "raw";
       let enhModel: string | undefined;
+      let processed: Awaited<ReturnType<typeof processText>> = {
+        text: args.text,
+        mode: "raw",
+        enhancement_model: null,
+        post_processing_mode: cfg.post_processing_mode ?? "auto",
+        enhancement_reason: null,
+      };
 
-      if (args.enhance !== false) {
-        const processed = await processText(args.text, config);
-        if (processed.mode === "enhanced") {
-          processedText = processed.text;
-          mode = "enhanced";
-          enhModel = processed.enhancement_model || undefined;
-        }
+      if (cfg.post_processing_mode !== "off") {
+        processed = await processText(args.text, cfg);
       }
+      if (processed.mode === "enhanced") {
+        processedText = processed.text;
+        mode = "enhanced";
+        enhModel = processed.enhancement_model || undefined;
+      }
+      const processingMetadata = buildTranscriptionMetadata(cfg, processed, {
+        transcriberPromptFromRequest:
+          args.transcriber_prompt !== undefined || args.system_prompt !== undefined,
+      });
 
       const recording = createRecording({
         raw_text: args.text,
@@ -247,11 +440,13 @@ registerTool(
         goal: args.goal,
         role: args.role,
         task_list_id: args.task_list_id,
-        metadata: args.metadata,
+        metadata: {
+          ...(args.metadata ?? {}),
+          ...processingMetadata,
+        },
       });
 
-      const output = processedText || args.text;
-      return text(`${recording.id.slice(0, 8)} | ${mode} | ${output}`);
+      return text(recordingJson(recording));
     } catch (e) {
       return errorResult(e);
     }
@@ -382,7 +577,7 @@ registerTool(
   { text: z.string() },
   async (args) => {
     try {
-      const r = needsEnhancement(args.text, config);
+      const r = needsEnhancement(args.text, runtimeConfig());
       return text(`${r.needs ? "Yes" : "No"}: ${r.reason}`);
     } catch (e) {
       return errorResult(e);

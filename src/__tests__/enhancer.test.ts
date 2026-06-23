@@ -469,6 +469,38 @@ describe("enhanceText", () => {
 
     resetEnhancementClient();
   });
+
+  test("recreates OpenAI client when enhancement key changes in the same process", async () => {
+    const constructedApiKeys: string[] = [];
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        constructor(opts: { apiKey: string }) {
+          constructedApiKeys.push(opts.apiKey);
+        }
+        chat = {
+          completions: {
+            create: mock(() =>
+              Promise.resolve({
+                choices: [{ message: { content: "enhanced" } }],
+              })
+            ),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { enhanceText: enhance } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    await enhance("text", "instruction", { ...config, enhancement_api_key: "sk-one" });
+    await enhance("text", "instruction", { ...config, enhancement_api_key: "sk-two" });
+    await enhance("text", "instruction", { ...config, enhancement_api_key: "sk-two" });
+
+    expect(constructedApiKeys).toEqual(["sk-one", "sk-two"]);
+
+    resetEnhancementClient();
+  });
 });
 
 // ── processText ─────────────────────────────────────────────────────────────
@@ -569,7 +601,7 @@ describe("systemPrompt support", () => {
     resetEnhancementClient();
 
     await process("write an email saying thanks", config, "You are working on the Acme project");
-    expect(capturedMessages[0]!.content).toContain("Additional context:");
+    expect(capturedMessages[0]!.content).toContain("Transcriber instructions:");
     expect(capturedMessages[0]!.content).toContain("Acme project");
 
     resetEnhancementClient();
@@ -597,7 +629,7 @@ describe("systemPrompt support", () => {
     resetEnhancementClient();
 
     await process("write an email saying thanks", config);
-    expect(capturedMessages[0]!.content).not.toContain("Additional context:");
+    expect(capturedMessages[0]!.content).not.toContain("Transcriber instructions:");
 
     resetEnhancementClient();
   });
@@ -606,6 +638,99 @@ describe("systemPrompt support", () => {
     const result = await processText("Just a regular note", config, "project context");
     expect(result.mode).toBe("raw");
     expect(result.text).toBe("Just a regular note");
+  });
+
+  test("processText includes configured transcriber prompt", async () => {
+    let capturedMessages: Array<{ role: string; content: string }> = [];
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock((opts: { messages: Array<{ role: string; content: string }> }) => {
+              capturedMessages = opts.messages;
+              return Promise.resolve({
+                choices: [{ message: { content: "Enhanced with configured prompt" } }],
+              });
+            }),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    await process("write an email saying thanks", {
+      ...config,
+      transcriber_prompt: "Use Markdown",
+    });
+    expect(capturedMessages[0]!.content).toContain("Use Markdown");
+
+    resetEnhancementClient();
+  });
+
+  test("always mode enhances plain dictation", async () => {
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock(() =>
+              Promise.resolve({
+                choices: [{ message: { content: "Clean plain note." } }],
+              })
+            ),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    const result = await process("clean plain note", {
+      ...config,
+      post_processing_mode: "always",
+    });
+    expect(result.mode).toBe("enhanced");
+    expect(result.post_processing_mode).toBe("always");
+    expect(result.enhancement_reason).toBe("Always-on post-processing");
+    expect(result.text).toBe("Clean plain note.");
+
+    resetEnhancementClient();
+  });
+
+  test("transcriber_model overrides enhancement_model for post-processing", async () => {
+    let capturedModel = "";
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock((opts: { model: string }) => {
+              capturedModel = opts.model;
+              return Promise.resolve({
+                choices: [{ message: { content: "Enhanced" } }],
+              });
+            }),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    const result = await process("write an email saying thanks", {
+      ...config,
+      enhancement_model: "gpt-enhancement",
+      transcriber_model: "gpt-transcriber",
+    });
+    expect(capturedModel).toBe("gpt-transcriber");
+    expect(result.enhancement_model).toBe("gpt-transcriber");
+
+    resetEnhancementClient();
   });
 });
 

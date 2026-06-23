@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import RecordingsLib
 
 // MARK: - RealtimeTranscriptionClient Event Parsing Tests
@@ -6,6 +7,8 @@ import Testing
 struct RealtimeTranscriptionTests {
     @Test("Model ID is set to low-latency realtime transcription model")
     func modelID() {
+        #expect(RealtimeTranscriptionClient.sessionModelID == "gpt-realtime")
+        #expect(RealtimeTranscriptionClient.transcriptionModelID == "gpt-realtime-whisper")
         #expect(RealtimeTranscriptionClient.modelID == "gpt-realtime-whisper")
         #expect(RealtimeTranscriptionClient.transcriptionDelay == "low")
     }
@@ -100,8 +103,7 @@ struct RealtimeTranscriptionTests {
         #expect(transcription?["prompt"] as? String == nil)
         #expect(transcription?["language"] as? String == "en")
 
-        let turnDetection = input?["turn_detection"] as? [String: Any]
-        #expect(turnDetection == nil)
+        #expect(input?["turn_detection"] is NSNull)
 
         let include = session?["include"] as? [String]
         #expect(include == nil)
@@ -117,6 +119,34 @@ struct RealtimeTranscriptionTests {
     func manualCommitThreshold() {
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 4_799) == false)
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 5_760) == true)
+    }
+
+    @Test("Realtime finish only settles after completed transcription events")
+    func finishSettledDecision() {
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: true,
+            completedCountBeforeCommit: 0,
+            completedEventCount: 0,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: true,
+            secondsSinceLastEvent: 0.5
+        ) == false)
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: true,
+            completedCountBeforeCommit: 0,
+            completedEventCount: 1,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: false,
+            secondsSinceLastEvent: 0.5
+        ))
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: true,
+            completedCountBeforeCommit: 0,
+            completedEventCount: 1,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: false,
+            secondsSinceLastEvent: 0.1
+        ) == false)
     }
 
     @Test("Partial realtime text falls back for longer recordings")

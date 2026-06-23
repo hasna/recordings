@@ -36,7 +36,7 @@ describe("checkRecordingDeps", () => {
     const { checkRecordingDeps } = await import("../lib/recorder.js");
     const result = await checkRecordingDeps();
     if (result.available) {
-      expect(["sox", "rec", "ffmpeg"]).toContain(result.tool);
+      expect(result.tool).toBe("rec");
       expect(result.message).toContain("is available");
     } else {
       expect(result.tool).toBe("none");
