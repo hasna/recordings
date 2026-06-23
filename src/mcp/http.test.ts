@@ -70,10 +70,13 @@ describe("recordings MCP HTTP transport", () => {
       mcp: { default_http_port: number; endpoint: string };
       config: {
         transcription_model: string;
+        realtime_session_model: string;
+        realtime_transcription_model: string;
         transcriber_model: string;
         post_processing_mode: string;
         transcription_prompt_configured: boolean;
         transcriber_prompt_configured: boolean;
+        config_warnings: string[];
         openai_api_key_configured: boolean;
       };
       stats: { total: number };
@@ -82,11 +85,14 @@ describe("recordings MCP HTTP transport", () => {
     expect(status.mcp.default_http_port).toBe(8873);
     expect(status.mcp.endpoint).toBe("/mcp");
     expect(status.config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(status.config.realtime_session_model).toBe("gpt-realtime");
+    expect(status.config.realtime_transcription_model).toBe("gpt-realtime-whisper");
     expect(status.config.transcriber_model).toBe("gpt-4o");
     expect(status.config.post_processing_mode).toBe("auto");
     expect(typeof status.config.transcription_prompt_configured).toBe("boolean");
     expect(typeof status.config.transcriber_prompt_configured).toBe("boolean");
     expect(typeof status.config.openai_api_key_configured).toBe("boolean");
+    expect(Array.isArray(status.config.config_warnings)).toBe(true);
     expect(typeof status.stats.total).toBe("number");
     expect(content?.[0]?.text).not.toContain("sk-");
     await client.close();

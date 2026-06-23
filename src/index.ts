@@ -84,6 +84,10 @@ export {
   getDataDir,
   ensureDataDir,
   DEFAULT_CONFIG,
+  DEFAULT_TRANSCRIPTION_MODEL,
+  DEFAULT_REALTIME_SESSION_MODEL,
+  DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+  normalizeModelSlots,
   normalizePostProcessingConfig,
   normalizePostProcessingMode,
 } from "./lib/config.js";

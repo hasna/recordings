@@ -50,6 +50,34 @@ struct CLIRunnerTests {
         ])
     }
 
+    @Test("saveTextCLIArgs persists realtime fast-path transcript")
+    func saveTextCLIArgsRealtimeFastPath() {
+        let args = RecordingEngine.saveTextCLIArgs(
+            textFile: "/tmp/transcript.txt",
+            audioPath: "/tmp/audio.wav",
+            activeProjectId: "project-1",
+            transcriberPrompt: "Format as notes",
+            postProcessingMode: "auto",
+            language: "en",
+            durationMs: 1200,
+            source: "realtime_fast_path",
+            modelUsed: "gpt-realtime-whisper"
+        )
+        #expect(args == [
+            "--json",
+            "--project", "project-1",
+            "save-text",
+            "--text-file", "/tmp/transcript.txt",
+            "--source", "realtime_fast_path",
+            "--model-used", "gpt-realtime-whisper",
+            "--post-processing", "auto",
+            "--audio-path", "/tmp/audio.wav",
+            "--duration-ms", "1200",
+            "--language", "en",
+            "--transcriber-prompt", "Format as notes",
+        ])
+    }
+
     @Test("parseError detects ERROR prefix")
     func parseError() {
         #expect(CLIRunner.parseError("ERROR: OpenAI API key not configured on this Mac") == "OpenAI API key not configured on this Mac")

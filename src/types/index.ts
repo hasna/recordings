@@ -88,6 +88,8 @@ export interface RecordingsConfig {
   openai_api_key: string;
   enhancement_api_key: string;
   transcription_model: string;
+  realtime_session_model?: string;
+  realtime_transcription_model?: string;
   enhancement_model: string;
   transcriber_model?: string;
   language: string;
@@ -104,6 +106,7 @@ export interface RecordingsConfig {
   db_path: string;
   audio_dir: string;
   max_recording_seconds: number; // Maximum recording duration in seconds (default: 1800 = 30 minutes)
+  config_warnings?: string[];
 }
 
 // ── Transcription Types ─────────────────────────────────────────────────────

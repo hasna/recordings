@@ -243,6 +243,72 @@ program
     }
   });
 
+// ── save-text ───────────────────────────────────────────────────────────────
+
+program
+  .command("save-text [text]")
+  .description("Save already-transcribed text as a recording")
+  .option("--text-file <path>", "Read transcript text from a UTF-8 file")
+  .option("--stdin", "Read transcript text from stdin")
+  .option("--audio-path <path>", "Audio file path associated with this transcript")
+  .option("--model-used <model>", "Model/source used to produce the raw transcript")
+  .option("--source <source>", "Transcript source label for metadata", "direct_text")
+  .option("--duration-ms <ms>", "Recording duration in milliseconds")
+  .option("-l, --language <lang>", "Language code")
+  .option("-t, --tags <tags>", "Comma-separated tags")
+  .option("--no-enhance", "Skip AI enhancement")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
+  .action(async (text: string | undefined, opts) => {
+    const rawText = await readSaveTextInput(text, opts);
+    const config = loadConfig();
+    ensureDataDir(config);
+    if (opts.language) config.language = opts.language;
+    applyEnhancementOptions(config, opts);
+
+    const processed = await processText(rawText, config);
+    const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
+    const parentOpts = program.opts();
+    const metadata = {
+      ...buildTranscriptionMetadata(config, processed, {
+        transcriberPromptFromRequest:
+          opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+      }),
+      transcription_source: opts.source || "direct_text",
+      realtime: {
+        fast_path: opts.source === "realtime_fast_path",
+        model: opts.modelUsed || config.realtime_transcription_model || "direct-input",
+        bounded_fallback: false,
+      },
+    };
+
+    const recording = createRecording({
+      audio_path: opts.audioPath || undefined,
+      raw_text: rawText,
+      processed_text: processed.mode === "enhanced" ? processed.text : undefined,
+      processing_mode: processed.mode,
+      model_used: opts.modelUsed || "direct-input",
+      enhancement_model: processed.enhancement_model || undefined,
+      duration_ms: opts.durationMs ? parseInt(opts.durationMs, 10) : 0,
+      language: opts.language || undefined,
+      tags,
+      agent_id: parentOpts.agent || undefined,
+      project_id: parentOpts.project || undefined,
+      session_id: parentOpts.session || undefined,
+      metadata,
+    });
+
+    if (parentOpts.json) {
+      console.log(JSON.stringify(recording, null, 2));
+    } else if (processed.mode === "enhanced") {
+      console.log(processed.text);
+    } else {
+      console.log(rawText);
+    }
+  });
+
 // ── rewrite ────────────────────────────────────────────────────────────────
 
 program
@@ -505,6 +571,8 @@ program
     if (!existsSync(configFile)) {
       const defaultConf = {
         transcription_model: "gpt-4o-transcribe",
+        realtime_session_model: "gpt-realtime",
+        realtime_transcription_model: "gpt-realtime-whisper",
         enhancement_model: "gpt-4o",
         transcriber_model: "gpt-4o",
         language: "en",
@@ -709,9 +777,12 @@ program
         enhancement_api_key_configured: Boolean(enhKey),
         enhancement_model: config.enhancement_model,
         transcriber_model: resolveTranscriberModel(config),
+        realtime_session_model: config.realtime_session_model,
+        realtime_transcription_model: config.realtime_transcription_model,
         post_processing_mode: config.post_processing_mode,
         transcription_prompt_configured: Boolean(config.transcription_prompt?.trim()),
         transcriber_prompt_configured: Boolean(config.transcriber_prompt?.trim()),
+        config_warnings: config.config_warnings ?? [],
       }, null, 2));
       return;
     }
@@ -1124,6 +1195,36 @@ function buildTranscriptionMetadata(
     },
     transcriber_model: resolveTranscriberModel(config),
   };
+}
+
+async function readSaveTextInput(
+  text: string | undefined,
+  opts: { textFile?: string; stdin?: boolean }
+): Promise<string> {
+  const sourceCount = [
+    text !== undefined,
+    opts.textFile !== undefined,
+    Boolean(opts.stdin),
+  ].filter(Boolean).length;
+
+  if (sourceCount !== 1) {
+    throw new Error("Provide transcript text as an argument, --text-file, or --stdin");
+  }
+
+  let rawText: string;
+  if (opts.textFile !== undefined) {
+    rawText = readFileSync(opts.textFile, "utf8");
+  } else if (opts.stdin) {
+    rawText = await Bun.stdin.text();
+  } else {
+    rawText = text ?? "";
+  }
+
+  if (!rawText.trim()) {
+    throw new Error("Transcript text is empty");
+  }
+
+  return rawText;
 }
 
 // ── Formatting helpers ──────────────────────────────────────────────────────

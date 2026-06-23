@@ -60,6 +60,11 @@ public struct TranscriptionResult: Identifiable, Sendable {
     }
 }
 
+private struct RealtimeFastPathSaveResult: Sendable {
+    let text: String?
+    let error: String?
+}
+
 public enum RecordingTrigger: Equatable, Sendable {
     case manual
     case fnKey
@@ -594,17 +599,73 @@ public final class RecordingEngine: ObservableObject {
             }
             self.log("captured pcm bytes=\(self.recordedPCM.count)")
 
-            let streamingResult = await client?.finish(timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds) ?? ""
+            let streamingResult = await client?.finish(timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds)
+                ?? RealtimeFinishResult(text: "", settled: false, error: nil)
 
             self.realtimeClient = nil
             self.streamingTask?.cancel()
             self.streamingTask = nil
 
-            let realtimeText = Self.normalizedRealtimeTranscript(streamingResult)
+            if let error = streamingResult.error {
+                self.log("realtime finish reported error=\(error)")
+            }
+
+            let realtimeText = Self.normalizedRealtimeTranscript(streamingResult.text)
+            let realtimeFastPathText = streamingResult.settled && streamingResult.error == nil ? Self.realtimeFastPathTranscript(
+                realtimeText: streamingResult.text,
+                pcmByteCount: self.recordedPCM.count,
+                language: self.transcriptionLanguage
+            ) : nil
 
             self.liveTranscriptionText = ""
 
-            if let audioPath, self.writeCapturedWAV(to: audioPath) {
+            if let realtimeFastPathText {
+                let pcmData = self.recordedPCM
+                let durationMs = Int(self.recordingDuration * 1_000)
+                self.log("using realtime fast path chars=\(realtimeFastPathText.count) pcmBytes=\(pcmData.count)")
+                let saveResult = await Self.saveRealtimeTranscript(
+                    text: realtimeFastPathText,
+                    audioPath: audioPath,
+                    pcmData: pcmData,
+                    durationMs: durationMs,
+                    activeProjectId: activeProjectId,
+                    transcriberPrompt: self.projectStore?.effectiveSystemPrompt ?? "",
+                    postProcessingMode: self.projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue,
+                    language: OpenAIAPIKeyStore.apiLanguageHint(for: self.transcriptionLanguage),
+                    homePath: self.home
+                )
+                guard let savedText = saveResult.text else {
+                    self.log("realtime fast-path save failed error=\(saveResult.error ?? "unknown")")
+                    if let audioPath, FileManager.default.fileExists(atPath: audioPath) || self.writeCapturedWAV(to: audioPath) {
+                        self.fallbackTranscribe(
+                            audioPath: audioPath,
+                            curMode: curMode,
+                            targetAppBundleIdentifier: targetAppBundleIdentifier,
+                            targetAppPid: targetAppPid,
+                            activeProjectId: activeProjectId,
+                            activeProjectName: activeProjectName,
+                            realtimeText: realtimeText
+                        )
+                    } else {
+                        self.finish(saveResult.error ?? "Failed to save transcription")
+                    }
+                    self.activeAudioPath = nil
+                    self.recordedPCM.removeAll(keepingCapacity: true)
+                    return
+                }
+                self.isTranscribing = false
+                self.finishWithText(
+                    savedText,
+                    curMode: curMode,
+                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
+                    activeProjectId: activeProjectId,
+                    activeProjectName: activeProjectName
+                )
+            } else if let audioPath, self.writeCapturedWAV(to: audioPath) {
+                if realtimeText != nil, !streamingResult.settled {
+                    self.log("realtime fast path skipped because final transcript did not settle")
+                }
                 self.log("transcribing captured full audio with quality model audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
@@ -917,21 +978,68 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
-    private nonisolated static func saveCapturedWAVInBackground(pcmData: Data, audioPath: String, homePath: String) {
-        Task.detached(priority: .utility) {
+    private nonisolated static func saveRealtimeTranscript(
+        text: String,
+        audioPath: String?,
+        pcmData: Data,
+        durationMs: Int,
+        activeProjectId: String?,
+        transcriberPrompt: String,
+        postProcessingMode: String,
+        language: String,
+        homePath: String
+    ) async -> RealtimeFastPathSaveResult {
+        await Task.detached(priority: .utility) {
             do {
-                try Self.writeWAV(
-                    pcmData: pcmData,
-                    sampleRate: 24_000,
-                    channelCount: 1,
-                    bitsPerSample: 16,
-                    to: URL(fileURLWithPath: audioPath)
+                var savedAudioPath: String?
+                if let audioPath, !pcmData.isEmpty {
+                    try Self.writeWAV(
+                        pcmData: pcmData,
+                        sampleRate: 24_000,
+                        channelCount: 1,
+                        bitsPerSample: 16,
+                        to: URL(fileURLWithPath: audioPath)
+                    )
+                    savedAudioPath = audioPath
+                    NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
+                }
+
+                let textFile = try Self.writeTemporaryTranscript(text: text, homePath: homePath)
+                defer { try? FileManager.default.removeItem(atPath: textFile) }
+
+                let args = saveTextCLIArgs(
+                    textFile: textFile,
+                    audioPath: savedAudioPath,
+                    activeProjectId: activeProjectId,
+                    transcriberPrompt: transcriberPrompt,
+                    postProcessingMode: postProcessingMode,
+                    language: language,
+                    durationMs: durationMs,
+                    source: "realtime_fast_path",
+                    modelUsed: RealtimeTranscriptionClient.transcriptionModelID
                 )
-                NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
+                let output = CLIRunner.run(args, home: homePath)
+                if let error = CLIRunner.parseError(output) {
+                    return RealtimeFastPathSaveResult(text: nil, error: error)
+                }
+
+                NativeAppLog.write("realtime fast-path save completed", homePath: homePath)
+                return RealtimeFastPathSaveResult(text: CLIRunner.parseJSON(output) ?? text, error: nil)
             } catch {
-                NativeAppLog.write("failed to save captured wav error=\(error.localizedDescription)", homePath: homePath)
+                return RealtimeFastPathSaveResult(text: nil, error: error.localizedDescription)
             }
-        }
+        }.value
+    }
+
+    private nonisolated static func writeTemporaryTranscript(text: String, homePath: String) throws -> String {
+        let dir = URL(fileURLWithPath: homePath)
+            .appendingPathComponent(".hasna", isDirectory: true)
+            .appendingPathComponent("recordings", isDirectory: true)
+            .appendingPathComponent("tmp", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("realtime-\(UUID().uuidString).txt")
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url.path
     }
 
     private nonisolated static func writeWAV(pcmData: Data, sampleRate: UInt32, channelCount: UInt16, bitsPerSample: UInt16, to url: URL) throws {
@@ -1060,6 +1168,44 @@ public final class RecordingEngine: ObservableObject {
             args += ["--transcriber-prompt", prompt]
         }
 
+        return args
+    }
+
+    nonisolated static func saveTextCLIArgs(
+        textFile: String,
+        audioPath: String?,
+        activeProjectId: String?,
+        transcriberPrompt: String,
+        postProcessingMode: String,
+        language: String,
+        durationMs: Int,
+        source: String,
+        modelUsed: String
+    ) -> [String] {
+        var args = ["--json"]
+        if let activeProjectId, !activeProjectId.isEmpty {
+            args += ["--project", activeProjectId]
+        }
+        args += [
+            "save-text",
+            "--text-file", textFile,
+            "--source", source,
+            "--model-used", modelUsed,
+            "--post-processing", PostProcessingMode(rawValue: postProcessingMode)?.rawValue ?? PostProcessingMode.auto.rawValue,
+        ]
+        if let audioPath, !audioPath.isEmpty {
+            args += ["--audio-path", audioPath]
+        }
+        if durationMs > 0 {
+            args += ["--duration-ms", String(durationMs)]
+        }
+        if !language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--language", language]
+        }
+        let prompt = transcriberPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !prompt.isEmpty {
+            args += ["--transcriber-prompt", prompt]
+        }
         return args
     }
 

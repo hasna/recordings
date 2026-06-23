@@ -51,6 +51,12 @@ when trigger phrases or instruction patterns are detected, or **Always** to run 
 transcriber cleanup prompt for every recording. Global cleanup instructions can be set in
 Settings, and project-specific instructions are appended when a project is active.
 
+The native app uses OpenAI realtime transcription for the stop-and-paste path: settled
+`gpt-realtime-whisper` text is saved and pasted immediately, while full-file
+`gpt-4o-transcribe` remains the bounded quality fallback when realtime is empty,
+unsettled, or cannot be saved. Raw and processed transcript fields are still stored
+separately, so cleanup instructions never replace the verbatim transcript.
+
 ## CLI Usage
 
 ```bash
@@ -62,6 +68,7 @@ recordings --help
 - `recordings transcribe <file> --stream`
 - `recordings transcribe <file> --prompt "DALL-E, Hasna, gpt-4o"`
 - `recordings transcribe <file> --transcriber-prompt "Clean up punctuation only" --post-processing always`
+- `recordings save-text --text-file transcript.txt --source realtime_fast_path`
 - `recordings rewrite <text> --instruction "<instruction>"`
 - `recordings list`
 - `recordings show <id>`
@@ -119,7 +126,14 @@ export RECORDINGS_TRANSCRIPTION_PROMPT="Hasna, DALL-E, gpt-4o"
 export RECORDINGS_TRANSCRIBER_PROMPT="Format as polished meeting notes"
 export RECORDINGS_POST_PROCESSING_MODE=always
 export RECORDINGS_TRANSCRIBER_MODEL=gpt-4o
+export RECORDINGS_MODEL=gpt-4o-transcribe
+export RECORDINGS_REALTIME_SESSION_MODEL=gpt-realtime
+export RECORDINGS_REALTIME_TRANSCRIPTION_MODEL=gpt-realtime-whisper
 ```
+
+`RECORDINGS_MODEL` is the bounded file-transcription model. Realtime session and realtime
+transcription models are separate slots; `recordings check --json` reports all three and
+includes `config_warnings` if a model is placed in the wrong slot.
 
 ## MCP Server
 

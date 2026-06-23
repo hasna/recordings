@@ -281,6 +281,8 @@ registerTool(
         },
         config: {
           transcription_model: cfg.transcription_model,
+          realtime_session_model: cfg.realtime_session_model,
+          realtime_transcription_model: cfg.realtime_transcription_model,
           enhancement_model: cfg.enhancement_model,
           transcriber_model: resolveTranscriberModel(cfg),
           language: cfg.language,
@@ -293,6 +295,7 @@ registerTool(
           audio_dir: cfg.audio_dir,
           openai_api_key_configured: Boolean(cfg.openai_api_key),
           enhancement_api_key_configured: Boolean(cfg.enhancement_api_key || cfg.openai_api_key),
+          config_warnings: cfg.config_warnings ?? [],
         },
         stats,
       }, null, 2));

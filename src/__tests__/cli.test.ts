@@ -242,11 +242,17 @@ describe("recordings CLI", () => {
       openai_api_key_configured: boolean;
       enhancement_api_key_configured: boolean;
       enhancement_model: string;
+      realtime_session_model: string;
+      realtime_transcription_model: string;
+      config_warnings: string[];
     };
     expect(typeof report.recording.available).toBe("boolean");
     expect(report.openai_api_key_configured).toBe(true);
     expect(report.enhancement_api_key_configured).toBe(true);
     expect(report.enhancement_model).toBe("gpt-4o");
+    expect(report.realtime_session_model).toBe("gpt-realtime");
+    expect(report.realtime_transcription_model).toBe("gpt-realtime-whisper");
+    expect(Array.isArray(report.config_warnings)).toBe(true);
   });
 
   test("--json transcribe emits only one JSON payload on stdout", async () => {
@@ -400,6 +406,87 @@ describe("recordings CLI", () => {
     } finally {
       apiServer.stop(true);
     }
+  });
+
+  test("--json save-text persists realtime fast-path text without audio transcription", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-save-text-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const audioPath = join(home, "sample.wav");
+    const textPath = join(home, "transcript.txt");
+    const transcript = "hello from realtime\nwith \"quotes\" and multiple lines";
+    writeFileSync(textPath, transcript);
+
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli/index.ts",
+        "--json",
+        "save-text",
+        "--text-file",
+        textPath,
+        "--audio-path",
+        audioPath,
+        "--source",
+        "realtime_fast_path",
+        "--model-used",
+        "gpt-realtime-whisper",
+        "--post-processing",
+        "off",
+        "--language",
+        "en",
+        "--duration-ms",
+        "1200",
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          OPENAI_API_KEY: "",
+          RECORDINGS_API_KEY: "",
+          RECORDINGS_ENHANCEMENT_KEY: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const recording = JSON.parse(stdout) as {
+      audio_path: string;
+      raw_text: string;
+      processing_mode: string;
+      model_used: string;
+      duration_ms: number;
+      language: string;
+      metadata: {
+        transcription_source: string;
+        realtime: { fast_path: boolean; model: string; bounded_fallback: boolean };
+        post_processing: { mode: string; applied: boolean };
+      };
+    };
+    expect(recording.audio_path).toBe(audioPath);
+    expect(recording.raw_text).toBe(transcript);
+    expect(recording.processing_mode).toBe("raw");
+    expect(recording.model_used).toBe("gpt-realtime-whisper");
+    expect(recording.duration_ms).toBe(1200);
+    expect(recording.language).toBe("en");
+    expect(recording.metadata.transcription_source).toBe("realtime_fast_path");
+    expect(recording.metadata.realtime).toEqual({
+      fast_path: true,
+      model: "gpt-realtime-whisper",
+      bounded_fallback: false,
+    });
+    expect(recording.metadata.post_processing.mode).toBe("off");
+    expect(recording.metadata.post_processing.applied).toBe(false);
   });
 
   test("mcp installer configures stdio args for Codex and Gemini", async () => {

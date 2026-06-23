@@ -14,6 +14,8 @@ const envKeys = [
   "RECORDINGS_API_KEY",
   "RECORDINGS_ENHANCEMENT_KEY",
   "RECORDINGS_MODEL",
+  "RECORDINGS_REALTIME_SESSION_MODEL",
+  "RECORDINGS_REALTIME_TRANSCRIPTION_MODEL",
   "RECORDINGS_ENHANCEMENT_MODEL",
   "RECORDINGS_TRANSCRIBER_MODEL",
   "RECORDINGS_LANGUAGE",
@@ -83,6 +85,8 @@ afterEach(() => {
 describe("DEFAULT_CONFIG", () => {
   test("has expected default values", () => {
     expect(DEFAULT_CONFIG.transcription_model).toBe("gpt-4o-transcribe");
+    expect(DEFAULT_CONFIG.realtime_session_model).toBe("gpt-realtime");
+    expect(DEFAULT_CONFIG.realtime_transcription_model).toBe("gpt-realtime-whisper");
     expect(DEFAULT_CONFIG.enhancement_model).toBe("gpt-4o");
     expect(DEFAULT_CONFIG.transcriber_model).toBe("gpt-4o");
     expect(DEFAULT_CONFIG.language).toBe("en");
@@ -104,6 +108,8 @@ describe("loadConfig", () => {
   test("returns defaults when no config file or env vars", () => {
     const config = loadConfig(join(tempDir, "nonexistent.json"));
     expect(config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(config.realtime_session_model).toBe("gpt-realtime");
+    expect(config.realtime_transcription_model).toBe("gpt-realtime-whisper");
     expect(config.enhancement_model).toBe("gpt-4o");
     expect(config.transcriber_model).toBe("gpt-4o");
     expect(config.language).toBe("en");
@@ -183,6 +189,35 @@ describe("loadConfig", () => {
     process.env.RECORDINGS_MODEL = "whisper-1";
     const config = loadConfig(join(tempDir, "nonexistent.json"));
     expect(config.transcription_model).toBe("whisper-1");
+  });
+
+  test("realtime-only model is rejected for bounded transcription", () => {
+    process.env.RECORDINGS_MODEL = "gpt-realtime-2";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(config.config_warnings?.some((warning) =>
+      warning.includes("bounded transcription uses gpt-4o-transcribe")
+    )).toBe(true);
+  });
+
+  test("transcription-only model is rejected for realtime session slot", () => {
+    process.env.RECORDINGS_REALTIME_SESSION_MODEL = "gpt-4o-transcribe";
+    process.env.RECORDINGS_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.realtime_session_model).toBe("gpt-realtime");
+    expect(config.realtime_transcription_model).toBe("gpt-realtime-whisper");
+    expect(config.config_warnings?.some((warning) =>
+      warning.includes("Ignoring realtime session model gpt-4o-transcribe")
+    )).toBe(true);
+  });
+
+  test("bounded transcription model is rejected for realtime transcription slot", () => {
+    process.env.RECORDINGS_REALTIME_TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.realtime_transcription_model).toBe("gpt-realtime-whisper");
+    expect(config.config_warnings?.some((warning) =>
+      warning.includes("Ignoring realtime transcription model gpt-4o-transcribe")
+    )).toBe(true);
   });
 
   test("env var RECORDINGS_ENHANCEMENT_MODEL overrides enhancement_model", () => {
