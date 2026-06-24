@@ -37,17 +37,23 @@ export function registerStorageCommands(program: Command): void {
     .command("status")
     .description("Show local database and storage sync status")
     .option("--json", "Output JSON")
-    .action((opts: { json?: boolean }) => {
+    .option("--verbose", "Show database path and per-table details")
+    .action((opts: { json?: boolean; verbose?: boolean }) => {
       const status = getStorageStatus();
       if (shouldJson(program, opts)) {
         printJson(status);
         return;
       }
-      console.log(`Mode: ${status.mode}`);
-      console.log(`Enabled: ${status.enabled ? "yes" : "no"}`);
-      console.log(`Database: ${status.db_path}`);
+      const totalRows = status.tables.reduce((sum, table) => sum + table.rows, 0);
+      console.log(`Storage: ${status.mode} (${status.enabled ? "enabled" : "local only"})`);
+      console.log(`Tables: ${status.tables.length} | Rows: ${totalRows}`);
       for (const table of status.tables) {
         console.log(`  ${table.table}: ${table.rows}`);
+      }
+      if (opts.verbose) {
+        console.log(`Database: ${status.db_path}`);
+      } else {
+        console.log(chalk.dim("Use --verbose for the database path, or --json for the full status object."));
       }
     });
 
