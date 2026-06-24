@@ -70,11 +70,34 @@ recordings --help
 - `recordings transcribe <file> --transcriber-prompt "Clean up punctuation only" --post-processing always`
 - `recordings save-text --text-file transcript.txt --source realtime_fast_path`
 - `recordings rewrite <text> --instruction "<instruction>"`
-- `recordings list`
-- `recordings show <id>`
-- `recordings search <query>`
+- `recordings list --limit 20 --cursor 0`
+- `recordings list --verbose`
+- `recordings show <id>` / `recordings inspect <id>`
+- `recordings search <query> --limit 20 --cursor 0`
 - `recordings delete <id>`
 - `recordings stats`
+
+### Compact Output
+
+Agent-facing list and status commands are compact by default. Human output shows
+bounded rows, short text previews, totals, pagination cursors, and the next detail
+command instead of dumping entire recording objects into the terminal.
+
+Use progressive detail flags intentionally:
+
+```bash
+recordings list                 # compact rows, default limit 20
+recordings list --cursor 20     # next page
+recordings list --verbose       # more row metadata, still no full transcript dump
+recordings show <id>            # full recording detail
+recordings inspect <id>         # alias for show
+recordings --json list -n 100   # machine-readable records for integrations
+recordings app status --verbose # paths, code hash, and log path
+recordings storage status --verbose
+```
+
+For terminal output, oversized list limits are capped at 50 rows. Existing `--json`
+paths preserve full machine-readable records where possible.
 
 ### Transcription Prompts
 
@@ -158,6 +181,11 @@ For MCP, `transcribe_audio` accepts `transcription_prompt` (or legacy `prompt`) 
 context, `transcriber_prompt` for cleanup instructions, and `post_processing_mode` with
 `off`, `auto`, or `always`. Tool results preserve `raw_text` and return `processed_text`
 only when post-processing actually produced enhanced output.
+
+MCP `list_recordings` and `search_recordings` are also compact by default. They cap
+compact output at 50 rows, cap richer `full=true` metadata rows at 10, keep previews
+bounded, return next cursor hints, and point agents to `get_recording { id }` for full
+transcript details.
 
 ## Storage Sync
 

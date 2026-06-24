@@ -13,6 +13,10 @@ function text(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
+function plainText(value: string) {
+  return { content: [{ type: "text" as const, text: value }] };
+}
+
 function errorText(error: unknown) {
   return {
     content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
@@ -23,11 +27,21 @@ function errorText(error: unknown) {
 export function registerRecordingsStorageTools(server: McpServer): void {
   server.tool(
     "recordings_storage_status",
-    "Show recordings local database and storage sync status",
-    {},
-    async () => {
+    "Show compact recordings local database and storage sync status",
+    {
+      verbose: z.boolean().optional().describe("Return full JSON storage status"),
+    },
+    async ({ verbose }) => {
       try {
-        return text(getStorageStatus());
+        const status = getStorageStatus();
+        if (verbose) return text(status);
+        const totalRows = status.tables.reduce((sum, table) => sum + table.rows, 0);
+        const tables = status.tables.map((table) => `${table.table}:${table.rows}`).join(", ");
+        return plainText(
+          `Storage: ${status.mode} (${status.enabled ? "enabled" : "local only"}) | tables: ${status.tables.length} | rows: ${totalRows}\n` +
+          `Tables: ${tables}\n` +
+          "Use verbose=true for db path and full status JSON."
+        );
       } catch (error) {
         return errorText(error);
       }

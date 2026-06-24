@@ -63,6 +63,7 @@ export {
   createRecording,
   getRecording,
   listRecordings,
+  countRecordings,
   deleteRecording,
   searchRecordings,
   getRecordingStats,

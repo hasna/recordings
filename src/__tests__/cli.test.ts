@@ -489,6 +489,124 @@ describe("recordings CLI", () => {
     expect(recording.metadata.post_processing.applied).toBe(false);
   });
 
+  test("list is compact by default while json and detail commands preserve full text", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-compact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const longText = `First compact transcript ${"middle words ".repeat(30)}hidden-tail-token`;
+
+    const env = {
+      ...process.env,
+      HOME: home,
+      OPENAI_API_KEY: "",
+      RECORDINGS_API_KEY: "",
+      RECORDINGS_ENHANCEMENT_KEY: "",
+    };
+
+    const saveProc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli/index.ts",
+        "--json",
+        "save-text",
+        longText,
+        "--post-processing",
+        "off",
+      ],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [saveStdout, saveStderr, saveExit] = await Promise.all([
+      new Response(saveProc.stdout).text(),
+      new Response(saveProc.stderr).text(),
+      saveProc.exited,
+    ]);
+    expect(saveExit).toBe(0);
+    expect(saveStderr).toBe("");
+    const saved = JSON.parse(saveStdout) as { id: string; raw_text: string };
+    expect(saved.raw_text).toBe(longText);
+
+    const listProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "list", "-n", "1"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [listStdout, listStderr, listExit] = await Promise.all([
+      new Response(listProc.stdout).text(),
+      new Response(listProc.stderr).text(),
+      listProc.exited,
+    ]);
+    expect(listExit).toBe(0);
+    expect(listStderr).toBe("");
+    expect(listStdout).toContain("recordings: showing 1 of 1");
+    expect(listStdout).toContain(saved.id.slice(0, 8));
+    expect(listStdout).toContain("Details: recordings show <id> or inspect <id>");
+    expect(listStdout).not.toContain("hidden-tail-token");
+
+    const jsonProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "list", "-n", "1"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [jsonStdout, jsonStderr, jsonExit] = await Promise.all([
+      new Response(jsonProc.stdout).text(),
+      new Response(jsonProc.stderr).text(),
+      jsonProc.exited,
+    ]);
+    expect(jsonExit).toBe(0);
+    expect(jsonStderr).toBe("");
+    const listed = JSON.parse(jsonStdout) as Array<{ raw_text: string }>;
+    expect(listed[0]!.raw_text).toBe(longText);
+
+    const showProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "inspect", saved.id.slice(0, 8)],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [showStdout, showStderr, showExit] = await Promise.all([
+      new Response(showProc.stdout).text(),
+      new Response(showProc.stderr).text(),
+      showProc.exited,
+    ]);
+    expect(showExit).toBe(0);
+    expect(showStderr).toBe("");
+    expect(showStdout).toContain("hidden-tail-token");
+  });
+
+  test("list prints cursor hints and caps oversized human limits", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-cursor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const env = {
+      ...process.env,
+      HOME: home,
+      OPENAI_API_KEY: "",
+      RECORDINGS_API_KEY: "",
+      RECORDINGS_ENHANCEMENT_KEY: "",
+    };
+
+    for (const text of ["one", "two"]) {
+      const proc = Bun.spawn(
+        [process.execPath, "src/cli/index.ts", "save-text", text, "--post-processing", "off"],
+        { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      );
+      const exitCode = await proc.exited;
+      expect(exitCode).toBe(0);
+    }
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "list", "-n", "100"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("recordings: showing 2 of 2");
+    expect(stdout).toContain("limit 50");
+    expect(stdout).toContain("Limit capped at 50");
+  });
+
   test("mcp installer configures stdio args for Codex and Gemini", async () => {
     const home = join(tmpdir(), `open-recordings-cli-mcp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);

@@ -12,6 +12,7 @@ import {
   createRecording,
   getRecording,
   listRecordings,
+  countRecordings,
   deleteRecording,
   searchRecordings,
   getRecordingStats,
@@ -30,7 +31,7 @@ import {
 } from "../lib/recorder.js";
 import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
 import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
-import type { Recording } from "../types/index.js";
+import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { registerStorageCommands } from "./storage.js";
 import { applyEnhancementOptions } from "./options.js";
@@ -50,6 +51,10 @@ program
 
 registerStorageCommands(program);
 registerEventsCommands(program, { source: "recordings" });
+
+const DEFAULT_LIST_LIMIT = 20;
+const MAX_HUMAN_LIST_LIMIT = 50;
+const DEFAULT_LOG_LINES = 40;
 
 // ── record ──────────────────────────────────────────────────────────────────
 
@@ -348,44 +353,47 @@ program
 
 program
   .command("list")
-  .description("List recordings")
+  .description("List recordings in compact form")
   .option("-n, --limit <n>", "Max results", "20")
+  .option("--offset <n>", "Skip this many results")
+  .option("--cursor <n>", "Pagination cursor alias for --offset")
   .option("--mode <mode>", "Filter by mode: raw or enhanced")
   .option("-t, --tags <tags>", "Filter by tags")
   .option("--since <date>", "After date (ISO)")
   .option("--until <date>", "Before date (ISO)")
+  .option("--verbose", "Show more metadata per row without dumping full text")
   .action((opts) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
+    const pagination = resolvePagination(opts, parentOpts);
 
-    const recordings = listRecordings({
-      limit: parseInt(opts.limit, 10),
+    const filter: RecordingFilter = {
+      limit: pagination.limit,
+      offset: pagination.offset,
       processing_mode: opts.mode,
-      tags: opts.tags ? opts.tags.split(",") : undefined,
+      tags: parseCsvList(opts.tags),
       since: opts.since,
       until: opts.until,
       agent_id: parentOpts.agent,
       project_id: parentOpts.project,
       session_id: parentOpts.session,
-    });
+    };
+    const recordings = listRecordings(filter);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recordings, null, 2));
       return;
     }
 
-    if (recordings.length === 0) {
-      console.log(chalk.dim("No recordings found."));
-      return;
-    }
-
-    console.log(
-      chalk.bold(`${recordings.length} recording(s):\n`)
-    );
-    for (const r of recordings) {
-      console.log(formatRecordingLine(r));
-    }
+    printRecordingCollection("recordings", recordings, {
+      total: countRecordings(withoutPagination(filter)),
+      offset: pagination.offset,
+      limit: pagination.limit,
+      verbose: Boolean(opts.verbose),
+      capped: pagination.capped,
+      empty: "No recordings found.",
+    });
   });
 
 // ── show ────────────────────────────────────────────────────────────────────
@@ -393,56 +401,59 @@ program
 program
   .command("show <id>")
   .description("Show recording details")
-  .action((id) => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
-    const parentOpts = program.opts();
+  .action((id) => printRecordingDetail(id));
 
-    const recording = getRecording(id);
-    if (!recording) {
-      console.error(chalk.red(`Recording not found: ${id}`));
-      process.exit(1);
-    }
-
-    if (parentOpts.json) {
-      console.log(JSON.stringify(recording, null, 2));
-      return;
-    }
-
-    console.log(formatRecordingDetail(recording));
-  });
+program
+  .command("inspect <id>")
+  .description("Inspect recording details (alias for show)")
+  .action((id) => printRecordingDetail(id));
 
 // ── search ──────────────────────────────────────────────────────────────────
 
 program
   .command("search <query>")
-  .description("Search recordings by text content")
+  .description("Search recordings by text content in compact form")
   .option("-n, --limit <n>", "Max results", "20")
+  .option("--offset <n>", "Skip this many results")
+  .option("--cursor <n>", "Pagination cursor alias for --offset")
+  .option("--mode <mode>", "Filter by mode: raw or enhanced")
+  .option("-t, --tags <tags>", "Filter by tags")
+  .option("--since <date>", "After date (ISO)")
+  .option("--until <date>", "Before date (ISO)")
+  .option("--session <id>", "Filter by session ID")
+  .option("--verbose", "Show more metadata per row without dumping full text")
   .action((query, opts) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
+    const pagination = resolvePagination(opts, parentOpts);
 
-    const results = searchRecordings(query, {
-      limit: parseInt(opts.limit, 10),
+    const filter: RecordingFilter = {
+      limit: pagination.limit,
+      offset: pagination.offset,
+      processing_mode: opts.mode,
+      tags: parseCsvList(opts.tags),
+      since: opts.since,
+      until: opts.until,
       agent_id: parentOpts.agent,
       project_id: parentOpts.project,
-    });
+      session_id: opts.session || parentOpts.session,
+    };
+    const results = searchRecordings(query, filter);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(results, null, 2));
       return;
     }
 
-    if (results.length === 0) {
-      console.log(chalk.dim("No results."));
-      return;
-    }
-
-    console.log(chalk.bold(`${results.length} result(s):\n`));
-    for (const r of results) {
-      console.log(formatRecordingLine(r));
-    }
+    printRecordingCollection("results", results, {
+      total: countRecordings(withoutPagination({ ...filter, search: query })),
+      offset: pagination.offset,
+      limit: pagination.limit,
+      verbose: Boolean(opts.verbose),
+      capped: pagination.capped,
+      empty: "No results.",
+    });
   });
 
 // ── delete ──────────────────────────────────────────────────────────────────
@@ -487,10 +498,14 @@ program
     console.log(
       `  Duration:   ${(stats.total_duration_ms / 1000).toFixed(1)}s`
     );
-    if (Object.keys(stats.by_model).length > 0) {
+    const modelEntries = Object.entries(stats.by_model).sort((a, b) => b[1] - a[1]);
+    if (modelEntries.length > 0) {
       console.log(`  By model:`);
-      for (const [model, count] of Object.entries(stats.by_model)) {
+      for (const [model, count] of modelEntries.slice(0, 10)) {
         console.log(`    ${model}: ${count}`);
+      }
+      if (modelEntries.length > 10) {
+        console.log(chalk.dim(`    ...${modelEntries.length - 10} more model(s). Use --json for the full breakdown.`));
       }
     }
   });
@@ -500,28 +515,42 @@ program
 program
   .command("agents")
   .description("List registered agents")
-  .action(() => {
+  .option("-n, --limit <n>", "Max results")
+  .option("--offset <n>", "Skip this many results")
+  .option("--cursor <n>", "Pagination cursor alias for --offset")
+  .option("--verbose", "Show descriptions and timestamps")
+  .action((opts) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
+    const pagination = resolvePagination(opts, parentOpts);
 
     const agents = listAgents();
+    const page = parentOpts.json
+      ? maybePageJson(agents, pagination, opts)
+      : pageItems(agents, pagination);
 
     if (parentOpts.json) {
-      console.log(JSON.stringify(agents, null, 2));
+      console.log(JSON.stringify(page, null, 2));
       return;
     }
 
-    if (agents.length === 0) {
-      console.log(chalk.dim("No agents registered."));
+    if (page.length === 0) {
+      console.log(chalk.dim(agents.length === 0 ? "No agents registered." : "No agents at this cursor."));
+      if (agents.length > 0) console.log(chalk.dim("Try a lower --cursor."));
       return;
     }
 
-    for (const a of agents) {
-      console.log(
-        `${chalk.cyan(a.id)} ${chalk.bold(a.name)} (${a.role}) — last seen ${a.last_seen_at}`
-      );
+    console.log(formatPageHeader("agents", page.length, agents.length, pagination.offset, pagination.limit));
+    for (const a of page) {
+      const line = `${chalk.cyan(a.id)} ${chalk.bold(a.name)} (${a.role})`;
+      if (opts.verbose) {
+        console.log(`${line}\n  last seen: ${a.last_seen_at}${a.description ? `\n  ${truncateText(a.description, 140)}` : ""}`);
+      } else {
+        console.log(`${line} — ${relativeHint(a.last_seen_at)}`);
+      }
     }
+    printPaginationHints(page.length, agents.length, pagination);
   });
 
 // ── projects ────────────────────────────────────────────────────────────────
@@ -529,28 +558,42 @@ program
 program
   .command("projects")
   .description("List registered projects")
-  .action(() => {
+  .option("-n, --limit <n>", "Max results")
+  .option("--offset <n>", "Skip this many results")
+  .option("--cursor <n>", "Pagination cursor alias for --offset")
+  .option("--verbose", "Show descriptions and timestamps")
+  .action((opts) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
+    const pagination = resolvePagination(opts, parentOpts);
 
     const projects = listProjects();
+    const page = parentOpts.json
+      ? maybePageJson(projects, pagination, opts)
+      : pageItems(projects, pagination);
 
     if (parentOpts.json) {
-      console.log(JSON.stringify(projects, null, 2));
+      console.log(JSON.stringify(page, null, 2));
       return;
     }
 
-    if (projects.length === 0) {
-      console.log(chalk.dim("No projects registered."));
+    if (page.length === 0) {
+      console.log(chalk.dim(projects.length === 0 ? "No projects registered." : "No projects at this cursor."));
+      if (projects.length > 0) console.log(chalk.dim("Try a lower --cursor."));
       return;
     }
 
-    for (const p of projects) {
-      console.log(
-        `${chalk.cyan(p.id.slice(0, 8))} ${chalk.bold(p.name)} — ${p.path}`
-      );
+    console.log(formatPageHeader("projects", page.length, projects.length, pagination.offset, pagination.limit));
+    for (const p of page) {
+      const line = `${chalk.cyan(p.id.slice(0, 8))} ${chalk.bold(p.name)}`;
+      if (opts.verbose) {
+        console.log(`${line}\n  path: ${p.path}\n  updated: ${p.updated_at}${p.description ? `\n  ${truncateText(p.description, 140)}` : ""}`);
+      } else {
+        console.log(`${line} — ${truncatePath(p.path, 96)}`);
+      }
     }
+    printPaginationHints(page.length, projects.length, pagination);
   });
 
 // ── init ────────────────────────────────────────────────────────────────────
@@ -621,23 +664,31 @@ appCommand
 appCommand
   .command("status")
   .description("Show installed Recordings.app status")
-  .action(() => {
+  .option("--verbose", "Show package paths, code hash, and log path")
+  .action((opts: { verbose?: boolean }) => {
     const status = getMacOSAppStatus();
     if (program.opts().json) {
       console.log(JSON.stringify(status, null, 2));
       return;
     }
 
-    console.log(`Package: ${status.package_root}`);
+    console.log(chalk.bold("Recordings.app"));
+    console.log(`Installed: ${status.installed ? "yes" : "no"}`);
+    console.log(`Executable: ${status.executable ? "available" : "missing"}`);
     console.log(`Installer: ${status.installer_available ? "available" : "missing"}`);
     console.log(`Native sources: ${status.native_sources_available ? "available" : "missing"}`);
-    console.log(`Installed app: ${status.installed ? status.installed_app_path : "missing"}`);
-    console.log(`Executable: ${status.executable ? "available" : "missing"}`);
-    console.log(`Code hash: ${status.app_code_hash ?? "unavailable"}`);
     if (process.platform === "darwin") {
       console.log(`Microphone: ${status.microphone_permission}`);
       console.log(`Accessibility: ${status.accessibility_permission}`);
+    }
+    if (opts.verbose) {
+      console.log(`Package: ${status.package_root}`);
+      console.log(`Installed app: ${status.installed ? status.installed_app_path : "missing"}`);
+      console.log(`Executable path: ${status.executable_path}`);
+      console.log(`Code hash: ${status.app_code_hash ?? "unavailable"}`);
       console.log(`Log: ${status.log_path}`);
+    } else {
+      console.log(chalk.dim("Use --verbose for paths/code hash/log, or --json for the full status object."));
     }
   });
 
@@ -712,14 +763,14 @@ appCommand
 appCommand
   .command("log")
   .description("Show the Recordings.app diagnostic log")
-  .option("-n, --lines <lines>", "Number of lines to print", "120")
+  .option("-n, --lines <lines>", "Number of lines to print", String(DEFAULT_LOG_LINES))
   .action((opts: { lines: string }) => {
     const status = getMacOSAppStatus();
     if (!existsSync(status.log_path)) {
       console.log("");
       return;
     }
-    const lines = Math.max(1, parseInt(opts.lines, 10) || 120);
+    const lines = Math.max(1, parseInt(opts.lines, 10) || DEFAULT_LOG_LINES);
     const result = spawnSync("tail", ["-n", String(lines), status.log_path], {
       encoding: "utf8",
     });
@@ -1229,20 +1280,176 @@ async function readSaveTextInput(
 
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
+type PaginationOptions = {
+  limit?: string;
+  offset?: string;
+  cursor?: string;
+};
+
+type ResolvedPagination = {
+  limit: number;
+  offset: number;
+  capped: boolean;
+};
+
+function resolvePagination(
+  opts: PaginationOptions,
+  parentOpts: { json?: boolean },
+  defaultLimit = DEFAULT_LIST_LIMIT
+): ResolvedPagination {
+  const requestedLimit = parseNonNegativeInt(opts.limit, defaultLimit) || defaultLimit;
+  const offset = parseNonNegativeInt(opts.cursor ?? opts.offset, 0);
+  const humanLimit = Math.min(requestedLimit, MAX_HUMAN_LIST_LIMIT);
+  return {
+    limit: parentOpts.json ? requestedLimit : humanLimit,
+    offset,
+    capped: !parentOpts.json && requestedLimit > humanLimit,
+  };
+}
+
+function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function parseCsvList(value: string | undefined): string[] | undefined {
+  if (!value) return undefined;
+  const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : undefined;
+}
+
+function withoutPagination(filter: RecordingFilter): RecordingFilter {
+  const { limit: _limit, offset: _offset, ...rest } = filter;
+  return rest;
+}
+
+function maybePageJson<T>(
+  items: T[],
+  pagination: ResolvedPagination,
+  opts: PaginationOptions
+): T[] {
+  if (opts.limit === undefined && opts.offset === undefined && opts.cursor === undefined) {
+    return items;
+  }
+  return items.slice(pagination.offset, pagination.offset + pagination.limit);
+}
+
+function pageItems<T>(items: T[], pagination: ResolvedPagination): T[] {
+  return items.slice(pagination.offset, pagination.offset + pagination.limit);
+}
+
+function formatPageHeader(
+  label: string,
+  shown: number,
+  total: number,
+  offset: number,
+  limit: number
+): string {
+  const start = total === 0 ? 0 : offset + 1;
+  const end = offset + shown;
+  return chalk.bold(`${label}: showing ${shown} of ${total} (${start}-${end}, limit ${limit})\n`);
+}
+
+function printPaginationHints(
+  shown: number,
+  total: number,
+  pagination: ResolvedPagination
+): void {
+  const next = pagination.offset + shown;
+  if (pagination.capped) {
+    console.log(chalk.dim(`Limit capped at ${pagination.limit} for terminal output; use --json for larger machine-readable exports.`));
+  }
+  if (next < total) {
+    console.log(chalk.dim(`Next page: add --cursor ${next}`));
+  }
+}
+
+function printRecordingCollection(
+  label: string,
+  recordings: Recording[],
+  options: {
+    total: number;
+    offset: number;
+    limit: number;
+    verbose: boolean;
+    capped: boolean;
+    empty: string;
+  }
+): void {
+  if (recordings.length === 0) {
+    console.log(chalk.dim(options.empty));
+    if (options.total > 0) {
+      console.log(chalk.dim("Try a lower --cursor or remove filters."));
+    }
+    return;
+  }
+
+  console.log(formatPageHeader(label, recordings.length, options.total, options.offset, options.limit));
+  for (const r of recordings) {
+    console.log(options.verbose ? formatRecordingVerboseLine(r) : formatRecordingLine(r));
+  }
+  console.log("");
+  printPaginationHints(recordings.length, options.total, {
+    limit: options.limit,
+    offset: options.offset,
+    capped: options.capped,
+  });
+  console.log(chalk.dim("Details: recordings show <id> or inspect <id>. Use --verbose for metadata, --json for raw records."));
+}
+
+function printRecordingDetail(id: string): void {
+  const config = loadConfig();
+  getDatabase(config.db_path);
+  const parentOpts = program.opts();
+
+  const recording = getRecording(id);
+  if (!recording) {
+    console.error(chalk.red(`Recording not found: ${id}`));
+    process.exit(1);
+  }
+
+  if (parentOpts.json) {
+    console.log(JSON.stringify(recording, null, 2));
+    return;
+  }
+
+  console.log(formatRecordingDetail(recording));
+}
+
 function formatRecordingLine(r: Recording): string {
   const id = chalk.cyan(r.id.slice(0, 8));
   const mode =
     r.processing_mode === "enhanced"
       ? chalk.green("enhanced")
       : chalk.dim("raw");
-  const text = (r.processed_text || r.raw_text).slice(0, 80);
+  const text = truncateText(r.processed_text || r.raw_text, 100);
   const date = chalk.dim(r.created_at.slice(0, 16));
   const tags =
     r.tags.length > 0
       ? chalk.yellow(` [${r.tags.join(", ")}]`)
       : "";
 
-  return `${id} ${mode} ${date}${tags}\n  ${text}${text.length >= 80 ? "..." : ""}`;
+  return `${id} ${mode} ${date}${tags}\n  ${text}`;
+}
+
+function formatRecordingVerboseLine(r: Recording): string {
+  const lines = [formatRecordingLine(r)];
+  const model = r.enhancement_model
+    ? `${r.model_used} -> ${r.enhancement_model}`
+    : r.model_used;
+  lines.push(`  model: ${model}`);
+  if (r.duration_ms) lines.push(`  duration: ${(r.duration_ms / 1000).toFixed(1)}s`);
+  if (r.language) lines.push(`  language: ${r.language}`);
+  if (r.audio_path) lines.push(`  audio: ${truncatePath(r.audio_path, 120)}`);
+  const scopes = [
+    r.agent_id ? `agent=${r.agent_id}` : null,
+    r.project_id ? `project=${r.project_id}` : null,
+    r.session_id ? `session=${r.session_id}` : null,
+  ].filter(Boolean);
+  if (scopes.length > 0) lines.push(`  scope: ${scopes.join(" ")}`);
+  return lines.join("\n");
 }
 
 function formatRecordingDetail(r: Recording): string {
@@ -1281,6 +1488,31 @@ function formatRecordingDetail(r: Recording): string {
   }
 
   return lines.join("\n");
+}
+
+function truncateText(value: string, max: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function truncatePath(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const keep = Math.max(8, max - 15);
+  return `...${value.slice(-keep)}`;
+}
+
+function relativeHint(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return value;
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 // ── mcp ─────────────────────────────────────────────────────────────────────
