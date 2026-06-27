@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
-import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { loadConfig, getDataDir, ensureDataDir, DEFAULT_CONFIG } from "../lib/config.js";
 import { getStorageConfig, getStorageConnectionString } from "../db/storage-config.js";
 
@@ -238,7 +238,71 @@ describe("getDataDir", () => {
     expect(typeof dir).toBe("string");
     expect(dir).toContain("recordings");
   });
+
+  test("merges legacy home directory into an existing ~/.hasna/recordings directory", () => {
+    const home = join(tempDir, "home");
+    const workspace = join(home, "workspace", "repo");
+    const legacyDir = join(home, ".recordings");
+    const targetDir = join(home, ".hasna", "recordings");
+    mkdirSync(join(legacyDir, "audio"), { recursive: true });
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(legacyDir, "config.json"), JSON.stringify({ language: "de" }));
+    writeFileSync(join(legacyDir, "audio", "legacy.wav"), "legacy-audio");
+    writeFileSync(join(targetDir, "config.json"), JSON.stringify({ language: "fr" }));
+
+    withHomeAndCwd(home, workspace, () => {
+      expect(getDataDir()).toBe(targetDir);
+      const config = loadConfig();
+
+      expect(config.language).toBe("fr");
+      expect(readFileSync(join(targetDir, "audio", "legacy.wav"), "utf8")).toBe("legacy-audio");
+      expect(readFileSync(join(targetDir, "config.json"), "utf8")).toContain("fr");
+      expect(existsSync(legacyDir)).toBe(true);
+    });
+  });
+
+  test("keeps project-local .recordings ahead of home migration", () => {
+    const home = join(tempDir, "home");
+    const project = join(home, "workspace", "project");
+    const projectDir = join(project, ".recordings");
+    const homeLegacyDir = join(home, ".recordings");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(homeLegacyDir, { recursive: true });
+    writeFileSync(join(projectDir, "config.json"), JSON.stringify({ language: "ja" }));
+    writeFileSync(join(homeLegacyDir, "config.json"), JSON.stringify({ language: "de" }));
+
+    withHomeAndCwd(home, project, () => {
+      expect(getDataDir()).toBe(projectDir);
+      expect(loadConfig().language).toBe("ja");
+      expect(existsSync(join(home, ".hasna", "recordings", "config.json"))).toBe(false);
+    });
+  });
 });
+
+function withHomeAndCwd(home: string, cwd: string, callback: () => void): void {
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousCwd = process.cwd();
+  mkdirSync(cwd, { recursive: true });
+  try {
+    process.env.HOME = home;
+    delete process.env.USERPROFILE;
+    process.chdir(cwd);
+    callback();
+  } finally {
+    process.chdir(previousCwd);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = previousUserProfile;
+    }
+  }
+}
 
 describe("loadSecretKey (via loadConfig)", () => {
   test("loads API key from ~/.secrets with double quotes", () => {

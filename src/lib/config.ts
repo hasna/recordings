@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, mkdirSync, cpSync, readdirSync, statSync } from "fs";
-import { join } from "path";
+import { copyFileSync, existsSync, readFileSync, mkdirSync, readdirSync, statSync } from "fs";
+import { dirname, join, resolve } from "path";
 import { homedir } from "os";
 import type { RecordingsConfig } from "../types/index.js";
 
@@ -117,41 +117,23 @@ function expandEnvBackedConfig(config: Partial<RecordingsConfig>): Partial<Recor
 }
 
 function findConfigFile(): string | null {
-  // Walk up from cwd looking for .recordings/config.json
-  let dir = process.cwd();
-  const root = "/";
-  while (dir !== root) {
-    const candidate = join(dir, ".recordings", "config.json");
-    if (existsSync(candidate)) return candidate;
-    const parent = join(dir, "..");
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+  return findProjectRecordingsPath("config.json");
 }
 
 export function getDataDir(): string {
   // Check for .recordings in cwd hierarchy (project-local)
-  let dir = process.cwd();
-  const root = "/";
-  while (dir !== root) {
-    const candidate = join(dir, ".recordings");
-    if (existsSync(candidate)) return candidate;
-    const parent = join(dir, "..");
-    if (parent === dir) break;
-    dir = parent;
-  }
+  const projectLocalDir = findProjectRecordingsPath();
+  if (projectLocalDir) return projectLocalDir;
 
   // Global: ~/.hasna/recordings (with backward compat from ~/.recordings)
-  const home = homedir();
+  const home = getHomeDir();
   const newDir = join(home, ".hasna", "recordings");
   const oldDir = join(home, ".recordings");
 
-  // Auto-migrate from old location if new dir doesn't exist yet
-  if (!existsSync(newDir) && existsSync(oldDir)) {
+  // Auto-migrate from old location without overwriting newer target files.
+  if (existsSync(oldDir)) {
     try {
-      mkdirSync(join(home, ".hasna"), { recursive: true });
-      cpSync(oldDir, newDir, { recursive: true });
+      mergeDirectoryContents(oldDir, newDir);
     } catch {
       // Fall through to use new dir
     }
@@ -160,8 +142,39 @@ export function getDataDir(): string {
   return newDir;
 }
 
+function findProjectRecordingsPath(entry?: string): string | null {
+  const home = resolve(getHomeDir());
+  let dir = resolve(process.cwd());
+  while (true) {
+    if (dir !== home) {
+      const candidate = entry
+        ? join(dir, ".recordings", entry)
+        : join(dir, ".recordings");
+      if (existsSync(candidate)) return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function mergeDirectoryContents(sourceDir: string, targetDir: string): void {
+  mkdirSync(targetDir, { recursive: true });
+  for (const entry of readdirSync(sourceDir)) {
+    const sourcePath = join(sourceDir, entry);
+    const targetPath = join(targetDir, entry);
+    const sourceStats = statSync(sourcePath);
+    if (sourceStats.isDirectory()) {
+      mergeDirectoryContents(sourcePath, targetPath);
+    } else if (!existsSync(targetPath)) {
+      copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
+
 function loadSecretKey(keyName: string): string {
-  const secretsPath = join(homedir(), ".secrets");
+  const secretsPath = join(getHomeDir(), ".secrets");
   if (!existsSync(secretsPath)) return "";
 
   for (const candidate of listSecretFiles(secretsPath)) {
@@ -209,6 +222,10 @@ function listSecretFiles(path: string): string[] {
   } catch {
     return [];
   }
+}
+
+function getHomeDir(): string {
+  return process.env["HOME"] || process.env["USERPROFILE"] || homedir();
 }
 
 export function ensureDataDir(config: RecordingsConfig): void {
