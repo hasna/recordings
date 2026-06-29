@@ -50,7 +50,7 @@ const retiredCloudMarkers = [
   ["cloud", "setup"].join(" "),
   ["cloud", "sync"].join(" "),
   ["Cloud", "Sync"].join(" "),
-  ["HASNA", "RDS", "PASSWORD"].join("_"),
+  ["HASNA", ["R", "D", "S"].join(""), "PASSWORD"].join("_"),
 ];
 
 const secretPatterns: PatternCheck[] = [
@@ -64,6 +64,13 @@ const secretPatterns: PatternCheck[] = [
   { label: ["xai", ""].join("-"), pattern: new RegExp(["xai", ""].join("-")) },
   { label: "AI" + "za" + "[A-Za-z0-9]", pattern: new RegExp("AI" + "za" + "[A-Za-z0-9]") },
   { label: "AK" + "IA" + "[A-Z0-9]", pattern: new RegExp("AK" + "IA" + "[A-Z0-9]") },
+];
+
+const legacyDatabasePatterns: PatternCheck[] = [
+  {
+    label: ["legacy", "database", ["r", "d", "s"].join("-")].join("-"),
+    pattern: new RegExp("\\b" + ["r", "d", "s"].join("") + "\\b", "i"),
+  },
 ];
 
 function isText(buffer: Buffer): boolean {
@@ -95,6 +102,12 @@ for (const file of roots.flatMap((root) => collectFiles(join(repoRoot, root)))) 
   for (const marker of retiredCloudMarkers) {
     if (content.includes(marker)) {
       findings.push({ file: relativeFile, marker, kind: "retired-cloud" });
+    }
+  }
+
+  for (const check of legacyDatabasePatterns) {
+    if (check.pattern.test(content)) {
+      findings.push({ file: relativeFile, marker: check.label, kind: "retired-cloud" });
     }
   }
 

@@ -129,8 +129,9 @@ export async function runStorageMigrations(remote: PgAdapterAsync): Promise<void
 export function getStorageStatus(db: Database = getDatabase()): StorageStatus {
   const config = getStorageConfig();
   const activeEnv = getStorageDatabaseEnv();
+  const hasConfiguredPostgres = Boolean(config.postgres.host && config.postgres.username);
   return {
-    configured: Boolean(activeEnv),
+    configured: Boolean(activeEnv) || hasConfiguredPostgres,
     mode: config.mode,
     enabled: config.mode === "hybrid" || config.mode === "remote",
     env: STORAGE_DATABASE_ENV,

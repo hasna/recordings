@@ -18,7 +18,11 @@ const forbiddenRuntimeMarkers = [
   ["cloud", "setup"].join(" "),
   ["cloud", "sync"].join(" "),
   ["Cloud", "Sync"].join(" "),
-  ["HASNA", "RDS", "PASSWORD"].join("_"),
+  ["HASNA", ["R", "D", "S"].join(""), "PASSWORD"].join("_"),
+];
+
+const forbiddenRuntimePatterns = [
+  new RegExp("\\b" + ["r", "d", "s"].join("") + "\\b", "i"),
 ];
 
 const runtimeRoots = [
@@ -76,6 +80,11 @@ describe("no private cloud package boundary", () => {
           offenders.push({ file: relative(repoRoot, file), marker });
         }
       }
+      for (const pattern of forbiddenRuntimePatterns) {
+        if (pattern.test(content)) {
+          offenders.push({ file: relative(repoRoot, file), marker: pattern.source });
+        }
+      }
     }
 
     expect(offenders).toEqual([]);
@@ -89,6 +98,7 @@ describe("no private cloud package boundary", () => {
     const mcpStorage = readText(join(repoRoot, "src/mcp/storage-tools.ts"));
 
     expect(storageConfig).toContain("HASNA_RECORDINGS_DATABASE_URL");
+    expect(storageConfig).toContain("postgres");
     expect(storageEntrypoint).toContain("RECORDINGS_STORAGE_ENV");
     expect(cliStorage).toContain("registerStorageCommands");
     expect(mcpStorage).toContain("recordings_storage_status");

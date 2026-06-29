@@ -58,6 +58,14 @@ describe("storage sync config", () => {
 
     expect(getStorageConfig().mode).toBe("remote");
   });
+
+  test("storage config exposes postgres naming for database settings", () => {
+    const config = getStorageConfig();
+
+    expect(config.postgres.port).toBe(5432);
+    expect(config.postgres.password_env).toBe("RECORDINGS_DATABASE_PASSWORD");
+    expect(["r", "d", "s"].join("") in config).toBe(false);
+  });
 });
 
 afterEach(() => {

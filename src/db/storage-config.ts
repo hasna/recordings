@@ -6,7 +6,7 @@ export type StorageMode = "local" | "hybrid" | "remote";
 
 export interface StorageConfig {
   mode: StorageMode;
-  rds: {
+  postgres: {
     host: string;
     port: number;
     username: string;
@@ -58,7 +58,7 @@ export function getStorageDatabaseUrl(): string | undefined {
 export function getStorageConfig(): StorageConfig {
   const config: StorageConfig = {
     mode: "local",
-    rds: {
+    postgres: {
       host: "",
       port: 5432,
       username: "",
@@ -71,7 +71,7 @@ export function getStorageConfig(): StorageConfig {
     try {
       const raw = JSON.parse(readFileSync(STORAGE_CONFIG_PATH, "utf-8")) as Partial<StorageConfig>;
       config.mode = normalizeMode(raw.mode) ?? config.mode;
-      config.rds = { ...config.rds, ...(raw.rds ?? {}) };
+      config.postgres = { ...config.postgres, ...(raw.postgres ?? {}) };
     } catch {
       // Ignore malformed storage config and fall back to local mode.
     }
@@ -93,7 +93,7 @@ export function getStorageConnectionString(dbName = "recordings"): string {
   if (direct) return direct;
 
   const config = getStorageConfig();
-  const { host, port, username, password_env, ssl } = config.rds;
+  const { host, port, username, password_env, ssl } = config.postgres;
   if (!host || !username) {
     throw new Error("Storage database is not configured. Set HASNA_RECORDINGS_DATABASE_URL or configure ~/.hasna/recordings/storage/config.json.");
   }

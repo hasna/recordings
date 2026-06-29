@@ -49,6 +49,21 @@ This package has native local/remote sync. Local data stays in SQLite under
 `HASNA_RECORDINGS_DATABASE_URL` is set or `~/.hasna/recordings/storage/config.json` is
 configured.
 
+The optional config file uses a `postgres` object:
+
+```json
+{
+  "mode": "remote",
+  "postgres": {
+    "host": "db.example",
+    "port": 5432,
+    "username": "recordings",
+    "password_env": "RECORDINGS_DATABASE_PASSWORD",
+    "ssl": true
+  }
+}
+```
+
 ```bash
 recordings storage status
 recordings storage migrate
