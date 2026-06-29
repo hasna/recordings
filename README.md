@@ -72,6 +72,8 @@ recordings storage pull
 ```
 
 `RECORDINGS_DATABASE_URL` is accepted as the non-Hasna fallback database URL.
+`HASNA_RECORDINGS_STORAGE_CONFIG` can point automation at a non-default storage
+config file.
 
 ## Data Directory
 

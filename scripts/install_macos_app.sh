@@ -35,11 +35,11 @@ NATIVE_DIR="${PACKAGE_ROOT}/src/native/Recordings"
 APP_SOURCE="${NATIVE_DIR}/.build/${MODE}/Recordings.app"
 APP_DEST="${DATA_DIR}/Recordings.app"
 
-mkdir -p "${DATA_DIR}/audio"
-
 if [ "$(uname -s)" != "Darwin" ]; then
   exit 0
 fi
+
+mkdir -p "${DATA_DIR}/audio"
 
 warn_or_fail() {
   local message="$1"

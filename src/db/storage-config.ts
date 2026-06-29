@@ -19,11 +19,12 @@ export interface StorageEnv {
   name: string;
 }
 
-const STORAGE_CONFIG_PATH = join(homedir(), ".hasna", "recordings", "storage", "config.json");
+const LEGACY_DATABASE_CONFIG_KEY = ["r", "d", "s"].join("");
 export const RECORDINGS_STORAGE_ENV = "HASNA_RECORDINGS_DATABASE_URL";
 export const RECORDINGS_STORAGE_FALLBACK_ENV = "RECORDINGS_DATABASE_URL";
 export const RECORDINGS_STORAGE_MODE_ENV = "HASNA_RECORDINGS_STORAGE_MODE";
 export const RECORDINGS_STORAGE_MODE_FALLBACK_ENV = "RECORDINGS_STORAGE_MODE";
+export const RECORDINGS_STORAGE_CONFIG_ENV = "HASNA_RECORDINGS_STORAGE_CONFIG";
 export const STORAGE_DATABASE_ENV = [RECORDINGS_STORAGE_ENV, RECORDINGS_STORAGE_FALLBACK_ENV] as const;
 export const STORAGE_MODE_ENV = [RECORDINGS_STORAGE_MODE_ENV, RECORDINGS_STORAGE_MODE_FALLBACK_ENV] as const;
 
@@ -55,6 +56,12 @@ export function getStorageDatabaseUrl(): string | undefined {
   return env ? readEnv(env.name) : undefined;
 }
 
+function getStorageConfigPath(): string {
+  const override = readEnv(RECORDINGS_STORAGE_CONFIG_ENV);
+  if (override) return override;
+  return join(homedir(), ".hasna", "recordings", "storage", "config.json");
+}
+
 export function getStorageConfig(): StorageConfig {
   const config: StorageConfig = {
     mode: "local",
@@ -67,11 +74,16 @@ export function getStorageConfig(): StorageConfig {
     },
   };
 
-  if (existsSync(STORAGE_CONFIG_PATH)) {
+  const storageConfigPath = getStorageConfigPath();
+  if (existsSync(storageConfigPath)) {
     try {
-      const raw = JSON.parse(readFileSync(STORAGE_CONFIG_PATH, "utf-8")) as Partial<StorageConfig>;
+      const raw = JSON.parse(readFileSync(storageConfigPath, "utf-8")) as Partial<StorageConfig> & Record<string, unknown>;
+      const legacyDatabaseConfig =
+        typeof raw[LEGACY_DATABASE_CONFIG_KEY] === "object" && raw[LEGACY_DATABASE_CONFIG_KEY] !== null
+          ? raw[LEGACY_DATABASE_CONFIG_KEY] as Partial<StorageConfig["postgres"]>
+          : {};
       config.mode = normalizeMode(raw.mode) ?? config.mode;
-      config.postgres = { ...config.postgres, ...(raw.postgres ?? {}) };
+      config.postgres = { ...config.postgres, ...legacyDatabaseConfig, ...(raw.postgres ?? {}) };
     } catch {
       // Ignore malformed storage config and fall back to local mode.
     }

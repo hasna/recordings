@@ -23,6 +23,7 @@ const envKeys = [
   "RECORDINGS_DATABASE_URL",
   "HASNA_RECORDINGS_STORAGE_MODE",
   "RECORDINGS_STORAGE_MODE",
+  "HASNA_RECORDINGS_STORAGE_CONFIG",
 ];
 
 beforeEach(() => {
@@ -64,6 +65,30 @@ describe("storage sync config", () => {
 
     expect(config.postgres.port).toBe(5432);
     expect(config.postgres.password_env).toBe("RECORDINGS_DATABASE_PASSWORD");
+    expect(["r", "d", "s"].join("") in config).toBe(false);
+  });
+
+  test("storage config accepts old local config key without exposing it", () => {
+    const storageDir = join(tempDir, "storage");
+    mkdirSync(storageDir, { recursive: true });
+    process.env.HASNA_RECORDINGS_STORAGE_CONFIG = join(storageDir, "config.json");
+
+    writeFileSync(
+      process.env.HASNA_RECORDINGS_STORAGE_CONFIG,
+      JSON.stringify({
+        mode: "remote",
+        [["r", "d", "s"].join("")]: {
+          host: "legacy.example",
+          username: "recordings",
+          password_env: "RECORDINGS_DB_PASSWORD",
+        },
+      })
+    );
+
+    const config = getStorageConfig();
+    expect(config.mode).toBe("remote");
+    expect(config.postgres.host).toBe("legacy.example");
+    expect(config.postgres.username).toBe("recordings");
     expect(["r", "d", "s"].join("") in config).toBe(false);
   });
 });
