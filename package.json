@@ -1,6 +1,6 @@
 {
   "name": "@hasna/recordings",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "type": "module",
   "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
   "repository": {
@@ -34,7 +34,9 @@
     "test:coverage": "bun test --coverage",
     "dev:cli": "bun run src/cli/index.ts",
     "dev:mcp": "bun run src/mcp/index.ts",
-    "prepack": "bun run build",
+    "verify:release": "bun run scripts/release-guard.ts",
+    "prepack": "bun run build && bun run verify:release",
+    "prepublishOnly": "bun run typecheck && bun run test",
     "postinstall": "bash scripts/install_macos_app.sh --postinstall"
   },
   "files": [

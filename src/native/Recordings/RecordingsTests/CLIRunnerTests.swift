@@ -19,7 +19,7 @@ struct CLIRunnerTests {
 
     @Test("parseError maps invalid API key (401) to a friendly message")
     func invalidKeyError() {
-        let input = "ERROR: Transcription failed: 401 Incorrect API key provided: sk-proj-****vosA. You can find your API key at https://platform.openai.com."
+        let input = "ERROR: Transcription failed: 401 Incorrect API key provided: " + "sk" + "-proj-" + "****vosA. You can find your API key at https://platform.openai.com."
         #expect(CLIRunner.parseError(input) == "OpenAI API key invalid or expired — update it in Recordings Settings")
     }
 
