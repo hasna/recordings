@@ -1,0 +1,12 @@
+node_modules
+dist
+**/*.test.ts
+.git
+.github
+examples
+*.tgz
+docs
+.claude
+.codewith
+.takumi
+src/native

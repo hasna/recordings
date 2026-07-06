@@ -1,0 +1,32 @@
+{
+  "schema": "hasna.service_contract.v1",
+  "name": "recordings",
+  "class": "service",
+  "contractVersion": "v1",
+  "kitVersion": "0.4.1",
+  "description": "Speech-to-text recording store for AI coding agents. CLI + MCP + HTTP API (recordings-serve) + generated SDK. Cloud mode (HASNA_RECORDINGS_STORAGE_MODE=remote / HASNA_RECORDINGS_DATABASE_URL set) is PURE REMOTE per Amendment A1: the serve process reads/writes the shared cloud Postgres directly with API-key auth via @hasna/contracts.",
+  "bins": ["recordings", "recordings-mcp", "recordings-serve"],
+  "storage": {
+    "mode": "local",
+    "envPrefix": "HASNA_RECORDINGS_",
+    "aliasEnvPrefix": "RECORDINGS_",
+    "databaseUrlSecretRef": "hasna/oss/recordings/database-url",
+    "sqlitePath": "~/.hasna/recordings/recordings.db"
+  },
+  "metadata": {
+    "service": {
+      "port": 8874,
+      "healthPath": "/health",
+      "readyPath": "/ready",
+      "versionPath": "/version",
+      "openapiPath": "/openapi.json",
+      "apiVersion": "v1",
+      "auth": "api-key",
+      "signingSecretSecretRef": "hasna/oss/recordings/api-key-signing-secret"
+    },
+    "client": {
+      "apiUrlEnv": "RECORDINGS_API_URL",
+      "apiKeyEnv": "RECORDINGS_API_KEY"
+    }
+  }
+}
