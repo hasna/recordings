@@ -109,3 +109,18 @@ export {
   checkRecordingDeps,
   recordDuration,
 } from "./lib/recorder.js";
+
+// ── SDK (typed /v1 cloud client, generated from the serve OpenAPI) ────────────
+export {
+  RecordingsV1Client,
+  RecordingsV1ApiError,
+} from "./sdk/index.js";
+export type {
+  RecordingsV1ClientOptions,
+  RecordingsV1Recording,
+  RecordingsV1Agent,
+  RecordingsV1Project,
+  RecordingsV1CreateRecordingInput,
+  RecordingsV1RegisterAgentInput,
+  RecordingsV1RegisterProjectInput,
+} from "./sdk/index.js";

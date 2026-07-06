@@ -1,6 +1,6 @@
 {
   "name": "@hasna/recordings",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "type": "module",
   "description": "Speech-to-text recording tool with MCP and CLI — records, transcribes, and optionally enhances text using AI",
   "repository": {
@@ -11,7 +11,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "recordings": "dist/cli/index.js",
-    "recordings-mcp": "dist/mcp/index.js"
+    "recordings-mcp": "dist/mcp/index.js",
+    "recordings-serve": "dist/server/index.js"
   },
   "exports": {
     ".": {
@@ -21,14 +22,21 @@
     "./storage": {
       "import": "./dist/storage.js",
       "types": "./dist/storage.d.ts"
+    },
+    "./sdk": {
+      "import": "./dist/sdk/index.js",
+      "types": "./dist/sdk/index.d.ts"
     }
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "bun run clean && bun run build:cli && bun run build:mcp && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
+    "build": "bun run clean && bun run build:cli && bun run build:mcp && bun run build:serve && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
     "build:cli": "bun build src/cli/index.ts --target=bun --outfile=dist/cli/index.js --external=commander --external=chalk --external=openai",
     "build:mcp": "bun build src/mcp/index.ts --target=bun --outfile=dist/mcp/index.js --external=@modelcontextprotocol/sdk --external=openai",
-    "build:lib": "bun build src/index.ts src/storage.ts --target=bun --outdir=dist --external=openai",
+    "build:serve": "bun build src/server/index.ts --target=bun --outfile=dist/server/index.js --external=@modelcontextprotocol/sdk --external=@hasna/contracts --external=openai --external=pg",
+    "build:lib": "bun build src/index.ts src/storage.ts src/sdk/index.ts --target=bun --outdir=dist --external=openai",
+    "generate:sdk": "bun run scripts/generate-sdk.ts",
+    "migrate": "bun run scripts/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
@@ -52,6 +60,7 @@
     "LICENSE"
   ],
   "dependencies": {
+    "@hasna/contracts": "0.4.1",
     "@hasna/events": "^0.1.11",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",

@@ -42,6 +42,49 @@ MCP_HTTP=1 MCP_HTTP_PORT=8829 recordings-mcp
 
 Endpoints: `GET /health` → `{"status":"ok","name":"recordings"}`, MCP at `/mcp`.
 
+## HTTP API (`recordings-serve`)
+
+`recordings-serve` is the self-hosted HTTP API. In cloud mode it is PURE REMOTE
+(Amendment A1): the process reads/writes the shared cloud Postgres directly with
+API-key auth via [`@hasna/contracts`](https://www.npmjs.com/package/@hasna/contracts).
+
+```bash
+recordings-serve --port 8874          # start the API
+recordings-serve migrate              # apply the cloud schema, then exit
+```
+
+Service surface (unauthenticated): `GET /health`, `GET /ready`, `GET /version`
+(each returns `{status, version, mode}`), and `GET /openapi.json` (the OpenAPI
+3.1 document the SDK is generated from).
+
+Versioned API (`/v1/*`, API-key auth via `x-api-key` or `Authorization: Bearer`):
+
+| Method | Path | Scope |
+| ------ | ---- | ----- |
+| GET/POST | `/v1/recordings` | `recordings:read` / `recordings:write` |
+| GET/DELETE | `/v1/recordings/:id` | `recordings:read` / `recordings:write` |
+| GET | `/v1/stats` | `recordings:read` |
+| GET/POST | `/v1/agents` · GET `/v1/agents/:id` | `recordings:read` / `recordings:write` |
+| GET/POST | `/v1/projects` · GET `/v1/projects/:id` | `recordings:read` / `recordings:write` |
+
+Env: `HASNA_RECORDINGS_DATABASE_URL` (remote Postgres DSN — enables cloud `/v1`)
+and `HASNA_RECORDINGS_API_SIGNING_KEY` (HMAC signing secret for API-key auth).
+
+## SDK
+
+The typed `/v1` client is generated from the serve OpenAPI document
+(`bun run generate:sdk`):
+
+```ts
+import { RecordingsV1Client } from "@hasna/recordings/sdk";
+
+const client = new RecordingsV1Client({
+  baseUrl: process.env.RECORDINGS_API_URL!,
+  apiKey: process.env.RECORDINGS_API_KEY!,
+});
+const { recordings } = await client.listRecordings({ limit: 20 });
+```
+
 ## Storage Sync
 
 This package has native local/remote sync. Local data stays in SQLite under
