@@ -1,0 +1,44 @@
+# Local development stack for @hasna/recordings in cloud (PURE REMOTE) mode.
+#   docker compose run --rm recordings-migrate     # apply schema first
+#   docker compose up --build recordings-serve
+# Auth: mint a key with `contracts issue-key --app recordings --scopes recordings:*`
+# using the SAME HASNA_RECORDINGS_API_SIGNING_KEY and HASNA_RECORDINGS_DATABASE_URL.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: recordings
+      POSTGRES_PASSWORD: recordings
+      POSTGRES_DB: recordings
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recordings"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  recordings-migrate:
+    build: .
+    command: ["bun", "dist/server/index.js", "migrate"]
+    environment:
+      HASNA_RECORDINGS_STORAGE_MODE: remote
+      HASNA_RECORDINGS_DATABASE_URL: postgres://recordings:recordings@postgres:5432/recordings?sslmode=disable
+      HASNA_RECORDINGS_API_SIGNING_KEY: dev-signing-secret-change-me
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  recordings-serve:
+    build: .
+    ports:
+      - "8874:8874"
+    environment:
+      PORT: "8874"
+      HOST: 0.0.0.0
+      HASNA_RECORDINGS_STORAGE_MODE: remote
+      HASNA_RECORDINGS_DATABASE_URL: postgres://recordings:recordings@postgres:5432/recordings?sslmode=disable
+      HASNA_RECORDINGS_API_SIGNING_KEY: dev-signing-secret-change-me
+    depends_on:
+      recordings-migrate:
+        condition: service_completed_successfully

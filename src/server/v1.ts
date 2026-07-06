@@ -1,0 +1,170 @@
+/**
+ * Versioned `/v1` HTTP API for `recordings-serve` (A1 pure-remote).
+ *
+ * Every handler goes through the repo-native Postgres repository (`./repo.ts`)
+ * which reads/writes the shared cloud Postgres directly. Auth is enforced by the contracts
+ * API-key verifier: reads require `recordings:read`, writes require
+ * `recordings:write` (a `recordings:*` key satisfies both). This is a real
+ * wrapper over the core storage lib — there are NO stubs; unimplemented routes
+ * return 404.
+ */
+import type { CreateRecordingInput } from "../types/index.js";
+import { getCloudPg, getCloudVerifier, ensureCloudSchema } from "./cloud.js";
+import * as repo from "./repo.js";
+
+const JSON_HEADERS = { "Content-Type": "application/json" } as const;
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+}
+
+function error(status: number, message: string, extra?: Record<string, unknown>): Response {
+  return json({ error: message, ...(extra ?? {}) }, status);
+}
+
+async function readJson<T>(req: Request): Promise<T | null> {
+  try {
+    const text = await req.text();
+    if (!text) return {} as T;
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Handle a `/v1/*` request. Returns `null` when the path is not a `/v1` route so
+ * the caller can fall through to other handlers.
+ */
+export async function handleV1Request(req: Request, url: URL): Promise<Response | null> {
+  const path = url.pathname;
+  if (path !== "/v1" && !path.startsWith("/v1/")) return null;
+
+  const method = req.method.toUpperCase();
+  const isWrite = method !== "GET" && method !== "HEAD";
+  const requiredScopes = [isWrite ? "recordings:write" : "recordings:read"];
+
+  // ── Auth (contracts API-key verifier) ──
+  let verifier;
+  try {
+    verifier = getCloudVerifier();
+  } catch (e) {
+    return error(503, (e as Error).message);
+  }
+  const decision = await verifier.authenticate(req.headers, { method, path, requiredScopes });
+  if (!decision.ok) {
+    return error(decision.status, decision.message, { reason: decision.reason });
+  }
+
+  // Schema is idempotently ensured on the first authenticated request.
+  try {
+    await ensureCloudSchema();
+  } catch (e) {
+    return error(503, `storage unavailable: ${(e as Error).message}`);
+  }
+  const pg = getCloudPg();
+
+  const segments = path.split("/").filter(Boolean); // ["v1", resource, id?]
+  const resource = segments[1];
+  const id = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+
+  try {
+    // ── /v1/recordings ──
+    if (resource === "recordings") {
+      if (!id) {
+        if (method === "GET") {
+          const filter = {
+            ...(url.searchParams.get("agent_id") ? { agent_id: url.searchParams.get("agent_id")! } : {}),
+            ...(url.searchParams.get("project_id") ? { project_id: url.searchParams.get("project_id")! } : {}),
+            ...(url.searchParams.get("session_id") ? { session_id: url.searchParams.get("session_id")! } : {}),
+            ...(url.searchParams.get("processing_mode")
+              ? { processing_mode: url.searchParams.get("processing_mode") as CreateRecordingInput["processing_mode"] }
+              : {}),
+            ...(url.searchParams.get("search") ? { search: url.searchParams.get("search")! } : {}),
+            ...(url.searchParams.get("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+            ...(url.searchParams.get("offset") ? { offset: Number(url.searchParams.get("offset")) } : {}),
+          };
+          const recordings = await repo.listRecordings(pg, filter);
+          return json({ recordings, count: recordings.length });
+        }
+        if (method === "POST") {
+          const body = await readJson<CreateRecordingInput>(req);
+          if (!body || typeof body.raw_text !== "string" || !body.raw_text.trim()) {
+            return error(400, "raw_text is required");
+          }
+          const recording = await repo.createRecording(pg, body);
+          return json({ recording }, 201);
+        }
+        return error(405, `method ${method} not allowed on /v1/recordings`);
+      }
+      // /v1/recordings/:id
+      if (method === "GET") {
+        const recording = await repo.getRecording(pg, id);
+        return recording ? json({ recording }) : error(404, "recording not found");
+      }
+      if (method === "DELETE") {
+        const deleted = await repo.deleteRecording(pg, id);
+        return deleted ? json({ deleted: true }) : error(404, "recording not found");
+      }
+      return error(405, `method ${method} not allowed on /v1/recordings/:id`);
+    }
+
+    // ── /v1/stats ──
+    if (resource === "stats") {
+      if (method === "GET") return json(await repo.getRecordingStats(pg));
+      return error(405, `method ${method} not allowed on /v1/stats`);
+    }
+
+    // ── /v1/agents ──
+    if (resource === "agents") {
+      if (!id) {
+        if (method === "GET") {
+          const agents = await repo.listAgents(pg);
+          return json({ agents, count: agents.length });
+        }
+        if (method === "POST") {
+          const body = await readJson<{ name?: string; description?: string; role?: string }>(req);
+          if (!body || typeof body.name !== "string" || !body.name.trim()) {
+            return error(400, "name is required");
+          }
+          const agent = await repo.registerAgent(pg, body.name, body.description ?? null, body.role ?? null);
+          return json({ agent }, 201);
+        }
+        return error(405, `method ${method} not allowed on /v1/agents`);
+      }
+      if (method === "GET") {
+        const agent = await repo.getAgent(pg, id);
+        return agent ? json({ agent }) : error(404, "agent not found");
+      }
+      return error(405, `method ${method} not allowed on /v1/agents/:id`);
+    }
+
+    // ── /v1/projects ──
+    if (resource === "projects") {
+      if (!id) {
+        if (method === "GET") {
+          const projects = await repo.listProjects(pg);
+          return json({ projects, count: projects.length });
+        }
+        if (method === "POST") {
+          const body = await readJson<{ name?: string; path?: string; description?: string }>(req);
+          if (!body || typeof body.name !== "string" || !body.name.trim() || typeof body.path !== "string" || !body.path.trim()) {
+            return error(400, "name and path are required");
+          }
+          const project = await repo.registerProject(pg, body.name, body.path, body.description ?? null);
+          return json({ project }, 201);
+        }
+        return error(405, `method ${method} not allowed on /v1/projects`);
+      }
+      if (method === "GET") {
+        const project = await repo.getProject(pg, id);
+        return project ? json({ project }) : error(404, "project not found");
+      }
+      return error(405, `method ${method} not allowed on /v1/projects/:id`);
+    }
+
+    return error(404, `unknown /v1 resource: ${resource ?? ""}`);
+  } catch (e) {
+    return error(500, (e as Error).message);
+  }
+}
