@@ -5,14 +5,7 @@ import { isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
 import { getDatabase, getAdapter } from "../db/database.js";
-import {
-  createRecording,
-  getRecording,
-  listRecordings,
-  deleteRecording,
-  searchRecordings,
-  getRecordingStats,
-} from "../db/recordings.js";
+import { resolveRecordingsBackend } from "../http/backend.js";
 import { registerAgent, getAgent, listAgents, heartbeatAgent, setAgentFocus } from "../db/agents.js";
 import {
   registerProject,
@@ -165,7 +158,7 @@ registerTool(
       const transcription = await transcribeAudio(args.audio_path, cfg);
       const processed = await processText(transcription.text, cfg);
 
-      const recording = createRecording({
+      const recording = await resolveRecordingsBackend().createRecording({
         audio_path: args.audio_path,
         raw_text: transcription.text,
         processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -234,7 +227,7 @@ registerTool(
         }
       }
 
-      const recording = createRecording({
+      const recording = await resolveRecordingsBackend().createRecording({
         raw_text: args.text,
         processed_text: processedText,
         processing_mode: mode,
@@ -264,7 +257,7 @@ registerTool(
   { id: z.string() },
   async (args) => {
     try {
-      const r = getRecording(args.id);
+      const r = await resolveRecordingsBackend().getRecording(args.id);
       if (!r) return text(`Not found: ${args.id}`);
       return text(full(r));
     } catch (e) {
@@ -304,7 +297,7 @@ registerTool(
         session_id: args.session_id,
       };
 
-      const recordings = listRecordings(filter);
+      const recordings = await resolveRecordingsBackend().listRecordings(filter);
       if (recordings.length === 0) return text("No recordings found.");
 
       const fmt = args.full ? full : compact;
@@ -328,7 +321,7 @@ registerTool(
   },
   async (args) => {
     try {
-      const results = searchRecordings(args.query, {
+      const results = await resolveRecordingsBackend().searchRecordings(args.query, {
         limit: args.limit || 10,
         agent_id: args.agent_id,
         project_id: args.project_id,
@@ -351,7 +344,7 @@ registerTool(
   { id: z.string() },
   async (args) => {
     try {
-      return text(deleteRecording(args.id) ? `Deleted ${args.id}` : `Not found: ${args.id}`);
+      return text((await resolveRecordingsBackend().deleteRecording(args.id)) ? `Deleted ${args.id}` : `Not found: ${args.id}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -364,7 +357,7 @@ registerTool(
   {},
   async () => {
     try {
-      const s = getRecordingStats();
+      const s = await resolveRecordingsBackend().getRecordingStats();
       let out = `Total: ${s.total} | Raw: ${s.raw} | Enhanced: ${s.enhanced} | Duration: ${(s.total_duration_ms / 1000).toFixed(1)}s`;
       if (Object.keys(s.by_model).length > 0) {
         out += "\n" + Object.entries(s.by_model).map(([m, c]) => `${m}: ${c}`).join(", ");

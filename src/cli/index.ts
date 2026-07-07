@@ -8,14 +8,7 @@ import { dirname, join as pathJoin } from "path";
 import { fileURLToPath } from "url";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
 import { getDatabase, getAdapter } from "../db/database.js";
-import {
-  createRecording,
-  getRecording,
-  listRecordings,
-  deleteRecording,
-  searchRecordings,
-  getRecordingStats,
-} from "../db/recordings.js";
+import { resolveRecordingsBackend } from "../http/backend.js";
 import { registerAgent, getAgent, listAgents } from "../db/agents.js";
 import {
   registerProject,
@@ -128,7 +121,7 @@ program
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
     const parentOpts = program.opts();
 
-    const recording = createRecording({
+    const recording = await resolveRecordingsBackend().createRecording({
       audio_path: audioPath,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -184,7 +177,7 @@ program
     const processed = await processText(transcription.text, config, opts.systemPrompt);
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
-    const recording = createRecording({
+    const recording = await resolveRecordingsBackend().createRecording({
       audio_path: file,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -259,12 +252,12 @@ program
   .option("-t, --tags <tags>", "Filter by tags")
   .option("--since <date>", "After date (ISO)")
   .option("--until <date>", "Before date (ISO)")
-  .action((opts) => {
+  .action(async (opts) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const recordings = listRecordings({
+    const recordings = await resolveRecordingsBackend().listRecordings({
       limit: parseInt(opts.limit, 10),
       processing_mode: opts.mode,
       tags: opts.tags ? opts.tags.split(",") : undefined,
@@ -298,12 +291,12 @@ program
 program
   .command("show <id>")
   .description("Show recording details")
-  .action((id) => {
+  .action(async (id) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const recording = getRecording(id);
+    const recording = await resolveRecordingsBackend().getRecording(id);
     if (!recording) {
       console.error(chalk.red(`Recording not found: ${id}`));
       process.exit(1);
@@ -323,12 +316,12 @@ program
   .command("search <query>")
   .description("Search recordings by text content")
   .option("-n, --limit <n>", "Max results", "20")
-  .action((query, opts) => {
+  .action(async (query, opts) => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const results = searchRecordings(query, {
+    const results = await resolveRecordingsBackend().searchRecordings(query, {
       limit: parseInt(opts.limit, 10),
       agent_id: parentOpts.agent,
       project_id: parentOpts.project,
@@ -355,11 +348,11 @@ program
 program
   .command("delete <id>")
   .description("Delete a recording")
-  .action((id) => {
+  .action(async (id) => {
     const config = loadConfig();
     getDatabase(config.db_path);
 
-    const deleted = deleteRecording(id);
+    const deleted = await resolveRecordingsBackend().deleteRecording(id);
     if (deleted) {
       console.log(chalk.green(`Deleted recording ${id}`));
     } else {
@@ -373,12 +366,12 @@ program
 program
   .command("stats")
   .description("Show recording statistics")
-  .action(() => {
+  .action(async () => {
     const config = loadConfig();
     getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const stats = getRecordingStats();
+    const stats = await resolveRecordingsBackend().getRecordingStats();
 
     if (parentOpts.json) {
       console.log(JSON.stringify(stats, null, 2));
@@ -804,7 +797,7 @@ program
             const output = processed.mode === "enhanced" ? processed.text : transcription.text;
 
             // Save to DB
-            createRecording({
+            await resolveRecordingsBackend().createRecording({
               audio_path: audioPath,
               raw_text: transcription.text,
               processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -1193,8 +1186,8 @@ program
   .alias("rm")
   .alias("uninstall")
   .description("Delete a recording by ID")
-  .action((id: string) => {
-    const deleted = deleteRecording(id);
+  .action(async (id: string) => {
+    const deleted = await resolveRecordingsBackend().deleteRecording(id);
     if (deleted) {
       console.log(chalk.green(`✓ Recording ${id} deleted`));
     } else {
