@@ -36,6 +36,42 @@ describe("client-flip resolution", () => {
     expect(r.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 
+  test("flip env (url + key, NO mode var) -> cloud-http", () => {
+    // Regression: @hasna/machines flip writes ONLY API_URL + API_KEY.
+    const r = resolveTransport(APP, {
+      HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+      HASNA_RECORDINGS_API_KEY: "test-key",
+    });
+    expect(r.transport).toBe("cloud-http");
+    expect(r.modeSource).toBe("auto:api-url+api-key");
+    expect(r.baseUrl).toBe("https://recordings.hasna.xyz/v1");
+  });
+
+  test("url + key but explicit mode=local forces local (override)", () => {
+    const r = resolveTransport(APP, {
+      HASNA_RECORDINGS_STORAGE_MODE: "local",
+      HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+      HASNA_RECORDINGS_API_KEY: "test-key",
+    });
+    expect(r.transport).toBe("local");
+  });
+
+  test("url only (no key) -> local, not cloud", () => {
+    const r = resolveTransport(APP, {
+      HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+    });
+    expect(r.transport).toBe("local");
+  });
+
+  test("resolveRecordingsBackend picks cloud-http from flip env (url+key, no mode)", () => {
+    const b = resolveRecordingsBackend({
+      HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+      HASNA_RECORDINGS_API_KEY: "test-key",
+    });
+    expect(b.mode).toBe("cloud-http");
+    expect(b.baseUrl).toBe("https://recordings.hasna.xyz/v1");
+  });
+
   test("cloud requested but no key -> misconfigured (throws in resolveStorageClient)", () => {
     expect(() =>
       resolveStorageClient(APP, { HASNA_RECORDINGS_STORAGE_MODE: "self_hosted" }),

@@ -105,6 +105,14 @@ export function resolveTransport(name: string, env: Env = process.env): Transpor
     mode = normalized.mode;
     deprecatedAlias = normalized.deprecatedAlias;
     modeSource = modeHit.key;
+  } else if (urlHit && keyHit) {
+    // The fleet flip (@hasna/machines) writes ONLY HASNA_<APP>_API_URL +
+    // HASNA_<APP>_API_KEY — no mode var. Presence of both IS the self_hosted
+    // signal, so route to cloud. Rollback = unset either var -> back to local.
+    // An explicit mode var (handled above) still wins, so `...MODE=local`
+    // forces local even when the URL/key are present.
+    mode = "cloud";
+    modeSource = "auto:api-url+api-key";
   }
 
   if (mode === "local") {
