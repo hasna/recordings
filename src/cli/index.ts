@@ -242,6 +242,57 @@ program
     }
   });
 
+// ── save ────────────────────────────────────────────────────────────────────
+
+program
+  .command("save <text>")
+  .description("Save raw text as a recording (no audio). Routes to the self_hosted API when configured, else local.")
+  .option("-t, --tags <tags>", "Comma-separated tags")
+  .option("--enhance", "Enhance the text via the configured model before saving")
+  .option("--model <model>", "Value for model_used", "direct-input")
+  .action(async (rawText, opts) => {
+    const parentOpts = program.opts();
+    let processedText: string | undefined;
+    let mode: "raw" | "enhanced" = "raw";
+    let enhModel: string | undefined;
+
+    try {
+      if (opts.enhance) {
+        const config = loadConfig();
+        const processed = await processText(rawText, config);
+        if (processed.mode === "enhanced") {
+          processedText = processed.text;
+          mode = "enhanced";
+          enhModel = processed.enhancement_model || undefined;
+        }
+      }
+
+      const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
+
+      const recording = await resolveRecordingsBackend().createRecording({
+        raw_text: rawText,
+        processed_text: processedText,
+        processing_mode: mode,
+        model_used: opts.model,
+        enhancement_model: enhModel,
+        tags,
+        agent_id: parentOpts.agent,
+        project_id: parentOpts.project,
+        session_id: parentOpts.session,
+      });
+
+      if (parentOpts.json) {
+        console.log(JSON.stringify(recording, null, 2));
+      } else {
+        console.log(chalk.green(`✓ Saved recording ${recording.id}`));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(chalk.red(message));
+      process.exit(1);
+    }
+  });
+
 // ── list ────────────────────────────────────────────────────────────────────
 
 program
