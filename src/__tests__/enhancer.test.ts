@@ -544,6 +544,74 @@ describe("processText", () => {
   });
 });
 
+// ── processText: forced enhancement ─────────────────────────────────────────
+
+describe("processText - force", () => {
+  test("forces enhancement for plain dictation that the heuristic skips", async () => {
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock(() =>
+              Promise.resolve({
+                choices: [{ message: { content: "Cleaned up dictation." } }],
+              })
+            ),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    // "um so like I went to the store" is plain dictation — needsEnhancement
+    // returns false, but an explicit force must still enhance it.
+    const result = await process("um so like I went to the store today you know", config, undefined, {
+      force: true,
+    });
+    expect(result.mode).toBe("enhanced");
+    expect(result.text).toBe("Cleaned up dictation.");
+    expect(result.enhancement_model).toBe(config.enhancement_model);
+
+    resetEnhancementClient();
+  });
+
+  test("forces enhancement even when auto_enhance is off", async () => {
+    mock.module("openai", () => ({
+      default: class MockOpenAI {
+        chat = {
+          completions: {
+            create: mock(() =>
+              Promise.resolve({
+                choices: [{ message: { content: "Forced output." } }],
+              })
+            ),
+          },
+        };
+      },
+    }));
+
+    resetEnhancementClient();
+    const { processText: process } = await import("../lib/enhancer.js");
+    resetEnhancementClient();
+
+    const noAutoConfig = { ...config, auto_enhance: false };
+    const result = await process("just a plain note", noAutoConfig, undefined, { force: true });
+    expect(result.mode).toBe("enhanced");
+    expect(result.text).toBe("Forced output.");
+
+    resetEnhancementClient();
+  });
+
+  test("force:false preserves auto-detect behavior (raw for plain dictation)", async () => {
+    const result = await processText("I went to the store today", config, undefined, { force: false });
+    expect(result.mode).toBe("raw");
+    expect(result.text).toBe("I went to the store today");
+  });
+});
+
 // ── systemPrompt support ──────────────────────────────────────────────────
 
 describe("systemPrompt support", () => {

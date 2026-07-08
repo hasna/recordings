@@ -212,7 +212,9 @@ registerTool(
       let enhModel: string | undefined;
 
       if (args.enhance !== false) {
-        const processed = await processText(args.text, config);
+        // enhance:true forces enhancement past the auto_enhance/heuristic gate;
+        // an omitted flag keeps the auto-detect behavior.
+        const processed = await processText(args.text, config, undefined, { force: args.enhance === true });
         if (processed.mode === "enhanced") {
           processedText = processed.text;
           mode = "enhanced";

@@ -155,27 +155,39 @@ Rules:
 
 /**
  * Full pipeline: detect if enhancement is needed, enhance if so.
+ *
+ * When `options.force` is true the caller has explicitly requested enhancement
+ * (e.g. `save --enhance` / `save_recording {enhance:true}`), so BOTH the
+ * `auto_enhance` config gate and the `needsEnhancement` heuristic are bypassed
+ * and the text is always enhanced. Without `force`, enhancement only happens
+ * when `auto_enhance` is on AND the heuristic detects an enhancement intent.
  */
 export async function processText(
   rawText: string,
   config: RecordingsConfig,
-  systemPrompt?: string
+  systemPrompt?: string,
+  options?: { force?: boolean }
 ): Promise<{
   text: string;
   mode: "raw" | "enhanced";
   enhancement_model: string | null;
 }> {
-  if (!config.auto_enhance) {
+  const force = options?.force === true;
+
+  if (!force && !config.auto_enhance) {
     return { text: rawText, mode: "raw", enhancement_model: null };
   }
 
   const detection = needsEnhancement(rawText, config);
 
-  if (!detection.needs) {
+  if (!force && !detection.needs) {
     return { text: rawText, mode: "raw", enhancement_model: null };
   }
 
-  const result = await enhanceText(rawText, detection.instruction, config, systemPrompt);
+  // Forced runs enhance the raw text directly; auto runs use the extracted
+  // instruction so trigger/instruction phrasing drives the rewrite.
+  const instruction = detection.needs ? detection.instruction : rawText;
+  const result = await enhanceText(rawText, instruction, config, systemPrompt);
 
   return {
     text: result.enhanced,

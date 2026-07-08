@@ -251,7 +251,7 @@ program
     try {
       if (opts.enhance) {
         const config = loadConfig();
-        const processed = await processText(rawText, config);
+        const processed = await processText(rawText, config, undefined, { force: true });
         if (processed.mode === "enhanced") {
           processedText = processed.text;
           mode = "enhanced";
