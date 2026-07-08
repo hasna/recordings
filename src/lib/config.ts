@@ -39,18 +39,32 @@ export function loadConfig(configPath?: string): RecordingsConfig {
   const filePath =
     configPath || findConfigFile() || join(getDataDir(), "config.json");
 
+  // Track whether the config file explicitly supplied an OpenAI key. When it
+  // does, that deliberate app-level setting must win over an *ambient* generic
+  // OPENAI_API_KEY. Bun auto-loads `.env` from the process cwd, so a stray
+  // OPENAI_API_KEY in the working directory (e.g. the MCP service running from
+  // $HOME) would otherwise silently clobber the configured key and yield 401s.
+  let fileProvidedOpenAIKey = false;
   if (existsSync(filePath)) {
     try {
       const raw = readFileSync(filePath, "utf-8");
       const fileConfig = JSON.parse(raw) as Partial<RecordingsConfig>;
-      Object.assign(config, expandEnvBackedConfig(fileConfig));
+      const expanded = expandEnvBackedConfig(fileConfig);
+      Object.assign(config, expanded);
+      fileProvidedOpenAIKey =
+        typeof expanded.openai_api_key === "string" &&
+        expanded.openai_api_key.length > 0;
     } catch {
       // Ignore invalid config files
     }
   }
 
-  // 2. Override with env vars
-  if (process.env.OPENAI_API_KEY) {
+  // 2. Override with env vars.
+  // Generic OPENAI_API_KEY only applies when the config file did NOT set one,
+  // so an ambient/auto-loaded key can't hijack an explicitly configured key.
+  // The recordings-namespaced RECORDINGS_API_KEY is always a deliberate opt-in
+  // override and keeps its precedence below.
+  if (process.env.OPENAI_API_KEY && !fileProvidedOpenAIKey) {
     config.openai_api_key = process.env.OPENAI_API_KEY;
   }
   if (process.env.RECORDINGS_API_KEY) {

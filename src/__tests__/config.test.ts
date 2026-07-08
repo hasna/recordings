@@ -129,6 +129,31 @@ describe("loadConfig", () => {
     expect(config.openai_api_key).toBe("sk-env-key");
   });
 
+  test("explicit config file openai_api_key wins over ambient OPENAI_API_KEY", () => {
+    // Regression: bun auto-loads .env from the process cwd, so a stray generic
+    // OPENAI_API_KEY (e.g. the MCP service running from $HOME) must NOT clobber
+    // the key the user explicitly configured in config.json — that caused 401s.
+    const configPath = join(tempDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({ openai_api_key: "sk-configured-valid" })
+    );
+    process.env.OPENAI_API_KEY = "sk-ambient-stale";
+    const config = loadConfig(configPath);
+    expect(config.openai_api_key).toBe("sk-configured-valid");
+  });
+
+  test("deliberate RECORDINGS_API_KEY still overrides configured openai_api_key", () => {
+    const configPath = join(tempDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({ openai_api_key: "sk-configured" })
+    );
+    process.env.RECORDINGS_API_KEY = "sk-recordings-explicit";
+    const config = loadConfig(configPath);
+    expect(config.openai_api_key).toBe("sk-recordings-explicit");
+  });
+
   test("env var RECORDINGS_API_KEY overrides OPENAI_API_KEY", () => {
     process.env.OPENAI_API_KEY = "sk-openai";
     process.env.RECORDINGS_API_KEY = "sk-recordings";
