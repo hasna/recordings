@@ -1,5 +1,7 @@
 import { type Database } from "bun:sqlite";
 import { getDatabase, shortUuid } from "./database.js";
+import { getProject } from "./projects.js";
+import { ProjectNotFoundError } from "./errors.js";
 import type { Agent } from "../types/index.js";
 
 function parseAgent(row: Record<string, unknown>): Agent {
@@ -95,8 +97,18 @@ export function setAgentFocus(idOrName: string, projectId: string | null, db?: D
   const d = db || getDatabase();
   const agent = getAgent(idOrName, d);
   if (!agent) return null;
+  // Resolve the project reference (full UUID, truncated prefix, path, or name)
+  // to the real primary key BEFORE writing, so the truncated id the tools
+  // surface works and an unknown ref fails cleanly instead of tripping the
+  // FOREIGN KEY constraint and leaking a raw SQLite error.
+  let resolvedProjectId: string | null = null;
+  if (projectId) {
+    const project = getProject(projectId, d);
+    if (!project) throw new ProjectNotFoundError(projectId);
+    resolvedProjectId = project.id;
+  }
   d.query("UPDATE agents SET active_project_id = ?, last_seen_at = ? WHERE id = ?").run(
-    projectId,
+    resolvedProjectId,
     new Date().toISOString(),
     agent.id
   );

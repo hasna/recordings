@@ -67,24 +67,27 @@ describe("recordings CLI", () => {
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("events");
-    expect(stdout).toContain("storage");
+    expect(stdout).toContain("agents");
+    expect(stdout).toContain("feedback");
     expect(stdout).toContain("webhooks");
+    // The client-side Postgres DSN sync command is gone.
     expect(stdout).not.toContain("cloud");
+    expect(stdout).not.toContain("storage");
   });
 
-  test("storage status reports local mode as JSON", async () => {
-    const home = join(tmpdir(), `open-recordings-cli-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  test("agents lists via the local store (no DSN) as JSON", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-agents-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);
 
     const proc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "--json", "storage", "status"],
+      [process.execPath, "src/cli/index.ts", "--json", "agents"],
       {
         cwd: process.cwd(),
         env: {
           ...process.env,
           HOME: home,
-          HASNA_RECORDINGS_DATABASE_URL: "",
-          RECORDINGS_DATABASE_URL: "",
+          HASNA_RECORDINGS_API_URL: "",
+          HASNA_RECORDINGS_API_KEY: "",
           HASNA_RECORDINGS_STORAGE_MODE: "",
           RECORDINGS_STORAGE_MODE: "",
         },
@@ -101,12 +104,8 @@ describe("recordings CLI", () => {
 
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
-
-    const status = JSON.parse(stdout) as { mode: string; enabled: boolean; service: string; tables: Array<{ table: string; rows: number }> };
-    expect(status.mode).toBe("local");
-    expect(status.enabled).toBe(false);
-    expect(status.service).toBe("recordings");
-    expect(status.tables.some((table) => table.table === "recordings")).toBe(true);
+    // Fresh local store => empty agent list, proving local routing works with no API env.
+    expect(JSON.parse(stdout)).toEqual([]);
   });
 
   test("--json app status reports package installer paths", async () => {

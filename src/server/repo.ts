@@ -12,6 +12,7 @@
  * stubs — every operation executes real SQL.
  */
 import type { PgAdapterAsync } from "../db/remote-storage.js";
+import { ProjectNotFoundError, ValidationError } from "../db/errors.js";
 import type {
   Recording,
   CreateRecordingInput,
@@ -19,6 +20,10 @@ import type {
   Agent,
   Project,
 } from "../types/index.js";
+
+// Re-exported so `/v1` route code can `import * as repo` and reference
+// `repo.ProjectNotFoundError` when mapping a bad focus ref to a clean 400.
+export { ProjectNotFoundError, ValidationError };
 
 function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
@@ -88,8 +93,32 @@ export async function createRecording(
   input: CreateRecordingInput,
 ): Promise<Recording> {
   if (typeof input.raw_text !== "string" || !input.raw_text) {
-    throw new Error("raw_text is required");
+    throw new ValidationError("raw_text is required");
   }
+
+  // Resolve the agent_id/project_id references BEFORE inserting so an unresolved
+  // name (or a truncated id-prefix) never trips the recordings.agent_id /
+  // recordings.project_id foreign keys and 500s. On local SQLite the FK is not
+  // enforced so a dangling ref just stores; on the cloud Postgres it must be a
+  // real PK. Postgres enforces FKs, so we normalize the client-supplied ref to
+  // an existing row here (mirroring the id/name/prefix widening the lookups use).
+  let resolvedAgentId: string | null = null;
+  if (input.agent_id) {
+    const agent = await getAgent(pg, input.agent_id);
+    // A first-time agent name/id that isn't registered yet is self-registered
+    // (idempotent, same semantics as register_agent) so `--agent <name> save`
+    // just works instead of erroring on a missing agent.
+    resolvedAgentId = agent ? agent.id : (await registerAgent(pg, input.agent_id)).id;
+  }
+  let resolvedProjectId: string | null = null;
+  if (input.project_id) {
+    const project = await getProject(pg, input.project_id);
+    // A project can't be materialized from a bare ref (it needs a path), so an
+    // unknown project ref fails cleanly as a 400 instead of leaking the raw FK.
+    if (!project) throw new ProjectNotFoundError(input.project_id);
+    resolvedProjectId = project.id;
+  }
+
   const id = shortUuid();
   await pg.run(
     `INSERT INTO recordings (id, audio_path, raw_text, processed_text, processing_mode, model_used, enhancement_model, duration_ms, language, tags, agent_id, project_id, session_id, goal, role, task_list_id, machine_id, metadata)
@@ -104,8 +133,8 @@ export async function createRecording(
     input.duration_ms || 0,
     input.language || null,
     JSON.stringify(input.tags || []),
-    input.agent_id || null,
-    input.project_id || null,
+    resolvedAgentId,
+    resolvedProjectId,
     input.session_id || null,
     input.goal || null,
     input.role || null,
@@ -258,7 +287,7 @@ export async function registerAgent(
   description?: string | null,
   role?: string | null,
 ): Promise<Agent> {
-  if (!name) throw new Error("name is required");
+  if (!name) throw new ValidationError("name is required");
   const now = new Date().toISOString();
   const existing = (await pg.get("SELECT * FROM agents WHERE name = ?", name)) as
     | Record<string, unknown>
@@ -307,6 +336,46 @@ export async function listAgents(pg: PgAdapterAsync): Promise<Agent[]> {
   return rows.map(parseAgent);
 }
 
+export async function heartbeatAgent(
+  pg: PgAdapterAsync,
+  idOrName: string,
+): Promise<Agent | null> {
+  const agent = await getAgent(pg, idOrName);
+  if (!agent) return null;
+  await pg.run(
+    "UPDATE agents SET last_seen_at = ? WHERE id = ?",
+    new Date().toISOString(),
+    agent.id,
+  );
+  return getAgent(pg, agent.id);
+}
+
+export async function setAgentFocus(
+  pg: PgAdapterAsync,
+  idOrName: string,
+  projectId: string | null,
+): Promise<Agent | null> {
+  const agent = await getAgent(pg, idOrName);
+  if (!agent) return null;
+  // Resolve the project reference (full UUID, truncated prefix, path, or name)
+  // to the real primary key BEFORE writing, so the truncated id the tools
+  // surface works and an unknown ref fails cleanly instead of tripping the
+  // active_project_id foreign key and leaking the raw DB error.
+  let resolvedProjectId: string | null = null;
+  if (projectId) {
+    const project = await getProject(pg, projectId);
+    if (!project) throw new ProjectNotFoundError(projectId);
+    resolvedProjectId = project.id;
+  }
+  await pg.run(
+    "UPDATE agents SET active_project_id = ?, last_seen_at = ? WHERE id = ?",
+    resolvedProjectId,
+    new Date().toISOString(),
+    agent.id,
+  );
+  return getAgent(pg, agent.id);
+}
+
 // ── Projects ────────────────────────────────────────────────────────────────
 
 export async function registerProject(
@@ -315,7 +384,7 @@ export async function registerProject(
   path: string,
   description?: string | null,
 ): Promise<Project> {
-  if (!name || !path) throw new Error("name and path are required");
+  if (!name || !path) throw new ValidationError("name and path are required");
   const now = new Date().toISOString();
   const existing = (await pg.get("SELECT * FROM projects WHERE path = ?", path)) as
     | Record<string, unknown>
@@ -341,11 +410,24 @@ export async function getProject(
   pg: PgAdapterAsync,
   idOrPath: string,
 ): Promise<Project | null> {
+  // Resolve in the same widening order the recordings/agents lookups use so a
+  // full id, path, name, or truncated id-prefix (what list/register surface)
+  // all resolve to the same row.
   let row = (await pg.get("SELECT * FROM projects WHERE id = ?", idOrPath)) as
     | Record<string, unknown>
     | null;
   if (!row) {
     row = (await pg.get("SELECT * FROM projects WHERE path = ?", idOrPath)) as
+      | Record<string, unknown>
+      | null;
+  }
+  if (!row) {
+    row = (await pg.get("SELECT * FROM projects WHERE name = ?", idOrPath)) as
+      | Record<string, unknown>
+      | null;
+  }
+  if (!row && idOrPath) {
+    row = (await pg.get("SELECT * FROM projects WHERE id LIKE ? || '%'", idOrPath)) as
       | Record<string, unknown>
       | null;
   }
@@ -357,4 +439,23 @@ export async function listProjects(pg: PgAdapterAsync): Promise<Project[]> {
     "SELECT * FROM projects ORDER BY updated_at DESC",
   )) as Record<string, unknown>[];
   return rows.map(parseProject);
+}
+
+// ── Feedback ──────────────────────────────────────────────────────────────────
+
+export async function saveFeedback(
+  pg: PgAdapterAsync,
+  input: { message: string; email?: string | null; category?: string | null; version?: string | null },
+): Promise<{ saved: true }> {
+  if (typeof input.message !== "string" || !input.message.trim()) {
+    throw new ValidationError("message is required");
+  }
+  await pg.run(
+    "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+    input.message,
+    input.email || null,
+    input.category || "general",
+    input.version || null,
+  );
+  return { saved: true };
 }

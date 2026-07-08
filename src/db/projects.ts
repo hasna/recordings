@@ -49,6 +49,8 @@ export function getProject(
 ): Project | null {
   const d = db || getDatabase();
 
+  // Resolve by full id, path, name, then truncated id-prefix — mirroring the
+  // agent/recording lookups so the short id that list/register surface resolves.
   let row = d
     .query("SELECT * FROM projects WHERE id = ?")
     .get(idOrPath) as Record<string, unknown> | undefined;
@@ -56,6 +58,18 @@ export function getProject(
   if (!row) {
     row = d
       .query("SELECT * FROM projects WHERE path = ?")
+      .get(idOrPath) as Record<string, unknown> | undefined;
+  }
+
+  if (!row) {
+    row = d
+      .query("SELECT * FROM projects WHERE name = ?")
+      .get(idOrPath) as Record<string, unknown> | undefined;
+  }
+
+  if (!row && idOrPath) {
+    row = d
+      .query("SELECT * FROM projects WHERE id LIKE ? || '%'")
       .get(idOrPath) as Record<string, unknown> | undefined;
   }
 

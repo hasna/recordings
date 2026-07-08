@@ -18,64 +18,22 @@ export {
   EnhancementError,
 } from "./types/index.js";
 
-// ── Database ────────────────────────────────────────────────────────────────
+// ── Storage abstraction (LocalStore + ApiStore behind one Store) ──────────────
+export { getStore, __resetStore, APP } from "./store.js";
+export type { Store, RecordingStats, FeedbackInput } from "./store.js";
 export {
-  getDatabase,
-  closeDatabase,
-  resetDatabase,
-  getDbPath,
-  shortUuid,
-} from "./db/database.js";
-export { PgAdapterAsync } from "./db/remote-storage.js";
-export {
-  RECORDINGS_STORAGE_ENV,
-  RECORDINGS_STORAGE_FALLBACK_ENV,
-  RECORDINGS_STORAGE_MODE_ENV,
-  RECORDINGS_STORAGE_MODE_FALLBACK_ENV,
-  STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
-  getStorageConfig,
-  getStorageConnectionString,
-  getConnectionString,
-  getStorageDatabaseEnv,
-  getStorageDatabaseEnvName,
-  getStorageDatabaseUrl,
-  type StorageConfig,
-  type StorageEnv,
-  type StorageMode,
-} from "./db/storage-config.js";
-export {
-  RECORDINGS_STORAGE_TABLES,
-  STORAGE_TABLES,
-  getStorageStatus,
-  pushStorageChanges,
-  pullStorageChanges,
-  syncStorageChanges,
-  parseStorageTables,
-  type StorageStatus,
-  type SyncResult,
-} from "./db/storage-sync.js";
-export { applyPgMigrations, type PgMigrationResult } from "./db/pg-migrate.js";
-
-// ── Recordings CRUD ─────────────────────────────────────────────────────────
-export {
-  createRecording,
-  getRecording,
-  listRecordings,
-  deleteRecording,
-  searchRecordings,
-  getRecordingStats,
-} from "./db/recordings.js";
-
-// ── Agents ──────────────────────────────────────────────────────────────────
-export { registerAgent, getAgent, listAgents } from "./db/agents.js";
-
-// ── Projects ────────────────────────────────────────────────────────────────
-export {
-  registerProject,
-  getProject,
-  listProjects,
-} from "./db/projects.js";
+  resolveStorageClient,
+  resolveTransport,
+  createHttpTransport,
+  createStorageClient,
+  HasnaHttpError,
+} from "./http/client.js";
+export type {
+  StorageClient,
+  StorageMode,
+  TransportResolution,
+  HttpTransport,
+} from "./http/client.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 export {
