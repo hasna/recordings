@@ -20,6 +20,7 @@ import { enhanceText, processText } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
+import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
 
 const program = new Command();
 
@@ -1172,14 +1173,25 @@ program
         if (target === "codex") {
           const configPath = pathJoin(home, ".codex", "config.toml");
           if (fileExists(configPath)) {
-            let content = readFileSync(configPath, "utf-8");
+            const content = readFileSync(configPath, "utf-8");
             if (opts.uninstall) {
-              content = content.replace(/\n\[mcp_servers\.recordings\]\ncommand = "[^"]*"\nargs = \[\]\n?/g, "\n");
-            } else if (!content.includes("[mcp_servers.recordings]")) {
-              content += `\n[mcp_servers.recordings]\ncommand = "${mcpCmd}"\nargs = []\n`;
+              // Remove the whole [mcp_servers.recordings] table (and subtables)
+              // regardless of transport form (stdio command/args OR http url).
+              const { content: next, removed } = removeCodexServerBlock(content, "recordings");
+              writeFileSync(configPath, next, "utf-8");
+              console.log(
+                removed
+                  ? chalk.green(`Removed from Codex: ${configPath}`)
+                  : chalk.yellow(`Codex: no recordings MCP block found in ${configPath}`),
+              );
+            } else {
+              // Authoritative install: replace any existing block with a fresh
+              // stdio block so a stale http-transport block is converted, not
+              // silently kept.
+              const next = upsertCodexStdioBlock(content, "recordings", mcpCmd);
+              writeFileSync(configPath, next, "utf-8");
+              console.log(chalk.green(`Installed into Codex: ${configPath}`));
             }
-            writeFileSync(configPath, content, "utf-8");
-            console.log(chalk.green(`${action} Codex: ${configPath}`));
           } else {
             console.log(chalk.yellow(`Codex config not found: ${configPath}`));
           }
