@@ -143,8 +143,14 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
       if (action === "focus") {
         if (method !== "POST") return error(405, `method ${method} not allowed on /v1/agents/:id/focus`);
         const body = await readJson<{ project_id?: string | null }>(req);
-        const agent = await repo.setAgentFocus(pg, id, body?.project_id ?? null);
-        return agent ? json({ agent }) : error(404, "agent not found");
+        try {
+          const agent = await repo.setAgentFocus(pg, id, body?.project_id ?? null);
+          return agent ? json({ agent }) : error(404, "agent not found");
+        } catch (e) {
+          // Unknown project ref -> clean 400 (never leak the raw FK error).
+          if (e instanceof repo.ProjectNotFoundError) return error(400, e.message);
+          throw e;
+        }
       }
       if (action) return error(404, `unknown agent action: ${action}`);
       if (method === "GET") {

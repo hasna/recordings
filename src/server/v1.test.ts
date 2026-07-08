@@ -18,6 +18,17 @@ const AGENT_ROW = {
   active_project_id: null,
 };
 
+// A real project row with a full 36-char UUID PK; the tools surface only the
+// first 8 chars, so focus must resolve the truncated ref back to this row.
+const PROJECT_ROW = {
+  id: "164a6e1f-ac00-4d5d-9390-215cfa9be003",
+  name: "workspace",
+  path: "/home/agent/workspace",
+  description: null,
+  created_at: "2026-01-01T00:00:00.000Z",
+  updated_at: "2026-01-01T00:00:00.000Z",
+};
+
 const runCalls: Array<{ sql: string; params: unknown[] }> = [];
 
 const fakePg = {
@@ -25,9 +36,20 @@ const fakePg = {
     runCalls.push({ sql, params });
     return { changes: 1 };
   },
-  async get(sql: string) {
-    // Any agent lookup resolves to our canned row; everything else is null.
+  async get(sql: string, ...params: unknown[]) {
+    // Any agent lookup resolves to our canned row.
     if (/from\s+agents/i.test(sql)) return { ...AGENT_ROW };
+    // Project resolution mirrors repo.getProject: exact id/path/name or the
+    // truncated id-prefix (LIKE) all resolve to PROJECT_ROW; anything else null.
+    if (/from\s+projects/i.test(sql)) {
+      const ref = params[0] as string;
+      const matches =
+        ref === PROJECT_ROW.id ||
+        ref === PROJECT_ROW.path ||
+        ref === PROJECT_ROW.name ||
+        (/like/i.test(sql) && PROJECT_ROW.id.startsWith(ref));
+      return matches ? { ...PROJECT_ROW } : null;
+    }
     return null;
   },
   async all() {
@@ -87,5 +109,37 @@ describe("v1 handler: previously-failing cloud routes", () => {
     const res = await handleV1Request(req, new URL(req.url));
     expect(res!.status).toBe(200);
     expect(runCalls.some((c) => /update agents set active_project_id/i.test(c.sql))).toBe(true);
+  });
+
+  test("POST focus with the TRUNCATED project id -> 200 and stores the full UUID", async () => {
+    const shortId = "164a6e1f"; // the 8-char ref the tools surface
+    const req = post("/v1/agents/agent-1/focus", { project_id: shortId });
+    const res = await handleV1Request(req, new URL(req.url));
+    expect(res!.status).toBe(200);
+    const write = runCalls.find((c) => /update agents set active_project_id/i.test(c.sql));
+    expect(write).toBeDefined();
+    // The resolved full UUID is persisted, never the truncated ref.
+    expect(write!.params[0]).toBe("164a6e1f-ac00-4d5d-9390-215cfa9be003");
+  });
+
+  test("POST focus with the project NAME -> 200 (resolved)", async () => {
+    const req = post("/v1/agents/agent-1/focus", { project_id: "workspace" });
+    const res = await handleV1Request(req, new URL(req.url));
+    expect(res!.status).toBe(200);
+    const write = runCalls.find((c) => /update agents set active_project_id/i.test(c.sql));
+    expect(write!.params[0]).toBe("164a6e1f-ac00-4d5d-9390-215cfa9be003");
+  });
+
+  test("POST focus with an unknown project -> clean 400 (never a raw 500 FK leak)", async () => {
+    const req = post("/v1/agents/agent-1/focus", { project_id: "deadbeef" });
+    const res = await handleV1Request(req, new URL(req.url));
+    expect(res!.status).toBe(400);
+    const body = (await res!.json()) as { error: string };
+    expect(body.error).toBe("project not found: deadbeef");
+    // The Postgres FK constraint name must never surface to the client.
+    expect(body.error).not.toMatch(/fkey/i);
+    expect(body.error).not.toMatch(/foreign key/i);
+    // And no focus write was attempted for the bad ref.
+    expect(runCalls.some((c) => /update agents set active_project_id/i.test(c.sql))).toBe(false);
   });
 });

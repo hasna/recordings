@@ -127,3 +127,45 @@ describe("cloud HTTP CRUD mapping + auth", () => {
     expect(calls[0].method).toBe("DELETE");
   });
 });
+
+describe("ApiStore.setAgentFocus error mapping", () => {
+  const cloudEnv = {
+    HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+    HASNA_RECORDINGS_API_KEY: "k",
+  };
+
+  async function withFetch<T>(status: number, body: unknown, fn: () => Promise<T>): Promise<T> {
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(body === undefined ? "" : JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    try {
+      return await fn();
+    } finally {
+      globalThis.fetch = orig;
+    }
+  }
+
+  test("400 surfaces the server's clean 'project not found' message (no generic 'request failed -> 400')", async () => {
+    await withFetch(400, { error: "project not found: deadbeef" }, async () => {
+      const store = getStore(cloudEnv);
+      let caught: unknown;
+      try {
+        await store.setAgentFocus("agent-1", "deadbeef");
+      } catch (e) {
+        caught = e;
+      }
+      expect((caught as Error).message).toBe("project not found: deadbeef");
+      expect((caught as Error).message).not.toMatch(/request failed/i);
+    });
+  });
+
+  test("404 still resolves to null (agent not found)", async () => {
+    await withFetch(404, { error: "agent not found" }, async () => {
+      const store = getStore(cloudEnv);
+      expect(await store.setAgentFocus("nope", "x")).toBeNull();
+    });
+  });
+});

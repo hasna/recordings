@@ -209,7 +209,20 @@ function apiStore(client: StorageClient): Store {
         const res = await client.transport.post<unknown>(`/agents/${encodeURIComponent(idOrName)}/focus`, { project_id: projectId });
         return res ? unwrap<Agent>(res, "agent") : null;
       } catch (error) {
-        if (error && typeof error === "object" && (error as { status?: number }).status === 404) return null;
+        if (error && typeof error === "object") {
+          const status = (error as { status?: number }).status;
+          if (status === 404) return null;
+          // A 400 means the project ref could not be resolved server-side.
+          // Surface the server's clean message ("project not found: X") instead
+          // of the generic "request failed -> 400".
+          if (status === 400) {
+            const body = (error as { body?: unknown }).body;
+            const msg = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
+              ? (body as { error: string }).error
+              : "invalid focus request";
+            throw new Error(msg);
+          }
+        }
         throw error;
       }
     },

@@ -12,6 +12,7 @@
  * stubs — every operation executes real SQL.
  */
 import type { PgAdapterAsync } from "../db/remote-storage.js";
+import { ProjectNotFoundError } from "../db/errors.js";
 import type {
   Recording,
   CreateRecordingInput,
@@ -19,6 +20,10 @@ import type {
   Agent,
   Project,
 } from "../types/index.js";
+
+// Re-exported so `/v1` route code can `import * as repo` and reference
+// `repo.ProjectNotFoundError` when mapping a bad focus ref to a clean 400.
+export { ProjectNotFoundError };
 
 function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
@@ -328,9 +333,19 @@ export async function setAgentFocus(
 ): Promise<Agent | null> {
   const agent = await getAgent(pg, idOrName);
   if (!agent) return null;
+  // Resolve the project reference (full UUID, truncated prefix, path, or name)
+  // to the real primary key BEFORE writing, so the truncated id the tools
+  // surface works and an unknown ref fails cleanly instead of tripping the
+  // active_project_id foreign key and leaking the raw DB error.
+  let resolvedProjectId: string | null = null;
+  if (projectId) {
+    const project = await getProject(pg, projectId);
+    if (!project) throw new ProjectNotFoundError(projectId);
+    resolvedProjectId = project.id;
+  }
   await pg.run(
     "UPDATE agents SET active_project_id = ?, last_seen_at = ? WHERE id = ?",
-    projectId,
+    resolvedProjectId,
     new Date().toISOString(),
     agent.id,
   );
@@ -371,11 +386,24 @@ export async function getProject(
   pg: PgAdapterAsync,
   idOrPath: string,
 ): Promise<Project | null> {
+  // Resolve in the same widening order the recordings/agents lookups use so a
+  // full id, path, name, or truncated id-prefix (what list/register surface)
+  // all resolve to the same row.
   let row = (await pg.get("SELECT * FROM projects WHERE id = ?", idOrPath)) as
     | Record<string, unknown>
     | null;
   if (!row) {
     row = (await pg.get("SELECT * FROM projects WHERE path = ?", idOrPath)) as
+      | Record<string, unknown>
+      | null;
+  }
+  if (!row) {
+    row = (await pg.get("SELECT * FROM projects WHERE name = ?", idOrPath)) as
+      | Record<string, unknown>
+      | null;
+  }
+  if (!row && idOrPath) {
+    row = (await pg.get("SELECT * FROM projects WHERE id LIKE ? || '%'", idOrPath)) as
       | Record<string, unknown>
       | null;
   }

@@ -81,6 +81,20 @@ describe("getProject", () => {
     expect(found!.name).toBe("finder");
   });
 
+  test("finds project by name", () => {
+    const created = registerProject("named-app", "/tmp/named-app", undefined, db);
+    const found = getProject("named-app", db);
+    expect(found).toBeDefined();
+    expect(found!.id).toBe(created.id);
+  });
+
+  test("finds project by truncated 8-char id prefix (what the tools surface)", () => {
+    const created = registerProject("prefix-app", "/tmp/prefix-app", undefined, db);
+    const found = getProject(created.id.slice(0, 8), db);
+    expect(found).toBeDefined();
+    expect(found!.id).toBe(created.id);
+  });
+
   test("returns null for non-existent project", () => {
     const found = getProject("nonexistent", db);
     expect(found).toBeNull();
