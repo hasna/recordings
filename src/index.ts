@@ -18,15 +18,6 @@ export {
   EnhancementError,
 } from "./types/index.js";
 
-// ── Database (local SQLite lifecycle) ─────────────────────────────────────────
-export {
-  getDatabase,
-  closeDatabase,
-  resetDatabase,
-  getDbPath,
-  shortUuid,
-} from "./db/database.js";
-
 // ── Storage abstraction (LocalStore + ApiStore behind one Store) ──────────────
 export { getStore, __resetStore, APP } from "./store.js";
 export type { Store, RecordingStats, FeedbackInput } from "./store.js";
@@ -43,26 +34,6 @@ export type {
   TransportResolution,
   HttpTransport,
 } from "./http/client.js";
-
-// ── Recordings CRUD ─────────────────────────────────────────────────────────
-export {
-  createRecording,
-  getRecording,
-  listRecordings,
-  deleteRecording,
-  searchRecordings,
-  getRecordingStats,
-} from "./db/recordings.js";
-
-// ── Agents ──────────────────────────────────────────────────────────────────
-export { registerAgent, getAgent, listAgents } from "./db/agents.js";
-
-// ── Projects ────────────────────────────────────────────────────────────────
-export {
-  registerProject,
-  getProject,
-  listProjects,
-} from "./db/projects.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 export {
