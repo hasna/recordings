@@ -207,6 +207,15 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
 
     return error(404, `unknown /v1 resource: ${resource ?? ""}`);
   } catch (e) {
-    return error(500, (e as Error).message);
+    // Clean domain errors carry a safe, client-facing message → 400.
+    if (e instanceof repo.ProjectNotFoundError || e instanceof repo.ValidationError) {
+      return error(400, e.message);
+    }
+    // Anything else is an unexpected/internal failure. Its raw text (e.g. a
+    // Postgres constraint name like `agents_active_project_id_fkey`, table or
+    // column names, or a DSN fragment) must NEVER reach the client. Log it
+    // server-side for diagnosis and return a generic message.
+    console.error(`[recordings-serve] unhandled ${method} ${path} error:`, e);
+    return error(500, "internal server error");
   }
 }

@@ -142,4 +142,30 @@ describe("v1 handler: previously-failing cloud routes", () => {
     // And no focus write was attempted for the bad ref.
     expect(runCalls.some((c) => /update agents set active_project_id/i.test(c.sql))).toBe(false);
   });
+
+  test("an unexpected DB error -> sanitized 500 that never leaks internals", async () => {
+    // Simulate the raw Postgres failure the live probe saw (a FK violation whose
+    // message carries the constraint name). It must be caught and sanitized.
+    const boom = new Error(
+      'insert or update on table "agents" violates foreign key constraint "agents_active_project_id_fkey"',
+    );
+    const original = fakePg.run;
+    fakePg.run = async () => {
+      throw boom;
+    };
+    try {
+      const req = post("/v1/feedback", { message: "trigger", category: "test" });
+      const res = await handleV1Request(req, new URL(req.url));
+      expect(res!.status).toBe(500);
+      const body = (await res!.json()) as { error: string };
+      expect(body.error).toBe("internal server error");
+      // No Postgres internals (constraint name, "foreign key", table/column text).
+      expect(body.error).not.toMatch(/fkey/i);
+      expect(body.error).not.toMatch(/foreign key/i);
+      expect(body.error).not.toMatch(/agents_active_project_id/i);
+      expect(body.error).not.toMatch(/violates|constraint/i);
+    } finally {
+      fakePg.run = original;
+    }
+  });
 });

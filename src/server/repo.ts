@@ -12,7 +12,7 @@
  * stubs — every operation executes real SQL.
  */
 import type { PgAdapterAsync } from "../db/remote-storage.js";
-import { ProjectNotFoundError } from "../db/errors.js";
+import { ProjectNotFoundError, ValidationError } from "../db/errors.js";
 import type {
   Recording,
   CreateRecordingInput,
@@ -23,7 +23,7 @@ import type {
 
 // Re-exported so `/v1` route code can `import * as repo` and reference
 // `repo.ProjectNotFoundError` when mapping a bad focus ref to a clean 400.
-export { ProjectNotFoundError };
+export { ProjectNotFoundError, ValidationError };
 
 function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
@@ -93,7 +93,7 @@ export async function createRecording(
   input: CreateRecordingInput,
 ): Promise<Recording> {
   if (typeof input.raw_text !== "string" || !input.raw_text) {
-    throw new Error("raw_text is required");
+    throw new ValidationError("raw_text is required");
   }
   const id = shortUuid();
   await pg.run(
@@ -263,7 +263,7 @@ export async function registerAgent(
   description?: string | null,
   role?: string | null,
 ): Promise<Agent> {
-  if (!name) throw new Error("name is required");
+  if (!name) throw new ValidationError("name is required");
   const now = new Date().toISOString();
   const existing = (await pg.get("SELECT * FROM agents WHERE name = ?", name)) as
     | Record<string, unknown>
@@ -360,7 +360,7 @@ export async function registerProject(
   path: string,
   description?: string | null,
 ): Promise<Project> {
-  if (!name || !path) throw new Error("name and path are required");
+  if (!name || !path) throw new ValidationError("name and path are required");
   const now = new Date().toISOString();
   const existing = (await pg.get("SELECT * FROM projects WHERE path = ?", path)) as
     | Record<string, unknown>
@@ -424,7 +424,7 @@ export async function saveFeedback(
   input: { message: string; email?: string | null; category?: string | null; version?: string | null },
 ): Promise<{ saved: true }> {
   if (typeof input.message !== "string" || !input.message.trim()) {
-    throw new Error("message is required");
+    throw new ValidationError("message is required");
   }
   await pg.run(
     "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
