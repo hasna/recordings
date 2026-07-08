@@ -95,6 +95,30 @@ export async function createRecording(
   if (typeof input.raw_text !== "string" || !input.raw_text) {
     throw new ValidationError("raw_text is required");
   }
+
+  // Resolve the agent_id/project_id references BEFORE inserting so an unresolved
+  // name (or a truncated id-prefix) never trips the recordings.agent_id /
+  // recordings.project_id foreign keys and 500s. On local SQLite the FK is not
+  // enforced so a dangling ref just stores; on the cloud Postgres it must be a
+  // real PK. Postgres enforces FKs, so we normalize the client-supplied ref to
+  // an existing row here (mirroring the id/name/prefix widening the lookups use).
+  let resolvedAgentId: string | null = null;
+  if (input.agent_id) {
+    const agent = await getAgent(pg, input.agent_id);
+    // A first-time agent name/id that isn't registered yet is self-registered
+    // (idempotent, same semantics as register_agent) so `--agent <name> save`
+    // just works instead of erroring on a missing agent.
+    resolvedAgentId = agent ? agent.id : (await registerAgent(pg, input.agent_id)).id;
+  }
+  let resolvedProjectId: string | null = null;
+  if (input.project_id) {
+    const project = await getProject(pg, input.project_id);
+    // A project can't be materialized from a bare ref (it needs a path), so an
+    // unknown project ref fails cleanly as a 400 instead of leaking the raw FK.
+    if (!project) throw new ProjectNotFoundError(input.project_id);
+    resolvedProjectId = project.id;
+  }
+
   const id = shortUuid();
   await pg.run(
     `INSERT INTO recordings (id, audio_path, raw_text, processed_text, processing_mode, model_used, enhancement_model, duration_ms, language, tags, agent_id, project_id, session_id, goal, role, task_list_id, machine_id, metadata)
@@ -109,8 +133,8 @@ export async function createRecording(
     input.duration_ms || 0,
     input.language || null,
     JSON.stringify(input.tags || []),
-    input.agent_id || null,
-    input.project_id || null,
+    resolvedAgentId,
+    resolvedProjectId,
     input.session_id || null,
     input.goal || null,
     input.role || null,
