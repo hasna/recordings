@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { loadConfig, getDataDir, ensureDataDir, DEFAULT_CONFIG } from "../lib/config.js";
-import { getStorageConfig, getStorageConnectionString } from "../db/storage-config.js";
+import { getStore } from "../store.js";
 
 let tempDir: string;
 
@@ -37,59 +37,20 @@ beforeEach(() => {
   }
 });
 
-describe("storage sync config", () => {
-  test("canonical storage database env wins over fallback env", () => {
-    process.env.HASNA_RECORDINGS_DATABASE_URL = "postgres://new.example/recordings";
-    process.env.RECORDINGS_DATABASE_URL = "postgres://fallback.example/recordings";
-
-    expect(getStorageConnectionString()).toBe("postgres://new.example/recordings");
-    expect(getStorageConfig().mode).toBe("hybrid");
+describe("store transport resolution", () => {
+  test("no api env resolves to the local store", () => {
+    const store = getStore({});
+    expect(store.mode).toBe("local");
+    expect(store.baseUrl).toBeNull();
   });
 
-  test("fallback storage database env is accepted", () => {
-    process.env.RECORDINGS_DATABASE_URL = "postgres://fallback.example/recordings";
-
-    expect(getStorageConnectionString()).toBe("postgres://fallback.example/recordings");
-    expect(getStorageConfig().mode).toBe("hybrid");
-  });
-
-  test("canonical storage mode wins over fallback mode", () => {
-    process.env.HASNA_RECORDINGS_STORAGE_MODE = "remote";
-    process.env.RECORDINGS_STORAGE_MODE = "hybrid";
-
-    expect(getStorageConfig().mode).toBe("remote");
-  });
-
-  test("storage config exposes postgres naming for database settings", () => {
-    const config = getStorageConfig();
-
-    expect(config.postgres.port).toBe(5432);
-    expect(config.postgres.password_env).toBe("RECORDINGS_DATABASE_PASSWORD");
-    expect(["r", "d", "s"].join("") in config).toBe(false);
-  });
-
-  test("storage config accepts old local config key without exposing it", () => {
-    const storageDir = join(tempDir, "storage");
-    mkdirSync(storageDir, { recursive: true });
-    process.env.HASNA_RECORDINGS_STORAGE_CONFIG = join(storageDir, "config.json");
-
-    writeFileSync(
-      process.env.HASNA_RECORDINGS_STORAGE_CONFIG,
-      JSON.stringify({
-        mode: "remote",
-        [["r", "d", "s"].join("")]: {
-          host: "legacy.example",
-          username: "recordings",
-          password_env: "RECORDINGS_DB_PASSWORD",
-        },
-      })
-    );
-
-    const config = getStorageConfig();
-    expect(config.mode).toBe("remote");
-    expect(config.postgres.host).toBe("legacy.example");
-    expect(config.postgres.username).toBe("recordings");
-    expect(["r", "d", "s"].join("") in config).toBe(false);
+  test("api url + key resolves to the cloud-http store (bearer only, no DSN)", () => {
+    const store = getStore({
+      HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+      HASNA_RECORDINGS_API_KEY: "test-key",
+    });
+    expect(store.mode).toBe("cloud-http");
+    expect(store.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 });
 

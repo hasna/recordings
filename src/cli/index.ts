@@ -7,13 +7,7 @@ import { existsSync, readFileSync } from "fs";
 import { dirname, join as pathJoin } from "path";
 import { fileURLToPath } from "url";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
-import { getDatabase, getAdapter } from "../db/database.js";
-import { resolveRecordingsBackend } from "../http/backend.js";
-import { registerAgent, getAgent, listAgents } from "../db/agents.js";
-import {
-  registerProject,
-  listProjects,
-} from "../db/projects.js";
+import { getStore } from "../store.js";
 import {
   startRecording,
   stopRecording,
@@ -25,7 +19,6 @@ import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
 import { enhanceText, processText } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
-import { registerStorageCommands } from "./storage.js";
 import { applyEnhancementOptions } from "./options.js";
 
 const program = new Command();
@@ -41,7 +34,6 @@ program
   .option("--project <name>", "Project name or ID")
   .option("--session <id>", "Session ID");
 
-registerStorageCommands(program);
 registerEventsCommands(program, { source: "recordings" });
 
 // ── record ──────────────────────────────────────────────────────────────────
@@ -121,7 +113,7 @@ program
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
     const parentOpts = program.opts();
 
-    const recording = await resolveRecordingsBackend().createRecording({
+    const recording = await getStore().createRecording({
       audio_path: audioPath,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -177,7 +169,7 @@ program
     const processed = await processText(transcription.text, config, opts.systemPrompt);
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
-    const recording = await resolveRecordingsBackend().createRecording({
+    const recording = await getStore().createRecording({
       audio_path: file,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -269,7 +261,7 @@ program
 
       const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
-      const recording = await resolveRecordingsBackend().createRecording({
+      const recording = await getStore().createRecording({
         raw_text: rawText,
         processed_text: processedText,
         processing_mode: mode,
@@ -304,11 +296,9 @@ program
   .option("--since <date>", "After date (ISO)")
   .option("--until <date>", "Before date (ISO)")
   .action(async (opts) => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const recordings = await resolveRecordingsBackend().listRecordings({
+    const recordings = await getStore().listRecordings({
       limit: parseInt(opts.limit, 10),
       processing_mode: opts.mode,
       tags: opts.tags ? opts.tags.split(",") : undefined,
@@ -343,11 +333,9 @@ program
   .command("show <id>")
   .description("Show recording details")
   .action(async (id) => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const recording = await resolveRecordingsBackend().getRecording(id);
+    const recording = await getStore().getRecording(id);
     if (!recording) {
       console.error(chalk.red(`Recording not found: ${id}`));
       process.exit(1);
@@ -368,11 +356,9 @@ program
   .description("Search recordings by text content")
   .option("-n, --limit <n>", "Max results", "20")
   .action(async (query, opts) => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const results = await resolveRecordingsBackend().searchRecordings(query, {
+    const results = await getStore().searchRecordings(query, {
       limit: parseInt(opts.limit, 10),
       agent_id: parentOpts.agent,
       project_id: parentOpts.project,
@@ -400,10 +386,7 @@ program
   .command("delete <id>")
   .description("Delete a recording")
   .action(async (id) => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
-
-    const deleted = await resolveRecordingsBackend().deleteRecording(id);
+    const deleted = await getStore().deleteRecording(id);
     if (deleted) {
       console.log(chalk.green(`Deleted recording ${id}`));
     } else {
@@ -418,11 +401,9 @@ program
   .command("stats")
   .description("Show recording statistics")
   .action(async () => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
     const parentOpts = program.opts();
 
-    const stats = await resolveRecordingsBackend().getRecordingStats();
+    const stats = await getStore().getRecordingStats();
 
     if (parentOpts.json) {
       console.log(JSON.stringify(stats, null, 2));
@@ -449,12 +430,10 @@ program
 program
   .command("agents")
   .description("List registered agents")
-  .action(() => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
+  .action(async () => {
     const parentOpts = program.opts();
 
-    const agents = listAgents();
+    const agents = await getStore().listAgents();
 
     if (parentOpts.json) {
       console.log(JSON.stringify(agents, null, 2));
@@ -478,12 +457,10 @@ program
 program
   .command("projects")
   .description("List registered projects")
-  .action(() => {
-    const config = loadConfig();
-    getDatabase(config.db_path);
+  .action(async () => {
     const parentOpts = program.opts();
 
-    const projects = listProjects();
+    const projects = await getStore().listProjects();
 
     if (parentOpts.json) {
       console.log(JSON.stringify(projects, null, 2));
@@ -848,7 +825,7 @@ program
             const output = processed.mode === "enhanced" ? processed.text : transcription.text;
 
             // Save to DB
-            await resolveRecordingsBackend().createRecording({
+            await getStore().createRecording({
               audio_path: audioPath,
               raw_text: transcription.text,
               processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -1238,7 +1215,7 @@ program
   .alias("uninstall")
   .description("Delete a recording by ID")
   .action(async (id: string) => {
-    const deleted = await resolveRecordingsBackend().deleteRecording(id);
+    const deleted = await getStore().deleteRecording(id);
     if (deleted) {
       console.log(chalk.green(`✓ Recording ${id} deleted`));
     } else {
@@ -1254,13 +1231,13 @@ program
   .description("Send feedback")
   .option("--email <email>", "Contact email")
   .option("--category <category>", "Category: bug, feature, general")
-  .action((message: string, opts: { email?: string; category?: string }) => {
-    const adapter = getAdapter();
-    const pkg = require("../../package.json");
-    adapter.run(
-      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-      message, opts.email || null, opts.category || "general", pkg.version
-    );
+  .action(async (message: string, opts: { email?: string; category?: string }) => {
+    await getStore().saveFeedback({
+      message,
+      email: opts.email || null,
+      category: opts.category || "general",
+      version: VERSION,
+    });
     console.log(chalk.green("Feedback saved. Thank you!"));
   });
 

@@ -64,9 +64,10 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
   }
   const pg = getCloudPg();
 
-  const segments = path.split("/").filter(Boolean); // ["v1", resource, id?]
+  const segments = path.split("/").filter(Boolean); // ["v1", resource, id?, action?]
   const resource = segments[1];
   const id = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+  const action = segments[3] ? decodeURIComponent(segments[3]) : undefined;
 
   try {
     // ── /v1/recordings ──
@@ -132,6 +133,20 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
         }
         return error(405, `method ${method} not allowed on /v1/agents`);
       }
+      // /v1/agents/:id/heartbeat
+      if (action === "heartbeat") {
+        if (method !== "POST") return error(405, `method ${method} not allowed on /v1/agents/:id/heartbeat`);
+        const agent = await repo.heartbeatAgent(pg, id);
+        return agent ? json({ agent }) : error(404, "agent not found");
+      }
+      // /v1/agents/:id/focus
+      if (action === "focus") {
+        if (method !== "POST") return error(405, `method ${method} not allowed on /v1/agents/:id/focus`);
+        const body = await readJson<{ project_id?: string | null }>(req);
+        const agent = await repo.setAgentFocus(pg, id, body?.project_id ?? null);
+        return agent ? json({ agent }) : error(404, "agent not found");
+      }
+      if (action) return error(404, `unknown agent action: ${action}`);
       if (method === "GET") {
         const agent = await repo.getAgent(pg, id);
         return agent ? json({ agent }) : error(404, "agent not found");
@@ -161,6 +176,27 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
         return project ? json({ project }) : error(404, "project not found");
       }
       return error(405, `method ${method} not allowed on /v1/projects/:id`);
+    }
+
+    // ── /v1/feedback ──
+    if (resource === "feedback") {
+      if (id) return error(404, "feedback has no item routes");
+      if (method === "POST") {
+        const body = await readJson<{ message?: string; email?: string; category?: string; version?: string }>(req);
+        if (!body || typeof body.message !== "string" || !body.message.trim()) {
+          return error(400, "message is required");
+        }
+        return json(
+          await repo.saveFeedback(pg, {
+            message: body.message,
+            email: body.email ?? null,
+            category: body.category ?? null,
+            version: body.version ?? null,
+          }),
+          201,
+        );
+      }
+      return error(405, `method ${method} not allowed on /v1/feedback`);
     }
 
     return error(404, `unknown /v1 resource: ${resource ?? ""}`);

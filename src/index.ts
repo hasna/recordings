@@ -18,7 +18,7 @@ export {
   EnhancementError,
 } from "./types/index.js";
 
-// ── Database ────────────────────────────────────────────────────────────────
+// ── Database (local SQLite lifecycle) ─────────────────────────────────────────
 export {
   getDatabase,
   closeDatabase,
@@ -26,36 +26,23 @@ export {
   getDbPath,
   shortUuid,
 } from "./db/database.js";
-export { PgAdapterAsync } from "./db/remote-storage.js";
+
+// ── Storage abstraction (LocalStore + ApiStore behind one Store) ──────────────
+export { getStore, __resetStore, APP } from "./store.js";
+export type { Store, RecordingStats, FeedbackInput } from "./store.js";
 export {
-  RECORDINGS_STORAGE_ENV,
-  RECORDINGS_STORAGE_FALLBACK_ENV,
-  RECORDINGS_STORAGE_MODE_ENV,
-  RECORDINGS_STORAGE_MODE_FALLBACK_ENV,
-  STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
-  getStorageConfig,
-  getStorageConnectionString,
-  getConnectionString,
-  getStorageDatabaseEnv,
-  getStorageDatabaseEnvName,
-  getStorageDatabaseUrl,
-  type StorageConfig,
-  type StorageEnv,
-  type StorageMode,
-} from "./db/storage-config.js";
-export {
-  RECORDINGS_STORAGE_TABLES,
-  STORAGE_TABLES,
-  getStorageStatus,
-  pushStorageChanges,
-  pullStorageChanges,
-  syncStorageChanges,
-  parseStorageTables,
-  type StorageStatus,
-  type SyncResult,
-} from "./db/storage-sync.js";
-export { applyPgMigrations, type PgMigrationResult } from "./db/pg-migrate.js";
+  resolveStorageClient,
+  resolveTransport,
+  createHttpTransport,
+  createStorageClient,
+  HasnaHttpError,
+} from "./http/client.js";
+export type {
+  StorageClient,
+  StorageMode,
+  TransportResolution,
+  HttpTransport,
+} from "./http/client.js";
 
 // ── Recordings CRUD ─────────────────────────────────────────────────────────
 export {

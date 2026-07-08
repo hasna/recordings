@@ -90,18 +90,33 @@ describe("no private cloud package boundary", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("public storage surface is recordings-native", () => {
+  test("public storage surface is a single Store with local + api transports", () => {
     const entrypoint = readText(join(repoRoot, "src/index.ts"));
     const storageEntrypoint = readText(join(repoRoot, "src/storage.ts"));
-    const storageConfig = readText(join(repoRoot, "src/db/storage-config.ts"));
-    const cliStorage = readText(join(repoRoot, "src/cli/storage.ts"));
-    const mcpStorage = readText(join(repoRoot, "src/mcp/storage-tools.ts"));
+    const store = readText(join(repoRoot, "src/store.ts"));
 
-    expect(storageConfig).toContain("HASNA_RECORDINGS_DATABASE_URL");
-    expect(storageConfig).toContain("postgres");
-    expect(storageEntrypoint).toContain("RECORDINGS_STORAGE_ENV");
-    expect(cliStorage).toContain("registerStorageCommands");
-    expect(mcpStorage).toContain("recordings_storage_status");
+    // The one exported surface is the Store resolver.
+    expect(storageEntrypoint).toContain("getStore");
+    expect(storageEntrypoint).toContain("resolveStorageClient");
+    expect(entrypoint).toContain("getStore");
     expect(entrypoint).not.toContain(["@hasna", "cloud"].join("/"));
+
+    // The client never accepts a raw database DSN — bearer key only.
+    expect(store).not.toContain("DATABASE_URL");
+    expect(store).not.toContain("getStorageConnectionString");
+    expect(store).toContain("LocalStore");
+    expect(store).toContain("ApiStore");
+  });
+
+  test("the client-side Postgres DSN sync path is gone", () => {
+    for (const gone of [
+      "src/db/storage-config.ts",
+      "src/db/storage-sync.ts",
+      "src/db/pg-migrate.ts",
+      "src/cli/storage.ts",
+      "src/mcp/storage-tools.ts",
+    ]) {
+      expect(existsSync(join(repoRoot, gone))).toBe(false);
+    }
   });
 });

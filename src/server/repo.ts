@@ -307,6 +307,36 @@ export async function listAgents(pg: PgAdapterAsync): Promise<Agent[]> {
   return rows.map(parseAgent);
 }
 
+export async function heartbeatAgent(
+  pg: PgAdapterAsync,
+  idOrName: string,
+): Promise<Agent | null> {
+  const agent = await getAgent(pg, idOrName);
+  if (!agent) return null;
+  await pg.run(
+    "UPDATE agents SET last_seen_at = ? WHERE id = ?",
+    new Date().toISOString(),
+    agent.id,
+  );
+  return getAgent(pg, agent.id);
+}
+
+export async function setAgentFocus(
+  pg: PgAdapterAsync,
+  idOrName: string,
+  projectId: string | null,
+): Promise<Agent | null> {
+  const agent = await getAgent(pg, idOrName);
+  if (!agent) return null;
+  await pg.run(
+    "UPDATE agents SET active_project_id = ?, last_seen_at = ? WHERE id = ?",
+    projectId,
+    new Date().toISOString(),
+    agent.id,
+  );
+  return getAgent(pg, agent.id);
+}
+
 // ── Projects ────────────────────────────────────────────────────────────────
 
 export async function registerProject(
@@ -357,4 +387,23 @@ export async function listProjects(pg: PgAdapterAsync): Promise<Project[]> {
     "SELECT * FROM projects ORDER BY updated_at DESC",
   )) as Record<string, unknown>[];
   return rows.map(parseProject);
+}
+
+// ── Feedback ──────────────────────────────────────────────────────────────────
+
+export async function saveFeedback(
+  pg: PgAdapterAsync,
+  input: { message: string; email?: string | null; category?: string | null; version?: string | null },
+): Promise<{ saved: true }> {
+  if (typeof input.message !== "string" || !input.message.trim()) {
+    throw new Error("message is required");
+  }
+  await pg.run(
+    "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+    input.message,
+    input.email || null,
+    input.category || "general",
+    input.version || null,
+  );
+  return { saved: true };
 }

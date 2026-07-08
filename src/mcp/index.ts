@@ -4,25 +4,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { isStdioMode, startMcpHttpServer, resolveMcpHttpPort } from "./http.js";
 import { z } from "zod";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
-import { getDatabase, getAdapter } from "../db/database.js";
-import { resolveRecordingsBackend } from "../http/backend.js";
-import { registerAgent, getAgent, listAgents, heartbeatAgent, setAgentFocus } from "../db/agents.js";
-import {
-  registerProject,
-  getProject,
-  listProjects,
-} from "../db/projects.js";
-import { transcribeAudio, transcribeBuffer } from "../lib/transcriber.js";
+import { getStore } from "../store.js";
+import { transcribeAudio } from "../lib/transcriber.js";
 import { processText, needsEnhancement } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
-import { registerRecordingsStorageTools } from "./storage-tools.js";
 
 // ── Initialize ──────────────────────────────────────────────────────────────
+// Config is loaded eagerly for the transcription/enhancement tools. Storage is
+// resolved lazily per call via `getStore()` so cloud mode never opens SQLite.
 
 const config = loadConfig();
 ensureDataDir(config);
-getDatabase(config.db_path);
 
 export function buildServer(): McpServer {
 const server = new McpServer({
@@ -158,7 +151,7 @@ registerTool(
       const transcription = await transcribeAudio(args.audio_path, cfg);
       const processed = await processText(transcription.text, cfg);
 
-      const recording = await resolveRecordingsBackend().createRecording({
+      const recording = await getStore().createRecording({
         audio_path: args.audio_path,
         raw_text: transcription.text,
         processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -227,7 +220,7 @@ registerTool(
         }
       }
 
-      const recording = await resolveRecordingsBackend().createRecording({
+      const recording = await getStore().createRecording({
         raw_text: args.text,
         processed_text: processedText,
         processing_mode: mode,
@@ -257,7 +250,7 @@ registerTool(
   { id: z.string() },
   async (args) => {
     try {
-      const r = await resolveRecordingsBackend().getRecording(args.id);
+      const r = await getStore().getRecording(args.id);
       if (!r) return text(`Not found: ${args.id}`);
       return text(full(r));
     } catch (e) {
@@ -297,7 +290,7 @@ registerTool(
         session_id: args.session_id,
       };
 
-      const recordings = await resolveRecordingsBackend().listRecordings(filter);
+      const recordings = await getStore().listRecordings(filter);
       if (recordings.length === 0) return text("No recordings found.");
 
       const fmt = args.full ? full : compact;
@@ -321,7 +314,7 @@ registerTool(
   },
   async (args) => {
     try {
-      const results = await resolveRecordingsBackend().searchRecordings(args.query, {
+      const results = await getStore().searchRecordings(args.query, {
         limit: args.limit || 10,
         agent_id: args.agent_id,
         project_id: args.project_id,
@@ -344,7 +337,7 @@ registerTool(
   { id: z.string() },
   async (args) => {
     try {
-      return text((await resolveRecordingsBackend().deleteRecording(args.id)) ? `Deleted ${args.id}` : `Not found: ${args.id}`);
+      return text((await getStore().deleteRecording(args.id)) ? `Deleted ${args.id}` : `Not found: ${args.id}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -357,7 +350,7 @@ registerTool(
   {},
   async () => {
     try {
-      const s = await resolveRecordingsBackend().getRecordingStats();
+      const s = await getStore().getRecordingStats();
       let out = `Total: ${s.total} | Raw: ${s.raw} | Enhanced: ${s.enhanced} | Duration: ${(s.total_duration_ms / 1000).toFixed(1)}s`;
       if (Object.keys(s.by_model).length > 0) {
         out += "\n" + Object.entries(s.by_model).map(([m, c]) => `${m}: ${c}`).join(", ");
@@ -391,7 +384,7 @@ registerTool(
   { name: z.string(), description: z.string().optional(), role: z.string().optional() },
   async (args) => {
     try {
-      const a = registerAgent(args.name, args.description, args.role);
+      const a = await getStore().registerAgent(args.name, args.description, args.role);
       return text(`${a.id} | ${a.name} | ${a.role}`);
     } catch (e) {
       return errorResult(e);
@@ -405,7 +398,7 @@ registerTool(
   {},
   async () => {
     try {
-      const agents = listAgents();
+      const agents = await getStore().listAgents();
       if (agents.length === 0) return text("None.");
       return text(agents.map((a) => `${a.id} | ${a.name} | ${a.role}`).join("\n"));
     } catch (e) {
@@ -420,7 +413,7 @@ registerTool(
   { id: z.string() },
   async (args) => {
     try {
-      const a = getAgent(args.id);
+      const a = await getStore().getAgent(args.id);
       if (!a) return text(`Not found: ${args.id}`);
       return text(`${a.id} | ${a.name} | ${a.role} | ${a.last_seen_at}`);
     } catch (e) {
@@ -437,7 +430,7 @@ registerTool(
   { name: z.string(), path: z.string(), description: z.string().optional() },
   async (args) => {
     try {
-      const p = registerProject(args.name, args.path, args.description);
+      const p = await getStore().registerProject(args.name, args.path, args.description);
       return text(`${p.id.slice(0, 8)} | ${p.name} | ${p.path}`);
     } catch (e) {
       return errorResult(e);
@@ -451,7 +444,7 @@ registerTool(
   {},
   async () => {
     try {
-      const projects = listProjects();
+      const projects = await getStore().listProjects();
       if (projects.length === 0) return text("None.");
       return text(projects.map((p) => `${p.id.slice(0, 8)} | ${p.name} | ${p.path}`).join("\n"));
     } catch (e) {
@@ -468,7 +461,7 @@ registerTool(
   { agent_id: z.string().describe("Agent ID or name") },
   async (args) => {
     try {
-      const agent = heartbeatAgent(args.agent_id);
+      const agent = await getStore().heartbeatAgent(args.agent_id);
       if (!agent) return text(`Agent not found: ${args.agent_id}`);
       return text(`${agent.id} | ${agent.name} | last_seen: ${agent.last_seen_at}`);
     } catch (e) {
@@ -483,7 +476,7 @@ registerTool(
   { agent_id: z.string().describe("Agent ID or name"), project_id: z.string().nullable().optional().describe("Project ID to focus on, or null to clear") },
   async (args) => {
     try {
-      const agent = setAgentFocus(args.agent_id, args.project_id ?? null);
+      const agent = await getStore().setAgentFocus(args.agent_id, args.project_id ?? null);
       if (!agent) return text(`Agent not found: ${args.agent_id}`);
       return text(args.project_id ? `Focus set: ${args.project_id}` : "Focus cleared");
     } catch (e) {
@@ -501,17 +494,20 @@ registerTool(
     category: z.enum(["bug", "feature", "general"]).optional().describe("Feedback category"),
   },
   async (params: { message: string; email?: string; category?: string }) => {
-    const adapter = getAdapter();
-    const pkg = require("../../package.json");
-    adapter.run(
-      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-      params.message, params.email || null, params.category || "general", pkg.version
-    );
-    return text("Feedback saved. Thank you!");
+    try {
+      await getStore().saveFeedback({
+        message: params.message,
+        email: params.email || null,
+        category: params.category || "general",
+        version: VERSION,
+      });
+      return text("Feedback saved. Thank you!");
+    } catch (e) {
+      return errorResult(e);
+    }
   }
 );
 
-registerRecordingsStorageTools(server);
 return server;
 }
 

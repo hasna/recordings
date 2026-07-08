@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolveStorageClient, createStorageClient, createHttpTransport, resolveTransport } from "./client.js";
-import { resolveRecordingsBackend } from "./backend.js";
+import { getStore } from "../store.js";
 
 const APP = "recordings";
 
@@ -63,8 +63,8 @@ describe("client-flip resolution", () => {
     expect(r.transport).toBe("local");
   });
 
-  test("resolveRecordingsBackend picks cloud-http from flip env (url+key, no mode)", () => {
-    const b = resolveRecordingsBackend({
+  test("getStore picks cloud-http from flip env (url+key, no mode)", () => {
+    const b = getStore({
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
@@ -78,13 +78,13 @@ describe("client-flip resolution", () => {
     ).toThrow();
   });
 
-  test("resolveRecordingsBackend picks local when env unset", () => {
-    const b = resolveRecordingsBackend({});
+  test("getStore picks local when env unset", () => {
+    const b = getStore({});
     expect(b.mode).toBe("local");
   });
 
-  test("resolveRecordingsBackend picks cloud-http when env set", () => {
-    const b = resolveRecordingsBackend({
+  test("getStore picks cloud-http when env set", () => {
+    const b = getStore({
       HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
