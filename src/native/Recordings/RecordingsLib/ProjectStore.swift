@@ -36,6 +36,7 @@ public struct RecProject: Codable, Identifiable, Sendable {
     var systemPrompt: String?
     var appBundleIds: [String]?
     var canonicalPath: String?
+    var color: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -43,7 +44,8 @@ public struct RecProject: Codable, Identifiable, Sendable {
         path: String? = nil,
         systemPrompt: String? = nil,
         appBundleIds: [String]? = nil,
-        canonicalPath: String? = nil
+        canonicalPath: String? = nil,
+        color: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -51,6 +53,7 @@ public struct RecProject: Codable, Identifiable, Sendable {
         self.systemPrompt = systemPrompt
         self.appBundleIds = appBundleIds
         self.canonicalPath = canonicalPath
+        self.color = color
     }
 
     var registrationPath: String {
@@ -294,7 +297,8 @@ public final class ProjectStore: ObservableObject {
                 path: project.path,
                 systemPrompt: project.systemPrompt,
                 appBundleIds: project.appBundleIds,
-                canonicalPath: canonical.path
+                canonicalPath: canonical.path,
+                color: project.color
             )
         }
         if let active = original.activeProjectId {
@@ -310,11 +314,11 @@ public final class ProjectStore: ObservableObject {
         }
     }
 
-    public func addProject(name: String, path: String? = nil, systemPrompt: String? = nil, home: String = RecordingsCLI.defaultHome) async throws {
+    public func addProject(name: String, path: String? = nil, systemPrompt: String? = nil, color: String? = nil, home: String = RecordingsCLI.defaultHome) async throws {
         try requireWritableState()
         isSynchronizingProjects = true
         defer { isSynchronizingProjects = false }
-        let local = RecProject(name: name, path: path, systemPrompt: systemPrompt)
+        let local = RecProject(name: name, path: path, systemPrompt: systemPrompt, color: color)
         let canonical: RecordingsCLI.CanonicalProject
         do {
             canonical = try await Task.detached(priority: .userInitiated) {
@@ -330,7 +334,8 @@ public final class ProjectStore: ObservableObject {
             path: local.path,
             systemPrompt: local.systemPrompt,
             appBundleIds: local.appBundleIds,
-            canonicalPath: canonical.path
+            canonicalPath: canonical.path,
+            color: local.color
         )
         let original = settings
         settings.projects.append(project)

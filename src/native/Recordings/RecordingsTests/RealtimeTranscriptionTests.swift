@@ -74,6 +74,44 @@ struct RealtimeTranscriptionTests {
         #expect(RealtimeTranscriptionClient.parseErrorTestHelper(errorJSON) == "Model not found")
     }
 
+    @Test("Realtime error parsing redacts credentials before returning display-safe text")
+    func parseErrorMessageRedactsCredentials() throws {
+        let keyFragment = "sk-" + "synthetic-fragment-123456"
+        let bearerFragment = "synthetic-bearer-123456"
+        let tokenFragment = "synthetic-query-token-123456"
+        let message = "401 Incorrect API key provided: \(keyFragment); Authorization: Bearer \(bearerFragment); request?token=\(tokenFragment)"
+        let event: [String: Any] = ["type": "error", "error": ["message": message, "code": 401]]
+        let data = try JSONSerialization.data(withJSONObject: event)
+        let json = try #require(String(data: data, encoding: .utf8))
+
+        let parsed = try #require(RealtimeTranscriptionClient.parseErrorTestHelper(json))
+
+        #expect(!parsed.contains(keyFragment))
+        #expect(!parsed.contains(bearerFragment))
+        #expect(!parsed.contains(tokenFragment))
+        #expect(parsed.contains("401 Incorrect API key provided"))
+    }
+
+    @Test("Realtime error events store only sanitized state and preserve ordinary errors")
+    @MainActor
+    func errorEventStateIsSanitized() throws {
+        let keyFragment = "sk-" + "synthetic-state-fragment-123456"
+        let event: [String: Any] = [
+            "type": "conversation.item.input_audio_transcription.failed",
+            "error": ["message": "401 rejected \(keyFragment)"],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: event)
+        let json = try #require(String(data: data, encoding: .utf8))
+        let client = RealtimeTranscriptionClient(apiKey: "synthetic-test-value", homePath: "/tmp")
+
+        client.handleEventTestHelper(json)
+
+        #expect(client.error == "401 rejected [REDACTED]")
+        #expect(RealtimeTranscriptionClient.parseErrorTestHelper(
+            #"{"type":"error","error":{"message":"Model not found"}}"#
+        ) == "Model not found")
+    }
+
     @Test("Builds strict verbatim prompt with vocabulary context")
     func buildPrompt() {
         let prompt = RealtimeTranscriptionClient.buildPromptTestHelper("Alumia, Takumi")

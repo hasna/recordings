@@ -56,6 +56,31 @@ struct RecordingBridgeTests {
         #expect(stats.totalDurationMs == 90000)
     }
 
+    @Test("RecordingStats rejects a structurally unrelated JSON log object")
+    func statsRejectLogObject() {
+        let log = Data(#"{"level":"info","message":"finished"}"#.utf8)
+
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(RecordingStats.self, from: log)
+        }
+    }
+
+    @Test("stats decoding ignores valid JSON logs before and after the requested payload")
+    func statsDecodeSelectsStructurallyValidPayload() throws {
+        let output = """
+        {"level":"info","message":"starting"}
+        {"total":12,"raw":5,"enhanced":7,"total_duration_ms":90000}
+        {"level":"info","message":"finished"}
+        """
+
+        let stats = try RecordingsCLI.decode(RecordingStats.self, from: output)
+
+        #expect(stats.total == 12)
+        #expect(stats.raw == 5)
+        #expect(stats.enhanced == 7)
+        #expect(stats.totalDurationMs == 90000)
+    }
+
     @Test("extractJSON strips leading log lines before a JSON array")
     func extractArrayWithLeadingLogs() throws {
         let output = """

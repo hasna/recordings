@@ -129,10 +129,10 @@ public struct RecordingStats: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        total = (try c.decodeIfPresent(Int.self, forKey: .total)) ?? 0
-        raw = (try c.decodeIfPresent(Int.self, forKey: .raw)) ?? 0
-        enhanced = (try c.decodeIfPresent(Int.self, forKey: .enhanced)) ?? 0
-        totalDurationMs = (try c.decodeIfPresent(Int.self, forKey: .totalDurationMs)) ?? 0
+        total = try c.decode(Int.self, forKey: .total)
+        raw = try c.decode(Int.self, forKey: .raw)
+        enhanced = try c.decode(Int.self, forKey: .enhanced)
+        totalDurationMs = try c.decode(Int.self, forKey: .totalDurationMs)
     }
 
     public init(total: Int, raw: Int, enhanced: Int, totalDurationMs: Int) {

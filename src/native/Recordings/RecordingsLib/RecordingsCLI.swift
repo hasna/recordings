@@ -94,6 +94,10 @@ public enum RecordingsCLI {
     private static func runDecoding<T: Decodable>(_ type: T.Type, _ args: [String], home: String) throws -> T {
         let output = CLIRunner.run(args, home: home)
         if let err = CLIRunner.parseError(output) { throw Failure(message: err) }
+        return try decode(type, from: output)
+    }
+
+    static func decode<T: Decodable>(_ type: T.Type, from output: String) throws -> T {
         let candidates = Self.jsonCandidates(from: output)
         guard !candidates.isEmpty else {
             throw Failure(message: "No JSON in CLI output")

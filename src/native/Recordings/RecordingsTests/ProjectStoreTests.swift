@@ -7,6 +7,23 @@ struct ProjectStoreTests {
         var errorDescription: String? { "synthetic read failure" }
     }
 
+    @Test("legacy project color survives settings decode and encode")
+    func legacyProjectColorRoundTrip() throws {
+        let input = Data(##"{"globalSystemPrompt":"Global","postProcessingMode":"always","activeProjectId":"legacy-id","projects":[{"id":"legacy-id","name":"Legacy","path":"/tmp/legacy","systemPrompt":"Keep bullets","appBundleIds":["com.example.app"],"canonicalPath":"recordings-app://projects/legacy-id","color":"#12AB34"}]}"##.utf8)
+
+        let settings = try JSONDecoder().decode(ProjectSettings.self, from: input)
+        let encoded = try JSONEncoder().encode(settings)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let projects = try #require(object["projects"] as? [[String: Any]])
+        let project = try #require(projects.first)
+
+        #expect(project["color"] as? String == "#12AB34")
+        #expect(project["path"] as? String == "/tmp/legacy")
+        #expect(project["systemPrompt"] as? String == "Keep bullets")
+        #expect((project["appBundleIds"] as? [String]) == ["com.example.app"])
+        #expect(object["postProcessingMode"] as? String == "always")
+    }
+
     @Test("legacy app projects migrate to canonical Store ids without losing metadata")
     @MainActor
     func migratesProjectsToCanonicalStore() async throws {
@@ -29,7 +46,8 @@ struct ProjectStoreTests {
                 name: "Legacy",
                 path: nil,
                 systemPrompt: "Keep bullets",
-                appBundleIds: ["com.example.app"]
+                appBundleIds: ["com.example.app"],
+                color: "#12AB34"
             )
         ]
         store.settings.activeProjectId = "legacy-id"
@@ -44,8 +62,44 @@ struct ProjectStoreTests {
         #expect(migrated.systemPrompt == "Keep bullets")
         #expect(migrated.appBundleIds == ["com.example.app"])
         #expect(migrated.canonicalPath == "recordings-app://projects/legacy-id")
+        #expect(migrated.color == "#12AB34")
         #expect(store.settings.activeProjectId == "canonical-id")
         #expect(store.isReadyForRecording)
+
+        var edited = migrated
+        edited.name = "Edited Legacy"
+        try store.updateProject(edited)
+        let persisted = try JSONDecoder().decode(
+            ProjectSettings.self,
+            from: Data(contentsOf: root.appendingPathComponent("projects.json"))
+        )
+        #expect(persisted.projects.first?.name == "Edited Legacy")
+        #expect(persisted.projects.first?.color == "#12AB34")
+    }
+
+    @Test("adding a project preserves color in canonical local metadata")
+    @MainActor
+    func addProjectPreservesColor() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        let script = """
+        #!/bin/sh
+        printf '%s' '{"id":"canonical-added","name":"Added","path":"recordings-app://projects/added"}'
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let file = root.appendingPathComponent("projects.json")
+        let store = ProjectStore(filePath: file.path)
+        try await store.addProject(name: "Added", color: "#AABBCC", home: root.path)
+
+        #expect(store.settings.projects.first?.id == "canonical-added")
+        #expect(store.settings.projects.first?.color == "#AABBCC")
+        let persisted = try JSONDecoder().decode(ProjectSettings.self, from: Data(contentsOf: file))
+        #expect(persisted.projects.first?.color == "#AABBCC")
     }
 
     @Test("project persistence failures remain visible to the UI")

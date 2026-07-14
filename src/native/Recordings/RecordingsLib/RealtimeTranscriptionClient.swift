@@ -101,7 +101,7 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
             isConfigured = true
             flushPendingAudio()
         } catch {
-            self.error = "Failed to configure session: \(error.localizedDescription)"
+            self.error = Self.safeError("Failed to configure session: \(error.localizedDescription)")
             stop()
             return
         }
@@ -222,7 +222,8 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         } catch {
             // Connection closed
             if isStreaming {
-                fputs("[RealtimeClient] Receive loop ended: \(error.localizedDescription)\n", stderr)
+                let safeError = Self.safeError(error.localizedDescription)
+                fputs("[RealtimeClient] Receive loop ended: \(safeError)\n", stderr)
             }
         }
     }
@@ -271,20 +272,21 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
             }
             if let msg = json["error"] as? [String: Any],
                let message = msg["message"] as? String {
-                self.error = message
+                self.error = Self.safeError(message)
             }
 
         case "error":
             lastRealtimeEventAt = Date()
             if let detail = json["error"] as? [String: Any],
                let msg = detail["message"] as? String {
-                fputs("[RealtimeClient] Error: \(msg)\n", stderr)
+                let safeMessage = Self.safeError(msg)
+                fputs("[RealtimeClient] Error: \(safeMessage)\n", stderr)
                 // "buffer too small" on commit just means server VAD already consumed
                 // the audio — the transcript is intact, so don't surface it as a failure.
                 if msg.localizedCaseInsensitiveContains("buffer too small") {
-                    NativeAppLog.write("realtime benign commit error: \(msg)", homePath: homePath)
+                    NativeAppLog.write("realtime benign commit error: \(safeMessage)", homePath: homePath)
                 } else {
-                    self.error = msg
+                    self.error = safeMessage
                 }
             }
 
@@ -380,6 +382,10 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         return output
     }
 
+    private nonisolated static func safeError(_ message: String) -> String {
+        NativeErrorSanitizer.sanitize(message)
+    }
+
     private nonisolated static func shouldManuallyCommit(uncommittedAudioBytes: Int) -> Bool {
         uncommittedAudioBytes >= minimumManualCommitBytes
     }
@@ -451,7 +457,11 @@ extension RealtimeTranscriptionClient {
         guard let json = _parseJSON(text),
               let error = json["error"] as? [String: Any]
         else { return nil }
-        return error["message"] as? String
+        return (error["message"] as? String).map(safeError)
+    }
+
+    func handleEventTestHelper(_ text: String) {
+        handleEvent(text)
     }
 
     public nonisolated static func buildPromptTestHelper(_ context: String) -> String {
