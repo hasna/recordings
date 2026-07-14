@@ -834,17 +834,11 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static func removeStandaloneRealtimeArtifacts(from text: String) -> String {
         let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
-        let englishDominant = latinLetterCount(in: text) >= max(12, cjkLetterCount(in: text) * 3)
         let words = text.split(separator: " ").compactMap { rawWord -> String? in
             let normalized = rawWord
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
                 .lowercased()
             return artifactTokens.contains(normalized) ? nil : String(rawWord)
-        }.compactMap { word -> String? in
-            guard englishDominant else { return word }
-            let normalized = word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
-            guard !normalized.isEmpty else { return word }
-            return isMostlyCJKArtifact(normalized) ? nil : word
         }
         return words.joined(separator: " ")
     }
@@ -876,9 +870,13 @@ public final class RecordingEngine: ObservableObject {
             var normalized = String(rawWord)
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
                 .lowercased()
-            normalized = normalized.unicodeScalars.reduce(into: "") { output, scalar in
-                if !isCJKScalar(scalar) {
-                    output.unicodeScalars.append(scalar)
+            if normalized == "어" || normalized == "음" {
+                return nil
+            }
+            if normalized.hasSuffix("어") {
+                let withoutSuffix = String(normalized.dropLast())
+                if latinLetterCount(in: withoutSuffix) > 0 {
+                    normalized = withoutSuffix
                 }
             }
             return normalized.isEmpty ? nil : normalized
@@ -928,13 +926,6 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static func normalizedTranscriptWord(_ word: String) -> String {
         word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines)).lowercased()
-    }
-
-    private nonisolated static func isMostlyCJKArtifact(_ word: String) -> Bool {
-        let cjkCount = word.unicodeScalars.filter(isCJKScalar).count
-        guard cjkCount > 0 else { return false }
-        let letterCount = word.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
-        return cjkCount >= max(1, letterCount - cjkCount)
     }
 
     private nonisolated static func latinLetterCount(in text: String) -> Int {

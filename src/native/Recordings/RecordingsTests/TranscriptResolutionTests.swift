@@ -70,7 +70,7 @@ struct TranscriptResolutionTests {
             rawText: "Actually 리수 Zoom your goal",
             cleanedText: "Actually Zoom your goal",
             language: "en"
-        ))
+        ) == false)
         #expect(RecordingEngine.isSafeRealtimeFastPathText(
             rawText: "Actually Zoom your goal",
             cleanedText: "Actually Zoom your goal",
@@ -81,6 +81,11 @@ struct TranscriptResolutionTests {
             cleanedText: "Actually invented Zoom your goal",
             language: "en"
         ) == false)
+        #expect(RecordingEngine.isSafeRealtimeFastPathText(
+            rawText: "working어",
+            cleanedText: "working",
+            language: "en"
+        ))
         #expect(RecordingEngine.wasRealtimeTranscriptRepaired(
             rawText: "working어",
             cleanedText: "working"
@@ -123,7 +128,11 @@ struct TranscriptResolutionTests {
         #expect(RecordingEngine.safeRealtimeFallbackTranscript(
             realtimeText: "Actually 리수 Zoom your goal",
             language: "en"
-        ) == "Actually Zoom your goal")
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "Please send 五百 dollars to Alice",
+            language: "en"
+        ) == nil)
         #expect(RecordingEngine.safeRealtimeFallbackTranscript(
             realtimeText: "这是 完全 错误 的 实时 转录 内容",
             language: "en"
@@ -133,5 +142,9 @@ struct TranscriptResolutionTests {
             pcmByteCount: 96_000,
             language: "en"
         ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "这是有效内容",
+            language: "zh"
+        ) == "这是有效内容")
     }
 }

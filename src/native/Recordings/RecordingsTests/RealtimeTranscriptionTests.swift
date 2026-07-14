@@ -225,7 +225,7 @@ struct RealtimeTranscriptionTests {
             realtimeText: "Actually 리수 Zoom your goal",
             pcmByteCount: 96_000,
             language: "en"
-        ) == "Actually Zoom your goal")
+        ) == nil)
         #expect(RecordingEngine.realtimeFastPathTranscript(
             realtimeText: "어 Okay I don't know if this This is working어 Okay I don't know if this This is working",
             pcmByteCount: 96_000,
@@ -251,11 +251,11 @@ struct RealtimeTranscriptionTests {
         #expect(cleaned == "Okay I don't know if this is working")
     }
 
-    @Test("Realtime artifact cleanup removes CJK tokens from English-dominant text")
-    func realtimeCJKArtifactCleanup() {
+    @Test("Realtime artifact cleanup preserves mixed-language lexical tokens")
+    func realtimeMixedLanguageCleanup() {
         let cleaned = RecordingEngine.cleanRealtimeArtifactText(
             "Actually 리수 Zoom your goal and do this work with sabi 度扫 agents actually"
         )
-        #expect(cleaned == "Actually Zoom your goal and do this work with sabi agents actually")
+        #expect(cleaned == "Actually 리수 Zoom your goal and do this work with sabi 度扫 agents actually")
     }
 }

@@ -4,10 +4,11 @@ public enum NativeErrorSanitizer {
     private static let replacements: [(pattern: String, template: String)] = [
         (#"(?i)\b(?:sk|sess)-[A-Za-z0-9_-]{8,}\b"#, "[REDACTED]"),
         (#"(?i)(\bBearer\s+)[^\s,;]+"#, "$1[REDACTED]"),
-        (#"(?i)(\b[A-Z0-9_]*(?:(?:API|SECRET|PRIVATE)[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?(?:SECRET|PASSWORD)|PASSWORD|PASSCODE|SECRET|PRIVATE)\s*=\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)"#, "$1[REDACTED]"),
-        (#"(?i)("?(?:(?:api|secret|private)[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?(?:secret|password)|password|passcode|token|secret|private)"?\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)"#, "$1[REDACTED]"),
+        (#"(?i)(\bAuthorization\s*:\s*(?:Basic|Digest)\s+)[^;\n]+"#, "$1[REDACTED]"),
+        (#"(?i)(\b[A-Z0-9_]*(?:(?:API|SECRET|PRIVATE)[_-]?KEY|SECRET[_-]?ACCESS[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?(?:SECRET|PASSWORD)|PASSWORD|PASSCODE|SECRET|PRIVATE)\s*=\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;\n}]+)"#, "$1[REDACTED]"),
+        (#"(?i)((?:[{,]\s*)"?(?:(?:api|secret|private)[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?(?:secret|password)|password|passcode|token|secret|private)"?\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)"#, "$1[REDACTED]"),
         (#"(?i)((?:[?&]|\b)(?:(?:api|secret|private)[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?(?:secret|password)|password|passcode|token|secret|private)=)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s,;]+)"#, "$1[REDACTED]"),
-        (#"(?i)((?:api\s+key(?:\s+provided)?|client\s+(?:secret|password)|password|passcode|private(?:\s+key)?|secret(?:\s+key)?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;\n}]+)"#, "$1[REDACTED]"),
+        (#"(?i)((?:api\s+key(?:\s+provided)?|client\s+(?:secret|password)|password|passcode|private\s+key|secret(?:\s+key)?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;\n}]+)"#, "$1[REDACTED]"),
     ]
 
     public static func sanitize(_ message: String) -> String {

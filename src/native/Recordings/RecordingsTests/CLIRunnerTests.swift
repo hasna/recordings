@@ -170,11 +170,20 @@ struct CLIRunnerTests {
         #expect(escapedAndUnquoted?.contains("quoted") == false)
         #expect(escapedAndUnquoted?.contains("beta gamma") == false)
         #expect(escapedAndUnquoted?.contains("echo foxtrot") == false)
+
+        let commonCredentials = CLIRunner.parseError(
+            "ERROR: Authorization: Basic synthetic-basic-value; "
+                + "AWS_SECRET_ACCESS_KEY=delta echo foxtrot"
+        )
+        #expect(commonCredentials?.contains("synthetic-basic-value") == false)
+        #expect(commonCredentials?.contains("echo foxtrot") == false)
     }
 
     @Test("parseError preserves ordinary generic failures")
     func ordinaryErrorsRemainUseful() {
         #expect(CLIRunner.parseError("ERROR: microphone disconnected") == "microphone disconnected")
+        #expect(CLIRunner.parseError("ERROR: Unexpected token: EOF") == "Unexpected token: EOF")
+        #expect(CLIRunner.parseError("ERROR: resource is private: access denied") == "resource is private: access denied")
     }
 
     @Test("run sanitizes failed process stderr before returning it")
