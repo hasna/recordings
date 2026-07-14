@@ -40,23 +40,24 @@ struct RecordingStartGateTests {
         ) == false)
     }
 
-    @Test("only the current microphone permission request may continue starting")
-    func stalePermissionContinuationIsRejected() {
-        let staleRequestID = UUID()
+    @Test("microphone permission start gate admits one current continuation")
+    func permissionStartGateRejectsDuplicateAndStaleContinuations() {
+        let firstRequestID = UUID()
         let currentRequestID = UUID()
+        var gate = MicrophonePermissionStartGate()
 
-        #expect(!RecordingEngine.isCurrentMicrophonePermissionRequest(
-            activeRequestID: currentRequestID,
-            responseRequestID: staleRequestID
-        ))
-        #expect(RecordingEngine.isCurrentMicrophonePermissionRequest(
-            activeRequestID: currentRequestID,
-            responseRequestID: currentRequestID
-        ))
-        #expect(!RecordingEngine.isCurrentMicrophonePermissionRequest(
-            activeRequestID: nil,
-            responseRequestID: currentRequestID
-        ))
+        #expect(gate.reserve(requestID: firstRequestID) == firstRequestID)
+        #expect(gate.isAwaitingResponse)
+        #expect(gate.reserve(requestID: currentRequestID) == nil)
+        #expect(gate.activeRequestID == firstRequestID)
+
+        gate.cancel()
+        #expect(gate.reserve(requestID: currentRequestID) == currentRequestID)
+        #expect(!gate.consumeResponse(for: firstRequestID))
+        #expect(gate.activeRequestID == currentRequestID)
+        #expect(gate.consumeResponse(for: currentRequestID))
+        #expect(!gate.isAwaitingResponse)
+        #expect(!gate.consumeResponse(for: currentRequestID))
     }
 
     @Test("manual recording can continue after permission grant")

@@ -7,7 +7,8 @@ import Foundation
 struct RecordingBridgeTests {
     @Test("native machine identity matches CLI host and explicit fleet override")
     func nativeMachineIdentity() {
-        #expect(NativeMachineIdentity.current(environment: [:], hostName: "station05.local") == "station05.local")
+        #expect(NativeMachineIdentity.current(environment: [:], hostName: "station05") == "station05")
+        #expect(NativeMachineIdentity.current(environment: [:]) == NativeMachineIdentity.posixHostName())
         #expect(NativeMachineIdentity.current(
             environment: ["HASNA_MACHINE_ID": "station05"],
             hostName: "station05.local"

@@ -3,7 +3,7 @@ import { currentMachineId } from "../lib/machine.js";
 
 describe("currentMachineId", () => {
   test("uses the same host identifier written into native-created recordings", () => {
-    expect(currentMachineId({}, "station05.local")).toBe("station05.local");
+    expect(currentMachineId({}, "station05")).toBe("station05");
   });
 
   test("supports an explicit fleet machine identity override", () => {
