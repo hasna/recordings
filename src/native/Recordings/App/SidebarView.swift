@@ -62,7 +62,7 @@ struct SidebarView: View {
                 Image(systemName: "plus").font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.plain)
-            .disabled(store.projectStore.isSynchronizingProjects)
+            .disabled(!store.projectStore.canMutateProjects)
             .help("Add Project")
             .popover(isPresented: $addingProject, arrowEdge: .trailing) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -87,7 +87,7 @@ struct SidebarView: View {
             }
             ForEach(store.projects) { project in
                 filterRow(.project(project.id), icon: "folder", label: project.name)
-                    .disabled(store.projectStore.isSynchronizingProjects)
+                    .disabled(!store.projectStore.canMutateProjects)
                     .contextMenu {
                         Button("Delete", role: .destructive) {
                             do {

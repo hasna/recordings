@@ -92,13 +92,21 @@ public struct ProjectSettings: Codable, Sendable {
 
 @MainActor
 public final class ProjectStore: ObservableObject {
+    typealias SettingsDataLoader = (String) throws -> Data?
+
     @Published public var settings = ProjectSettings()
     @Published public private(set) var isReadyForRecording = false
     @Published public private(set) var isSynchronizingProjects = false
     @Published public private(set) var persistenceError: String?
 
     private let filePath: String
+    private let dataLoader: SettingsDataLoader
     private var loadSucceeded = true
+    private var loadFailureMessage: String?
+
+    public var canMutateProjects: Bool {
+        loadSucceeded && !isSynchronizingProjects
+    }
 
     public var activeProject: RecProject? {
         settings.projects.first { $0.id == settings.activeProjectId }
@@ -118,31 +126,65 @@ public final class ProjectStore: ObservableObject {
         return mode.rawValue
     }
 
-    public init(filePath: String? = nil) {
+    public convenience init(filePath: String? = nil) {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        self.filePath = filePath ?? "\(home)/.hasna/recordings/projects.json"
+        self.init(
+            filePath: filePath ?? "\(home)/.hasna/recordings/projects.json",
+            dataLoader: Self.readSettingsData
+        )
+    }
+
+    init(filePath: String, dataLoader: @escaping SettingsDataLoader) {
+        self.filePath = filePath
+        self.dataLoader = dataLoader
         let loaded = load()
         loadSucceeded = loaded
         isReadyForRecording = loaded && settings.projects.isEmpty
     }
 
+    nonisolated private static func readSettingsData(atPath path: String) throws -> Data? {
+        do {
+            return try Data(contentsOf: URL(fileURLWithPath: path))
+        } catch {
+            let cocoaError = error as NSError
+            if cocoaError.domain == NSCocoaErrorDomain,
+               cocoaError.code == NSFileReadNoSuchFileError || cocoaError.code == NSFileNoSuchFileError {
+                return nil
+            }
+            throw error
+        }
+    }
+
     @discardableResult
     func load() -> Bool {
-        guard FileManager.default.fileExists(atPath: filePath),
-              let data = FileManager.default.contents(atPath: filePath) else { return true }
         do {
+            guard let data = try dataLoader(filePath) else {
+                loadFailureMessage = nil
+                persistenceError = nil
+                return true
+            }
             settings = try JSONDecoder().decode(ProjectSettings.self, from: data)
+            loadFailureMessage = nil
             persistenceError = nil
             return true
         } catch {
-            persistenceError = "Failed to load projects: \(error.localizedDescription)"
+            let message = "Failed to load projects: \(error.localizedDescription)"
+            loadFailureMessage = message
+            persistenceError = message
             return false
         }
     }
 
     public func save() throws {
-        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try requireWritableState()
         try persistSettings()
+    }
+
+    private func requireWritableState() throws {
+        guard loadSucceeded else {
+            throw ProjectStoreError.persistenceFailure(loadFailureMessage ?? "Failed to load projects")
+        }
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
     }
 
     private func persistSettings() throws {
@@ -165,7 +207,7 @@ public final class ProjectStore: ObservableObject {
     public func reconcileWithCanonicalStore(home: String = RecordingsCLI.defaultHome) async throws {
         guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
         guard loadSucceeded else {
-            throw ProjectStoreError.persistenceFailure(persistenceError ?? "Failed to load projects")
+            throw ProjectStoreError.persistenceFailure(loadFailureMessage ?? "Failed to load projects")
         }
         isSynchronizingProjects = true
         defer { isSynchronizingProjects = false }
@@ -218,7 +260,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func addProject(name: String, path: String? = nil, systemPrompt: String? = nil, home: String = RecordingsCLI.defaultHome) async throws {
-        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try requireWritableState()
         isSynchronizingProjects = true
         defer { isSynchronizingProjects = false }
         let local = RecProject(name: name, path: path, systemPrompt: systemPrompt)
@@ -246,7 +288,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func updateProject(_ project: RecProject) throws {
-        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try requireWritableState()
         guard let idx = settings.projects.firstIndex(where: { $0.id == project.id }) else { return }
         let original = settings
         settings.projects[idx] = project
@@ -254,7 +296,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func removeProject(id: String) throws {
-        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try requireWritableState()
         let original = settings
         settings.projects.removeAll { $0.id == id }
         if settings.activeProjectId == id { settings.activeProjectId = nil }
@@ -262,7 +304,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func setActive(_ id: String?) throws {
-        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try requireWritableState()
         let original = settings
         settings.activeProjectId = id
         do { try save() } catch { settings = original; throw error }

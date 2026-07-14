@@ -3,6 +3,10 @@ import Testing
 @testable import RecordingsLib
 
 struct ProjectStoreTests {
+    private struct SyntheticReadError: LocalizedError {
+        var errorDescription: String? { "synthetic read failure" }
+    }
+
     @Test("legacy app projects migrate to canonical Store ids without losing metadata")
     @MainActor
     func migratesProjectsToCanonicalStore() async throws {
@@ -106,9 +110,57 @@ struct ProjectStoreTests {
 
         #expect(store.persistenceError?.contains("Failed to load projects") == true)
         #expect(!store.isReadyForRecording)
+        #expect(!store.canMutateProjects)
+        #expect(throws: ProjectStoreError.self) {
+            try store.save()
+        }
         await #expect(throws: ProjectStoreError.self) {
             try await store.reconcileWithCanonicalStore(home: root.path)
         }
+        #expect(try Data(contentsOf: file) == Data("not-json".utf8))
+    }
+
+    @Test("unreadable project data blocks every mutation without overwriting the file")
+    @MainActor
+    func unreadableDataBlocksMutations() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("projects.json")
+        let sentinel = Data("existing-project-data".utf8)
+        try sentinel.write(to: file)
+
+        let store = ProjectStore(filePath: file.path) { _ in
+            throw SyntheticReadError()
+        }
+        store.settings.projects = [RecProject(id: "existing", name: "Existing")]
+
+        #expect(store.persistenceError?.contains("synthetic read failure") == true)
+        #expect(!store.isReadyForRecording)
+        #expect(!store.canMutateProjects)
+        #expect(throws: ProjectStoreError.self) { try store.save() }
+        #expect(throws: ProjectStoreError.self) {
+            try store.updateProject(RecProject(id: "existing", name: "Changed"))
+        }
+        #expect(throws: ProjectStoreError.self) { try store.removeProject(id: "existing") }
+        #expect(throws: ProjectStoreError.self) { try store.setActive("existing") }
+        await #expect(throws: ProjectStoreError.self) {
+            try await store.addProject(name: "Added", home: root.path)
+        }
+        #expect(try Data(contentsOf: file) == sentinel)
+    }
+
+    @Test("absent project data remains a writable empty store")
+    @MainActor
+    func absentDataIsWritable() {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("projects.json")
+        let store = ProjectStore(filePath: file.path) { _ in nil }
+
+        #expect(store.persistenceError == nil)
+        #expect(store.isReadyForRecording)
+        #expect(store.canMutateProjects)
     }
 
     @Test("matchProject by bundle ID")
