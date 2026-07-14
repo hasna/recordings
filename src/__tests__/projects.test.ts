@@ -8,6 +8,7 @@ import {
   resetDatabase,
 } from "../db/database.js";
 import { registerProject, getProject, listProjects } from "../db/projects.js";
+import { createRecording } from "../db/recordings.js";
 import { type Database } from "bun:sqlite";
 
 let tempDir: string;
@@ -63,6 +64,13 @@ describe("registerProject", () => {
 
     expect(p1.id).not.toBe(p2.id);
     expect(listProjects(db)).toHaveLength(2);
+  });
+
+  test("returned canonical id satisfies the local recordings foreign key", () => {
+    const project = registerProject("desktop", "recordings-app://projects/desktop", undefined, db);
+    const recording = createRecording({ raw_text: "hello", project_id: project.id }, db);
+
+    expect(recording.project_id).toBe(project.id);
   });
 });
 

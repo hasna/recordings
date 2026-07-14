@@ -46,7 +46,7 @@ struct ContentView: View {
     }
 }
 
-/// Compact header line: "12 recordings · Updated 3m ago" + storage/sync status + actions.
+/// Compact header line: "12 recordings · Updated 3m ago" + actions.
 private struct HeaderBar: View {
     @ObservedObject var store: RecordingsStore
 
@@ -58,17 +58,6 @@ private struct HeaderBar: View {
                 Text("Updated \(updated.relativeDescription)")
             }
             Spacer()
-
-            switch store.syncState {
-            case .syncing:
-                ProgressView().controlSize(.small)
-            case .synced:
-                Label("Synced", systemImage: "checkmark.icloud").labelStyle(.titleAndIcon)
-            case .failed:
-                Label("Sync failed", systemImage: "exclamationmark.icloud").foregroundStyle(.orange)
-            case .idle:
-                EmptyView()
-            }
 
             Button { store.loadLibrary() } label: {
                 Image(systemName: "arrow.clockwise")

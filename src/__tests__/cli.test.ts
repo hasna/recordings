@@ -47,7 +47,7 @@ describe("recordings CLI", () => {
     expect(combined).not.toContain("Bun v");
   });
 
-  test("--help advertises storage sync without legacy cloud command", async () => {
+  test("--help omits retired client-side storage commands", async () => {
     const proc = Bun.spawn(
       [process.execPath, "src/cli/index.ts", "--help"],
       {
@@ -106,6 +106,47 @@ describe("recordings CLI", () => {
     expect(stderr).toBe("");
     // Fresh local store => empty agent list, proving local routing works with no API env.
     expect(JSON.parse(stdout)).toEqual([]);
+  });
+
+  test("project register returns a canonical local Store id", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli/index.ts",
+        "--json",
+        "project",
+        "register",
+        "--name",
+        "Desktop App",
+        "--path",
+        "recordings-app://projects/desktop",
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          HASNA_RECORDINGS_API_URL: "",
+          HASNA_RECORDINGS_API_KEY: "",
+          HASNA_RECORDINGS_STORAGE_MODE: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const project = JSON.parse(stdout) as { id: string; name: string; path: string };
+    expect(project.id).toHaveLength(36);
+    expect(project).toMatchObject({ name: "Desktop App", path: "recordings-app://projects/desktop" });
   });
 
   test("--json app status reports package installer paths", async () => {

@@ -56,20 +56,8 @@ struct RecordingBridgeTests {
         #expect(stats.totalDurationMs == 90000)
     }
 
-    @Test("StorageStatus decodes mode/enabled/db_path/tables and finds recordings row count")
-    func decodeStorage() throws {
-        let json = """
-        { "mode": "local", "enabled": false, "db_path": "/Users/x/.hasna/recordings/recordings.db",
-          "tables": [ {"table": "recordings", "rows": 42}, {"table": "agents", "rows": 3} ] }
-        """
-        let status = try JSONDecoder().decode(StorageStatus.self, from: Data(json.utf8))
-        #expect(status.mode == "local")
-        #expect(status.enabled == false)
-        #expect(status.recordingsRowCount == 42)
-    }
-
     @Test("extractJSON strips leading log lines before a JSON array")
-    func extractArrayWithLeadingLogs() {
+    func extractArrayWithLeadingLogs() throws {
         let output = """
         [recordings] opening database
         migrating schema...
@@ -81,6 +69,22 @@ struct RecordingBridgeTests {
         #expect(json != nil)
         #expect(json?.hasPrefix("[") == true)
         #expect(json?.hasSuffix("]") == true)
+        let data = try #require(json?.data(using: .utf8))
+        #expect((try? JSONSerialization.jsonObject(with: data)) is [Any])
+    }
+
+    @Test("extractJSON skips bracket and brace log noise before a decodable payload")
+    func extractJSONAfterBracketedNoise() throws {
+        let output = """
+        [recordings] opening {database}
+        worker [1/2] ready
+        { "id": "real", "message": "literal [bracket] and {brace}" }
+        finished
+        """
+        let json = try #require(RecordingsCLI.extractJSON(from: output))
+        let object = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
+        #expect(object["id"] == "real")
+        #expect(object["message"] == "literal [bracket] and {brace}")
     }
 
     @Test("extractJSON returns object payload when stdout is a JSON object")

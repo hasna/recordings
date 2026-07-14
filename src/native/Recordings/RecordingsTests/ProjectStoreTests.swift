@@ -2,6 +2,59 @@ import Testing
 @testable import RecordingsLib
 
 struct ProjectStoreTests {
+    @Test("legacy app projects migrate to canonical Store ids without losing metadata")
+    @MainActor
+    func migratesProjectsToCanonicalStore() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        let script = """
+        #!/bin/sh
+        printf '%s' '{"id":"canonical-id","name":"Legacy","path":"recordings-app://projects/legacy-id"}'
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let store = ProjectStore(filePath: root.appendingPathComponent("projects.json").path)
+        store.settings.projects = [
+            RecProject(
+                id: "legacy-id",
+                name: "Legacy",
+                path: nil,
+                systemPrompt: "Keep bullets",
+                appBundleIds: ["com.example.app"]
+            )
+        ]
+        store.settings.activeProjectId = "legacy-id"
+        try store.save()
+
+        try await store.reconcileWithCanonicalStore(home: root.path)
+
+        let migrated = try #require(store.settings.projects.first)
+        #expect(migrated.id == "canonical-id")
+        #expect(migrated.name == "Legacy")
+        #expect(migrated.path == nil)
+        #expect(migrated.systemPrompt == "Keep bullets")
+        #expect(migrated.appBundleIds == ["com.example.app"])
+        #expect(migrated.canonicalPath == "recordings-app://projects/legacy-id")
+        #expect(store.settings.activeProjectId == "canonical-id")
+        #expect(store.isReadyForRecording)
+    }
+
+    @Test("project persistence failures remain visible to the UI")
+    @MainActor
+    func reportsPersistenceFailure() {
+        let store = ProjectStore(filePath: "/dev/null/projects.json")
+        store.settings.projects = [RecProject(name: "Cannot Save")]
+
+        #expect(throws: (any Error).self) {
+            try store.save()
+        }
+        #expect(store.persistenceError?.contains("Failed to save projects") == true)
+    }
+
     @Test("matchProject by bundle ID")
     func matchByBundleId() {
         let projects = [

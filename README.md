@@ -15,16 +15,17 @@ npm install -g @hasna/recordings
 
 Recordings ships a **full native macOS app** (SwiftUI, macOS 26 / Liquid Glass) — not a
 menu-bar utility. It opens to a **Recordings workspace**: a narrow violet Liquid-Glass
-sidebar (Workspace · Library · Projects · Modes · Storage) beside one continuous canvas
+sidebar (Workspace · Library · Projects · Modes · Machines) beside one continuous canvas
 with the record hero, transcript library, and detail view.
 
 - **Record** — large push-to-talk / dictation / command hero with live transcription,
   duration, the active project, and a "just now" strip. Global shortcut (default F5, or
   hold fn) works while the window is in the background.
-- **Library** — every past transcript (read straight from the same SQLite/Postgres store
+- **Library** — every past transcript (read straight from the active local or HTTP Store
   the CLI and MCP write), searchable and filterable by project, mode, and machine, with a
   detail pane (copy, paste-into-front-app, audio playback, metadata).
-- **Storage** — local database status plus one-click remote storage sync.
+- **Projects** — app projects are registered through the same canonical Store before a
+  recording can reference them, preserving referential integrity in local and remote modes.
 - **Settings** (⌘,) — OpenAI key, language, recording shortcut, permissions, projects,
   and voice shortcuts.
 
@@ -201,39 +202,6 @@ For MCP, `transcribe_audio` accepts `transcription_prompt` (or legacy `prompt`) 
 context, `transcriber_prompt` for cleanup instructions, and `post_processing_mode` with
 `off`, `auto`, or `always`. Tool results preserve `raw_text` and return `processed_text`
 only when post-processing actually produced enhanced output.
-
-## Storage Sync
-
-This package has native local/remote sync. Local data stays in SQLite under
-`~/.hasna/recordings/`; remote sync uses PostgreSQL when
-`HASNA_RECORDINGS_DATABASE_URL` is set or `~/.hasna/recordings/storage/config.json` is
-configured.
-
-The optional config file uses a `postgres` object:
-
-```json
-{
-  "mode": "remote",
-  "postgres": {
-    "host": "db.example",
-    "port": 5432,
-    "username": "recordings",
-    "password_env": "RECORDINGS_DATABASE_PASSWORD",
-    "ssl": true
-  }
-}
-```
-
-```bash
-recordings storage status
-recordings storage migrate
-recordings storage push
-recordings storage pull
-```
-
-`RECORDINGS_DATABASE_URL` is accepted as the non-Hasna fallback database URL.
-`HASNA_RECORDINGS_STORAGE_CONFIG` can point automation at a non-default storage
-config file.
 
 ## Data Directory
 

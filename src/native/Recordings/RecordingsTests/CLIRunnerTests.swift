@@ -2,6 +2,21 @@ import Testing
 @testable import RecordingsLib
 
 struct CLIRunnerTests {
+    @Test("process runner drains more than one MiB from stdout and stderr without blocking")
+    func drainsLargeConcurrentOutput() throws {
+        let command = """
+        (dd if=/dev/zero bs=1048576 count=2 2>/dev/null | tr '\\0' o) &
+        (dd if=/dev/zero bs=1048576 count=2 2>/dev/null | tr '\\0' e >&2) &
+        wait
+        """
+        let result = try CLIRunner.runExecutable("/bin/sh", arguments: ["-c", command])
+        #expect(result.terminationStatus == 0)
+        #expect(result.stdout.utf8.count == 2 * 1_048_576)
+        #expect(result.stderr.utf8.count == 2 * 1_048_576)
+        #expect(result.stdout.first == "o")
+        #expect(result.stderr.first == "e")
+    }
+
     @Test("transcribeCLIArgs passes project, cleanup mode, and transcriber prompt")
     func transcribeCLIArgsWithPrompt() {
         let args = RecordingEngine.transcribeCLIArgs(

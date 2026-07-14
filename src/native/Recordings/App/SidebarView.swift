@@ -1,7 +1,7 @@
 import SwiftUI
 import RecordingsLib
 
-/// Narrow violet sidebar: Record · Library · Projects · Modes · Storage. White text/tint
+/// Narrow violet sidebar: Record · Library · Projects · Modes · Machines. White text/tint
 /// over the gradient; selected rows get a translucent white highlight (Liquid Glass refracts
 /// the violet beneath).
 struct SidebarView: View {
@@ -18,7 +18,7 @@ struct SidebarView: View {
                 librarySection
                 projectsSection
                 if hasAnyMode { modesSection }
-                storageSection
+                if !store.machines.isEmpty { machinesSection }
                 Spacer(minLength: 8)
             }
             .padding(14)
@@ -88,7 +88,11 @@ struct SidebarView: View {
                 filterRow(.project(project.id), icon: "folder", label: project.name)
                     .contextMenu {
                         Button("Delete", role: .destructive) {
-                            store.projectStore.removeProject(id: project.id)
+                            do {
+                                try store.projectStore.removeProject(id: project.id)
+                            } catch {
+                                store.operationError = store.projectStore.persistenceError ?? error.localizedDescription
+                            }
                         }
                     }
             }
@@ -98,9 +102,17 @@ struct SidebarView: View {
     private func commitNewProject() {
         let name = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        store.projectStore.addProject(name: name)
-        addingProject = false
-        newProjectName = ""
+        Task {
+            do {
+                try await store.projectStore.addProject(name: name)
+                addingProject = false
+                newProjectName = ""
+            } catch {
+                store.operationError = store.projectStore.persistenceError
+                    ?? (error as? RecordingsCLI.Failure)?.message
+                    ?? error.localizedDescription
+            }
+        }
     }
 
     // MARK: - Modes
@@ -120,44 +132,17 @@ struct SidebarView: View {
         }
     }
 
-    // MARK: - Storage
+    // MARK: - Machines
 
-    private var storageSection: some View {
-        section(title: "Storage", trailing: {
-            Button { store.syncCloud() } label: {
-                if case .syncing = store.syncState {
-                    ProgressView().controlSize(.small).tint(.white)
-                } else {
-                    Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11, weight: .semibold))
-                }
-            }
-            .buttonStyle(.plain)
-            .help("Sync local ⇄ cloud")
-        }) {
+    private var machinesSection: some View {
+        section(title: "Machines") {
             if store.count(for: .thisMachine) > 0 {
                 filterRow(.thisMachine, icon: "desktopcomputer", label: "This Mac")
             }
             ForEach(otherMachines, id: \.self) { machine in
                 filterRow(.machine(machine), icon: "macpro.gen3.server", label: machine)
             }
-            HStack(spacing: 6) {
-                Image(systemName: store.storage?.enabled == true ? "cloud.fill" : "internaldrive")
-                    .font(.system(size: 11))
-                Text(storageLabel).font(.caption2)
-                Spacer()
-            }
-            .foregroundStyle(.white.opacity(0.7))
-            .padding(.horizontal, 9).padding(.top, 2)
-            if case .failed(let msg) = store.syncState {
-                Text(msg).font(.caption2).foregroundStyle(.white.opacity(0.6)).lineLimit(2).padding(.leading, 9)
-            }
         }
-    }
-
-    private var storageLabel: String {
-        guard let s = store.storage else { return "Local only" }
-        if s.enabled { return "Cloud: \(s.mode)" }
-        return "Local only"
     }
 
     private var otherMachines: [String] {

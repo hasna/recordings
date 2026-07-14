@@ -184,11 +184,11 @@ struct RecordWorkspaceView: View {
                 Image(systemName: "folder.fill")
                     .foregroundStyle(store.projectStore.activeProject != nil ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 Menu {
-                    Button("None") { store.projectStore.setActive(nil) }
+                    Button("None") { selectProject(nil) }
                     Divider()
                     ForEach(store.projects) { project in
                         Button {
-                            store.projectStore.setActive(project.id)
+                            selectProject(project.id)
                         } label: {
                             if project.id == store.projectStore.settings.activeProjectId {
                                 Label(project.name, systemImage: "checkmark")
@@ -205,6 +205,14 @@ struct RecordWorkspaceView: View {
             .font(.system(.callout, design: .rounded))
             .tint(Theme.accent)
             .frame(maxWidth: 560)
+        }
+    }
+
+    private func selectProject(_ id: String?) {
+        do {
+            try store.projectStore.setActive(id)
+        } catch {
+            store.operationError = store.projectStore.persistenceError ?? error.localizedDescription
         }
     }
 

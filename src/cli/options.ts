@@ -17,11 +17,17 @@ export function parseListPagination(
   limitValue: string,
   offsetValue: string
 ): { limit: number; offset: number } {
-  const parsedLimit = Number.parseInt(limitValue, 10);
-  const parsedOffset = Number.parseInt(offsetValue, 10);
+  const parseInteger = (value: string): number | null => {
+    const trimmed = value.trim();
+    if (!/^[+-]?\d+$/.test(trimmed)) return null;
+    const parsed = Number(trimmed);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const parsedLimit = parseInteger(limitValue);
+  const parsedOffset = parseInteger(offsetValue);
   return {
-    limit: Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 20,
-    offset: Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0,
+    limit: parsedLimit !== null ? Math.min(Math.max(parsedLimit, 1), 500) : 20,
+    offset: parsedOffset !== null ? Math.max(parsedOffset, 0) : 0,
   };
 }
 

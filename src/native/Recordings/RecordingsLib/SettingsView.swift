@@ -20,6 +20,14 @@ public struct SettingsView: View {
             shortcutsTab.tabItem { Label("Voice Shortcuts", systemImage: "text.badge.star") }
         }
         .frame(width: 520, height: 500)
+        .alert("Project Settings Error", isPresented: Binding(
+            get: { projectStore.persistenceError != nil },
+            set: { if !$0 { projectStore.clearPersistenceError() } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(projectStore.persistenceError ?? "The project settings could not be saved.")
+        }
     }
 
     // MARK: - General
@@ -92,12 +100,12 @@ public struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: projectStore.settings.postProcessingMode) {
-                    projectStore.save()
+                    try? projectStore.save()
                 }
                 TextEditor(text: $projectStore.settings.globalSystemPrompt)
                     .frame(height: 80)
                     .onChange(of: projectStore.settings.globalSystemPrompt) {
-                        projectStore.save()
+                        try? projectStore.save()
                     }
                 Text("Instructions for post-transcription cleanup and formatting.")
                     .foregroundStyle(.secondary)
@@ -118,8 +126,13 @@ public struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
                 Button("Add") {
                     guard !newProjectName.isEmpty else { return }
-                    projectStore.addProject(name: newProjectName)
-                    newProjectName = ""
+                    let name = newProjectName
+                    Task {
+                        do {
+                            try await projectStore.addProject(name: name)
+                            newProjectName = ""
+                        } catch {}
+                    }
                 }
                 .disabled(newProjectName.isEmpty)
             }
@@ -143,7 +156,7 @@ public struct SettingsView: View {
                     }
                     .onDelete { indexSet in
                         for i in indexSet {
-                            projectStore.removeProject(id: projectStore.settings.projects[i].id)
+                            try? projectStore.removeProject(id: projectStore.settings.projects[i].id)
                         }
                     }
                 }
@@ -255,8 +268,10 @@ struct ProjectEditView: View {
                 Spacer()
                 Button("Cancel") { onDismiss() }
                 Button("Save") {
-                    store.updateProject(project)
-                    onDismiss()
+                    do {
+                        try store.updateProject(project)
+                        onDismiss()
+                    } catch {}
                 }
             }
             .padding()

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Swift bridge over the `recordings` CLI. The macOS app uses this for the library,
-/// search, stats, and local/cloud storage — reusing the exact same SQLite/Postgres
+/// search, stats, and active Store — reusing the exact same local/HTTP
 /// store the CLI and MCP server write, instead of re-implementing persistence in Swift.
 public enum RecordingsCLI {
     public struct Failure: Error, CustomStringConvertible {
@@ -70,25 +70,23 @@ public enum RecordingsCLI {
         if let err = CLIRunner.parseError(output) { throw Failure(message: err) }
     }
 
-    // MARK: - Storage (local + cloud)
-
-    public static func storageStatus(home: String = defaultHome) throws -> StorageStatus {
-        try runDecoding(StorageStatus.self, ["storage", "status", "--json"], home: home)
+    public struct CanonicalProject: Codable, Sendable {
+        public let id: String
+        public let name: String
+        public let path: String
     }
 
-    /// Push local changes then pull remote changes. Returns the raw JSON summary so the
-    /// caller can surface counts; throws if the CLI reports an error (e.g. no DB URL set).
-    @discardableResult
-    public static func storageSync(home: String = defaultHome) throws -> String {
-        let output = CLIRunner.run(["storage", "sync", "--json"], home: home)
-        if let err = CLIRunner.parseError(output) { throw Failure(message: err) }
-        let json = Self.extractJSON(from: output) ?? output
-        if let data = json.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let errMessage = obj["error"] as? String {
-            throw Failure(message: errMessage)
-        }
-        return json
+    public static func registerProject(
+        name: String,
+        path: String,
+        description: String = "Recordings macOS project",
+        home: String = defaultHome
+    ) throws -> CanonicalProject {
+        try runDecoding(
+            CanonicalProject.self,
+            ["--json", "project", "register", "--name", name, "--path", path, "--description", description],
+            home: home
+        )
     }
 
     // MARK: - Internals
@@ -106,25 +104,46 @@ public enum RecordingsCLI {
         }
     }
 
-    /// Extract the JSON value from CLI stdout, tolerating any leading log lines. Handles
-    /// both a top-level array (`[...]`) and object (`{...}`).
+    /// Find a balanced, valid top-level JSON array or object while ignoring bracketed logs.
     static func extractJSON(from output: String) -> String? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if trimmed.first == "[" || trimmed.first == "{" { return trimmed }
 
-        let firstArray = trimmed.firstIndex(of: "[")
-        let firstObject = trimmed.firstIndex(of: "{")
-        // Choose whichever bracket appears first.
-        let start: String.Index
-        let close: Character
-        switch (firstArray, firstObject) {
-        case let (a?, o?): if a < o { start = a; close = "]" } else { start = o; close = "}" }
-        case let (a?, nil): start = a; close = "]"
-        case let (nil, o?): start = o; close = "}"
-        default: return nil
+        for start in trimmed.indices where trimmed[start] == "[" || trimmed[start] == "{" {
+            var stack: [Character] = []
+            var inString = false
+            var escaped = false
+            var index = start
+
+            while index < trimmed.endIndex {
+                let character = trimmed[index]
+                if inString {
+                    if escaped { escaped = false }
+                    else if character == "\\" { escaped = true }
+                    else if character == "\"" { inString = false }
+                } else {
+                    switch character {
+                    case "\"": inString = true
+                    case "[": stack.append("]")
+                    case "{": stack.append("}")
+                    case "]", "}":
+                        guard stack.last == character else { break }
+                        stack.removeLast()
+                        if stack.isEmpty {
+                            let candidate = String(trimmed[start...index])
+                            if let data = candidate.data(using: .utf8),
+                               let value = try? JSONSerialization.jsonObject(with: data),
+                               value is [Any] || value is [String: Any] {
+                                return candidate
+                            }
+                            break
+                        }
+                    default: break
+                    }
+                }
+                index = trimmed.index(after: index)
+            }
         }
-        guard let end = trimmed.lastIndex(of: close), start < end else { return nil }
-        return String(trimmed[start...end])
+        return nil
     }
 }

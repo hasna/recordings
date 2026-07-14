@@ -19,16 +19,8 @@ enum LibraryFilter: Hashable {
     case machine(String)
 }
 
-/// Cloud sync activity surfaced to the UI.
-enum CloudSyncState: Equatable {
-    case idle
-    case syncing
-    case synced(Date)
-    case failed(String)
-}
-
 /// Observable application state for the full macOS app. Bridges the live `RecordingEngine`,
-/// the `ProjectStore` / `VoiceShortcuts`, and the `recordings` CLI library/storage.
+/// the `ProjectStore` / `VoiceShortcuts`, and the `recordings` CLI Store.
 @MainActor
 final class RecordingsStore: ObservableObject {
     let engine: RecordingEngine
@@ -45,9 +37,6 @@ final class RecordingsStore: ObservableObject {
     @Published var operationError: String?
 
     @Published var stats: RecordingStats?
-    @Published var storage: StorageStatus?
-    @Published var syncState: CloudSyncState = .idle
-
     let localMachineID: String
     private let home: String
     private var cancellables = Set<AnyCancellable>()
@@ -74,6 +63,18 @@ final class RecordingsStore: ObservableObject {
         voiceShortcuts.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
+
+        let home = self.home
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await projectStore.reconcileWithCanonicalStore(home: home)
+            } catch {
+                self.operationError = projectStore.persistenceError
+                    ?? (error as? RecordingsCLI.Failure)?.message
+                    ?? error.localizedDescription
+            }
+        }
     }
 
     // MARK: - Derived collections
@@ -142,22 +143,20 @@ final class RecordingsStore: ObservableObject {
         isLoadingLibrary = true
         let home = home
         Task.detached(priority: .userInitiated) {
-            let result: Result<([Recording], RecordingStats?, StorageStatus?), Error>
+            let result: Result<([Recording], RecordingStats?), Error>
             do {
                 let recs = try RecordingsCLI.listAll(home: home)
                 let stats = try? RecordingsCLI.stats(home: home)
-                let storage = try? RecordingsCLI.storageStatus(home: home)
-                result = .success((recs, stats, storage))
+                result = .success((recs, stats))
             } catch {
                 result = .failure(error)
             }
             await MainActor.run {
                 self.isLoadingLibrary = false
                 switch result {
-                case .success(let (recs, stats, storage)):
+                case .success(let (recs, stats)):
                     self.library = recs
                     self.stats = stats
-                    self.storage = storage
                     self.loadError = nil
                     if self.selection == nil || !recs.contains(where: { $0.id == self.selection }) {
                         self.selection = self.visibleRecordings.first?.id
@@ -195,25 +194,4 @@ final class RecordingsStore: ObservableObject {
         }
     }
 
-    // MARK: - Cloud sync
-
-    func syncCloud() {
-        guard syncState != .syncing else { return }
-        syncState = .syncing
-        let home = home
-        Task.detached(priority: .utility) {
-            let outcome: CloudSyncState
-            do {
-                _ = try RecordingsCLI.storageSync(home: home)
-                outcome = .synced(Date())
-            } catch {
-                let msg = (error as? RecordingsCLI.Failure)?.message ?? error.localizedDescription
-                outcome = .failed(msg)
-            }
-            await MainActor.run {
-                self.syncState = outcome
-                if case .synced = outcome { self.loadLibrary() }
-            }
-        }
-    }
 }

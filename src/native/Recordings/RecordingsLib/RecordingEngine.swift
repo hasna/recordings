@@ -371,11 +371,22 @@ public final class RecordingEngine: ObservableObject {
         targetAppPid = isOwnApp ? nil : frontmostApp?.processIdentifier
 
         if let store = projectStore {
+            guard store.isReadyForRecording else {
+                resetRecordingIntent()
+                statusMessage = store.persistenceError ?? "Preparing projects before recording"
+                return
+            }
             let windowTitle = Self.focusedWindowTitle(pid: frontmostApp?.processIdentifier)
             let projects = store.settings.projects
             let detected = ProjectStore.matchProject(windowTitle: windowTitle, bundleId: targetAppBundleIdentifier, projects: projects)
             if let detected {
-                store.setActive(detected.id)
+                do {
+                    try store.setActive(detected.id)
+                } catch {
+                    resetRecordingIntent()
+                    statusMessage = store.persistenceError ?? "Failed to select project"
+                    return
+                }
             }
         }
 
@@ -1492,37 +1503,93 @@ private struct ClipboardSnapshot {
 
 // MARK: - CLI Runner
 
+private final class ProcessDataCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func store(_ data: Data) {
+        lock.lock()
+        storage = data
+        lock.unlock()
+    }
+
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 enum CLIRunner: Sendable {
+    struct ProcessOutput: Sendable {
+        let stdout: String
+        let stderr: String
+        let terminationStatus: Int32
+    }
+
     static func run(_ args: [String], home: String) -> String {
         let bin = "\(home)/.bun/bin/recordings"
-        let proc = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
+        let executable: String
+        let arguments: [String]
         if FileManager.default.fileExists(atPath: bin) {
-            proc.executableURL = URL(fileURLWithPath: bin)
-            proc.arguments = args
+            executable = bin
+            arguments = args
         } else {
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["recordings"] + args
+            executable = "/usr/bin/env"
+            arguments = ["recordings"] + args
         }
-        proc.environment = ProcessInfo.processInfo.environment.merging([
+        let environment = ProcessInfo.processInfo.environment.merging([
             "PATH": "\(home)/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         ]) { _, new in new }
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
         do {
-            try proc.run()
-            proc.waitUntilExit()
-            let stdout = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            if proc.terminationStatus != 0 {
-                let details = stderr.isEmpty ? stdout : stderr
+            let output = try runExecutable(executable, arguments: arguments, environment: environment)
+            if output.terminationStatus != 0 {
+                let details = output.stderr.isEmpty ? output.stdout : output.stderr
                 return "ERROR: \(details.trimmingCharacters(in: .whitespacesAndNewlines))"
             }
-            return stdout.isEmpty ? stderr : stdout
+            return output.stdout.isEmpty ? output.stderr : output.stdout
         } catch {
             return "ERROR: \(error.localizedDescription)"
         }
+    }
+
+    static func runExecutable(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) throws -> ProcessOutput {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = environment
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+
+        let stdoutCapture = ProcessDataCapture()
+        let stderrCapture = ProcessDataCapture()
+        let readers = DispatchGroup()
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stdoutCapture.store(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrCapture.store(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+
+        process.waitUntilExit()
+        readers.wait()
+        return ProcessOutput(
+            stdout: String(decoding: stdoutCapture.data, as: UTF8.self),
+            stderr: String(decoding: stderrCapture.data, as: UTF8.self),
+            terminationStatus: process.terminationStatus
+        )
     }
 
     static func parseError(_ output: String) -> String? {

@@ -139,36 +139,3 @@ public struct RecordingStats: Codable, Sendable {
         self.total = total; self.raw = raw; self.enhanced = enhanced; self.totalDurationMs = totalDurationMs
     }
 }
-
-/// Local/remote storage status (`recordings storage status --json`).
-public struct StorageStatus: Codable, Sendable {
-    public struct Table: Codable, Sendable {
-        public let table: String
-        public let rows: Int
-    }
-    public let mode: String
-    public let enabled: Bool
-    public let dbPath: String
-    public let tables: [Table]
-
-    enum CodingKeys: String, CodingKey {
-        case mode, enabled, tables
-        case dbPath = "db_path"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        mode = (try c.decodeIfPresent(String.self, forKey: .mode)) ?? "local"
-        enabled = (try c.decodeIfPresent(Bool.self, forKey: .enabled)) ?? false
-        dbPath = (try c.decodeIfPresent(String.self, forKey: .dbPath)) ?? ""
-        tables = (try c.decodeIfPresent([Table].self, forKey: .tables)) ?? []
-    }
-
-    public init(mode: String, enabled: Bool, dbPath: String, tables: [Table]) {
-        self.mode = mode; self.enabled = enabled; self.dbPath = dbPath; self.tables = tables
-    }
-
-    public var recordingsRowCount: Int? {
-        tables.first { $0.table == "recordings" }?.rows
-    }
-}

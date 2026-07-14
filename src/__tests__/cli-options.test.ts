@@ -114,6 +114,8 @@ describe("CLI list pagination", () => {
 
   test("normalizes invalid and negative values", () => {
     expect(parseListPagination("not-a-number", "not-a-number")).toEqual({ limit: 20, offset: 0 });
+    expect(parseListPagination("1junk", "2junk")).toEqual({ limit: 20, offset: 0 });
     expect(parseListPagination("-7", "-2")).toEqual({ limit: 1, offset: 0 });
+    expect(parseListPagination("0", "0")).toEqual({ limit: 1, offset: 0 });
   });
 });

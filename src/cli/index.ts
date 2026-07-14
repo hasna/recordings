@@ -553,6 +553,26 @@ program
 
 // ── projects ────────────────────────────────────────────────────────────────
 
+const projectCommand = program
+  .command("project")
+  .description("Manage registered projects");
+
+projectCommand
+  .command("register")
+  .description("Register a project in the active Store")
+  .requiredOption("--name <name>", "Project name")
+  .requiredOption("--path <path>", "Stable project path or URI")
+  .option("--description <description>", "Project description")
+  .action(async (opts) => {
+    const parentOpts = program.opts();
+    const project = await getStore().registerProject(opts.name, opts.path, opts.description);
+    if (parentOpts.json) {
+      console.log(JSON.stringify(project, null, 2));
+      return;
+    }
+    console.log(`${chalk.cyan(project.id)} ${chalk.bold(project.name)} — ${project.path}`);
+  });
+
 program
   .command("projects")
   .description("List registered projects")
