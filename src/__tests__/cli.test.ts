@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -241,10 +241,293 @@ describe("recordings CLI", () => {
       openai_api_key_configured: boolean;
       enhancement_api_key_configured: boolean;
       enhancement_model: string;
+      realtime_session_model: string;
+      realtime_transcription_model: string;
+      config_warnings: string[];
     };
     expect(typeof report.recording.available).toBe("boolean");
     expect(report.openai_api_key_configured).toBe(true);
     expect(report.enhancement_api_key_configured).toBe(true);
     expect(report.enhancement_model).toBe("gpt-4o");
+    expect(report.realtime_session_model).toBe("gpt-realtime");
+    expect(report.realtime_transcription_model).toBe("gpt-realtime-whisper");
+    expect(Array.isArray(report.config_warnings)).toBe(true);
+  });
+
+  test("--json transcribe emits only one JSON payload on stdout", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-json-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const audioPath = join(home, "sample.wav");
+    writeFileSync(audioPath, "fake wav bytes");
+
+    const apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname.endsWith("/audio/transcriptions")) {
+          return Response.json({ text: "mock transcript", language: "en" });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    try {
+      const proc = Bun.spawn(
+        [process.execPath, "src/cli/index.ts", "--json", "transcribe", audioPath, "--no-enhance"],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: home,
+            OPENAI_API_KEY: "sk-test-key",
+            RECORDINGS_API_KEY: "",
+            RECORDINGS_ENHANCEMENT_KEY: "",
+            OPENAI_BASE_URL: `http://127.0.0.1:${apiServer.port}`,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).not.toContain("Transcribing");
+      expect(stdout).not.toContain("Transcription:");
+      expect(stdout.trim().startsWith("{")).toBe(true);
+
+      const recording = JSON.parse(stdout) as {
+        raw_text: string;
+        processing_mode: string;
+        model_used: string;
+      };
+      expect(recording.raw_text).toBe("mock transcript");
+      expect(recording.processing_mode).toBe("raw");
+      expect(recording.model_used).toBe("gpt-4o-transcribe");
+    } finally {
+      apiServer.stop(true);
+    }
+  });
+
+  test("--json transcribe always post-processes and emits safe metadata", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-cleanup-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const audioPath = join(home, "sample.wav");
+    writeFileSync(audioPath, "fake wav bytes");
+
+    const apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname.endsWith("/audio/transcriptions")) {
+          return Response.json({ text: "hello world", language: "en" });
+        }
+        if (req.method === "POST" && url.pathname.endsWith("/chat/completions")) {
+          return Response.json({
+            choices: [{ message: { content: "Hello, world." } }],
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    try {
+      const proc = Bun.spawn(
+        [
+          process.execPath,
+          "src/cli/index.ts",
+          "--json",
+          "transcribe",
+          audioPath,
+          "--prompt",
+          "Hasna",
+          "--transcriber-prompt",
+          "Fix punctuation only",
+          "--post-processing",
+          "always",
+        ],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: home,
+            OPENAI_API_KEY: "sk-test-key",
+            RECORDINGS_API_KEY: "",
+            RECORDINGS_ENHANCEMENT_KEY: "",
+            OPENAI_BASE_URL: `http://127.0.0.1:${apiServer.port}`,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      const recording = JSON.parse(stdout) as {
+        raw_text: string;
+        processed_text: string;
+        processing_mode: string;
+        metadata: {
+          transcription_prompt: { configured: boolean; source: string };
+          transcriber_prompt: { configured: boolean; source: string };
+          post_processing: { mode: string; applied: boolean; model: string };
+        };
+      };
+      expect(recording.raw_text).toBe("hello world");
+      expect(recording.processed_text).toBe("Hello, world.");
+      expect(recording.processing_mode).toBe("enhanced");
+      expect(recording.metadata.transcription_prompt).toEqual({
+        configured: true,
+        source: "request",
+      });
+      expect(recording.metadata.transcriber_prompt).toEqual({
+        configured: true,
+        source: "request",
+      });
+      expect(recording.metadata.post_processing.mode).toBe("always");
+      expect(recording.metadata.post_processing.applied).toBe(true);
+      expect(JSON.stringify(recording.metadata)).not.toContain("Fix punctuation only");
+    } finally {
+      apiServer.stop(true);
+    }
+  });
+
+  test("--json save-text persists realtime fast-path text without audio transcription", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-save-text-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const audioPath = join(home, "sample.wav");
+    const textPath = join(home, "transcript.txt");
+    const transcript = "hello from realtime\nwith \"quotes\" and multiple lines";
+    writeFileSync(textPath, transcript);
+
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli/index.ts",
+        "--json",
+        "save-text",
+        "--text-file",
+        textPath,
+        "--audio-path",
+        audioPath,
+        "--source",
+        "realtime_fast_path",
+        "--model-used",
+        "gpt-realtime-whisper",
+        "--post-processing",
+        "off",
+        "--language",
+        "en",
+        "--duration-ms",
+        "1200",
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          OPENAI_API_KEY: "",
+          RECORDINGS_API_KEY: "",
+          RECORDINGS_ENHANCEMENT_KEY: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const recording = JSON.parse(stdout) as {
+      audio_path: string;
+      raw_text: string;
+      processing_mode: string;
+      model_used: string;
+      duration_ms: number;
+      language: string;
+      metadata: {
+        transcription_source: string;
+        realtime: { fast_path: boolean; model: string; bounded_fallback: boolean };
+        post_processing: { mode: string; applied: boolean };
+      };
+    };
+    expect(recording.audio_path).toBe(audioPath);
+    expect(recording.raw_text).toBe(transcript);
+    expect(recording.processing_mode).toBe("raw");
+    expect(recording.model_used).toBe("gpt-realtime-whisper");
+    expect(recording.duration_ms).toBe(1200);
+    expect(recording.language).toBe("en");
+    expect(recording.metadata.transcription_source).toBe("realtime_fast_path");
+    expect(recording.metadata.realtime).toEqual({
+      fast_path: true,
+      model: "gpt-realtime-whisper",
+      bounded_fallback: false,
+    });
+    expect(recording.metadata.post_processing.mode).toBe("off");
+    expect(recording.metadata.post_processing.applied).toBe(false);
+  });
+
+  test("mcp installer configures stdio args for Codex and Gemini", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-mcp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    const codexDir = join(home, ".codex");
+    const geminiDir = join(home, ".gemini");
+    mkdirSync(codexDir, { recursive: true });
+    mkdirSync(geminiDir, { recursive: true });
+    const codexConfig = join(codexDir, "config.toml");
+    const geminiConfig = join(geminiDir, "settings.json");
+    writeFileSync(codexConfig, "");
+    writeFileSync(geminiConfig, "{}");
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "mcp", "--codex", "--gemini"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("Codex");
+    expect(stdout).toContain("Gemini");
+    expect(readFileSync(codexConfig, "utf-8")).toContain('args = ["--stdio"]');
+
+    const gemini = JSON.parse(readFileSync(geminiConfig, "utf-8")) as {
+      mcpServers: { recordings: { command: string; args: string[] } };
+    };
+    expect(gemini.mcpServers.recordings.args).toEqual(["--stdio"]);
   });
 });

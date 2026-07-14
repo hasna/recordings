@@ -2,6 +2,82 @@ import Testing
 @testable import RecordingsLib
 
 struct CLIRunnerTests {
+    @Test("transcribeCLIArgs passes project, cleanup mode, and transcriber prompt")
+    func transcribeCLIArgsWithPrompt() {
+        let args = RecordingEngine.transcribeCLIArgs(
+            audioPath: "/tmp/audio.wav",
+            activeProjectId: "project-1",
+            transcriberPrompt: "Format as notes",
+            postProcessingMode: "always"
+        )
+        #expect(args == [
+            "--json",
+            "--project", "project-1",
+            "transcribe", "/tmp/audio.wav",
+            "--post-processing", "always",
+            "--transcriber-prompt", "Format as notes",
+        ])
+        #expect(!args.contains("--no-enhance"))
+    }
+
+    @Test("transcribeCLIArgs defaults to auto and omits blank prompt")
+    func transcribeCLIArgsDefaultAuto() {
+        let args = RecordingEngine.transcribeCLIArgs(
+            audioPath: "/tmp/audio.wav",
+            activeProjectId: nil,
+            transcriberPrompt: "   ",
+            postProcessingMode: ""
+        )
+        #expect(args == [
+            "--json",
+            "transcribe", "/tmp/audio.wav",
+            "--post-processing", "auto",
+        ])
+    }
+
+    @Test("transcribeCLIArgs falls back to auto for invalid mode")
+    func transcribeCLIArgsInvalidModeFallback() {
+        let args = RecordingEngine.transcribeCLIArgs(
+            audioPath: "/tmp/audio.wav",
+            activeProjectId: "",
+            transcriberPrompt: "",
+            postProcessingMode: "sometimes"
+        )
+        #expect(args == [
+            "--json",
+            "transcribe", "/tmp/audio.wav",
+            "--post-processing", "auto",
+        ])
+    }
+
+    @Test("saveTextCLIArgs persists realtime fast-path transcript")
+    func saveTextCLIArgsRealtimeFastPath() {
+        let args = RecordingEngine.saveTextCLIArgs(
+            textFile: "/tmp/transcript.txt",
+            audioPath: "/tmp/audio.wav",
+            activeProjectId: "project-1",
+            transcriberPrompt: "Format as notes",
+            postProcessingMode: "auto",
+            language: "en",
+            durationMs: 1200,
+            source: "realtime_fast_path",
+            modelUsed: "gpt-realtime-whisper"
+        )
+        #expect(args == [
+            "--json",
+            "--project", "project-1",
+            "save-text",
+            "--text-file", "/tmp/transcript.txt",
+            "--source", "realtime_fast_path",
+            "--model-used", "gpt-realtime-whisper",
+            "--post-processing", "auto",
+            "--audio-path", "/tmp/audio.wav",
+            "--duration-ms", "1200",
+            "--language", "en",
+            "--transcriber-prompt", "Format as notes",
+        ])
+    }
+
     @Test("parseError detects ERROR prefix")
     func parseError() {
         #expect(CLIRunner.parseError("ERROR: OpenAI API key not configured on this Mac") == "OpenAI API key not configured on this Mac")

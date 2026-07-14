@@ -8,28 +8,14 @@ let _recordProcess: ChildProcess | null = null;
 let _currentFile: string | null = null;
 
 /**
- * Check if sox/rec is available for recording
+ * Check if rec is available for recording.
+ * rec is shipped by sox and is the command this module actually spawns.
  */
 export async function checkRecordingDeps(): Promise<{
   available: boolean;
   tool: string;
   message: string;
 }> {
-  // Check for sox
-  try {
-    const proc = Bun.spawn(["which", "sox"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    await proc.exited;
-    if (proc.exitCode === 0) {
-      return { available: true, tool: "sox", message: "sox is available" };
-    }
-  } catch {
-    // Not available
-  }
-
-  // Check for rec (part of sox)
   try {
     const proc = Bun.spawn(["which", "rec"], {
       stdout: "pipe",
@@ -38,24 +24,6 @@ export async function checkRecordingDeps(): Promise<{
     await proc.exited;
     if (proc.exitCode === 0) {
       return { available: true, tool: "rec", message: "rec is available" };
-    }
-  } catch {
-    // Not available
-  }
-
-  // Check for ffmpeg
-  try {
-    const proc = Bun.spawn(["which", "ffmpeg"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    await proc.exited;
-    if (proc.exitCode === 0) {
-      return {
-        available: true,
-        tool: "ffmpeg",
-        message: "ffmpeg is available",
-      };
     }
   } catch {
     // Not available

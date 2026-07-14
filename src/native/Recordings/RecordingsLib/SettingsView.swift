@@ -19,7 +19,7 @@ public struct SettingsView: View {
             projectsTab.tabItem { Label("Projects", systemImage: "folder") }
             shortcutsTab.tabItem { Label("Voice Shortcuts", systemImage: "text.badge.star") }
         }
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: 500)
     }
 
     // MARK: - General
@@ -84,13 +84,22 @@ public struct SettingsView: View {
                 }
             }
 
-            Section("System Prompt") {
+            Section("Transcription Cleanup") {
+                Picker("Mode", selection: $projectStore.settings.postProcessingMode) {
+                    ForEach(PostProcessingMode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: projectStore.settings.postProcessingMode) {
+                    projectStore.save()
+                }
                 TextEditor(text: $projectStore.settings.globalSystemPrompt)
                     .frame(height: 80)
                     .onChange(of: projectStore.settings.globalSystemPrompt) {
                         projectStore.save()
                     }
-                Text("Applied to all transcription enhancements.")
+                Text("Instructions for post-transcription cleanup and formatting.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -230,13 +239,13 @@ struct ProjectEditView: View {
                     .textFieldStyle(.roundedBorder)
                 }
 
-                Section("System Prompt") {
+                Section("Transcriber Instructions") {
                     TextEditor(text: Binding(
                         get: { project.systemPrompt ?? "" },
                         set: { project.systemPrompt = $0.isEmpty ? nil : $0 }
                     ))
                     .frame(height: 100)
-                    Text("Additional context for transcription enhancement in this project.")
+                    Text("Project-specific cleanup and formatting instructions.")
                         .foregroundStyle(.secondary)
                 }
             }

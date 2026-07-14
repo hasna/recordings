@@ -2,12 +2,21 @@ import Foundation
 
 // MARK: - OpenAI Realtime Transcription Client
 
+public struct RealtimeFinishResult: Sendable {
+    public let text: String
+    public let settled: Bool
+    public let error: String?
+}
+
 /// Streams PCM audio to OpenAI's Realtime Transcription API via WebSocket.
 /// Receives transcription deltas in real time.
 @MainActor
 public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sendable {
+    /// Realtime session model slot. Transcription-only models do not belong in the URL.
+    public nonisolated static let sessionModelID = "gpt-realtime"
     /// Low-latency model for realtime transcript deltas.
-    public nonisolated static let modelID = "gpt-realtime-whisper"
+    public nonisolated static let transcriptionModelID = "gpt-realtime-whisper"
+    public nonisolated static let modelID = transcriptionModelID
     public nonisolated static let transcriptionDelay = "low"
     private nonisolated static let transcriptionURL = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
 
@@ -43,11 +52,8 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     // MARK: - Public API
 
     /// Start a streaming transcription session.
-    /// - Parameters:
-    ///   - systemPrompt: Optional system prompt for the transcription
-    ///   - audioFormat: Audio format. Defaults to pcm16 at 24kHz (OpenAI's preferred format).
     /// - Returns: The client is now streaming. Call `sendAudio(_:)` to send chunks.
-    public func startStreaming(systemPrompt: String = "", language: String = "") async {
+    public func startStreaming(language: String = "") async {
         guard !apiKey.isEmpty else {
             self.error = "OpenAI API key not configured"
             return
@@ -142,25 +148,35 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     }
 
     /// Commit buffered input, wait briefly for a final completed event, then close.
-    public func finish(timeoutMilliseconds: UInt64 = 700) async -> String {
-        guard isStreaming else { return accumulatedText }
+    public func finish(timeoutMilliseconds: UInt64 = 700) async -> RealtimeFinishResult {
+        guard isStreaming else {
+            return RealtimeFinishResult(text: accumulatedText, settled: true, error: error)
+        }
         let completedCountBeforeCommit = completedEventCount
         let didManualCommit = await commitInput()
         let expectedCommitCount = queuedCommitCount
+        var settled = false
 
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutMilliseconds) / 1_000)
         while Date() < deadline, isStreaming {
             let hasIncompleteCommittedItems = !committedItemIDs.subtracting(completedItemIDs).isEmpty
-            let hasManualCommitCompletion = !didManualCommit || completedEventCount > completedCountBeforeCommit
-            let hasQueuedCommitCompletion = completedEventCount >= expectedCommitCount
-            let quietLongEnough = Date().timeIntervalSince(lastRealtimeEventAt) >= 0.35
-            if !hasIncompleteCommittedItems, hasManualCommitCompletion, hasQueuedCommitCompletion, quietLongEnough {
+            if Self.isFinishSettled(
+                didManualCommit: didManualCommit,
+                completedCountBeforeCommit: completedCountBeforeCommit,
+                completedEventCount: completedEventCount,
+                expectedCommitCount: expectedCommitCount,
+                hasIncompleteCommittedItems: hasIncompleteCommittedItems,
+                uncommittedAudioBytes: uncommittedAudioBytes,
+                secondsSinceLastEvent: Date().timeIntervalSince(lastRealtimeEventAt)
+            ) {
+                settled = true
                 break
             }
             try? await Task.sleep(for: .milliseconds(50))
         }
 
-        return stop()
+        let text = stop()
+        return RealtimeFinishResult(text: text, settled: settled, error: error)
     }
 
     /// Stop the streaming session and clean up.
@@ -368,6 +384,25 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         uncommittedAudioBytes >= minimumManualCommitBytes
     }
 
+    private nonisolated static func isFinishSettled(
+        didManualCommit: Bool,
+        completedCountBeforeCommit: Int,
+        completedEventCount: Int,
+        expectedCommitCount: Int,
+        hasIncompleteCommittedItems: Bool,
+        uncommittedAudioBytes: Int,
+        secondsSinceLastEvent: TimeInterval
+    ) -> Bool {
+        let hasManualCommitCompletion = !didManualCommit || completedEventCount > completedCountBeforeCommit
+        let hasQueuedCommitCompletion = completedEventCount >= expectedCommitCount
+        let quietLongEnough = secondsSinceLastEvent >= 0.35
+        return !hasIncompleteCommittedItems
+            && uncommittedAudioBytes == 0
+            && hasManualCommitCompletion
+            && hasQueuedCommitCompletion
+            && quietLongEnough
+    }
+
     private nonisolated static func transcriptionSessionUpdateEvent(transcription: [String: Any]) -> [String: Any] {
         [
             "type": "session.update",
@@ -380,6 +415,7 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
                             "rate": 24_000,
                         ],
                         "transcription": transcription,
+                        "turn_detection": NSNull(),
                     ],
                 ],
             ],
@@ -428,6 +464,26 @@ extension RealtimeTranscriptionClient {
 
     public nonisolated static func shouldManuallyCommitTestHelper(uncommittedAudioBytes: Int) -> Bool {
         shouldManuallyCommit(uncommittedAudioBytes: uncommittedAudioBytes)
+    }
+
+    public nonisolated static func isFinishSettledTestHelper(
+        didManualCommit: Bool,
+        completedCountBeforeCommit: Int,
+        completedEventCount: Int,
+        expectedCommitCount: Int,
+        hasIncompleteCommittedItems: Bool,
+        uncommittedAudioBytes: Int,
+        secondsSinceLastEvent: TimeInterval
+    ) -> Bool {
+        isFinishSettled(
+            didManualCommit: didManualCommit,
+            completedCountBeforeCommit: completedCountBeforeCommit,
+            completedEventCount: completedEventCount,
+            expectedCommitCount: expectedCommitCount,
+            hasIncompleteCommittedItems: hasIncompleteCommittedItems,
+            uncommittedAudioBytes: uncommittedAudioBytes,
+            secondsSinceLastEvent: secondsSinceLastEvent
+        )
     }
 
     public nonisolated static func sessionUpdateTestHelper(prompt: String, language: String = "") -> [String: Any] {

@@ -16,10 +16,10 @@ import {
   recordDuration,
 } from "../lib/recorder.js";
 import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
-import { enhanceText, processText } from "../lib/enhancer.js";
+import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
-import { applyEnhancementOptions } from "./options.js";
+import { applyEnhancementOptions, parseListPagination } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
 
 const program = new Command();
@@ -44,13 +44,20 @@ program
   .description("Record from microphone, transcribe, and optionally enhance")
   .option("-d, --duration <seconds>", "Record for specific duration")
   .option("--no-enhance", "Skip AI enhancement")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
   .option("-t, --tags <tags>", "Comma-separated tags")
   .option("-l, --language <lang>", "Language code (e.g. en, es, fr)")
   .action(async (opts) => {
     const config = loadConfig();
     ensureDataDir(config);
+    const parentOpts = program.opts();
 
     if (opts.language) config.language = opts.language;
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
     // Check dependencies
@@ -65,18 +72,22 @@ program
     if (opts.duration) {
       // Fixed duration recording
       const seconds = parseInt(opts.duration, 10);
-      console.log(
-        chalk.blue(`Recording for ${seconds} seconds...`)
-      );
+      if (!parentOpts.json) {
+        console.log(chalk.blue(`Recording for ${seconds} seconds...`));
+      }
       audioPath = await recordDuration(seconds, config);
-      console.log(chalk.green("Recording complete."));
+      if (!parentOpts.json) {
+        console.log(chalk.green("Recording complete."));
+      }
     } else {
       // Interactive recording — press Enter to stop
-      console.log(
-        chalk.blue("Recording... Press") +
-          chalk.yellow(" Enter ") +
-          chalk.blue("to stop.")
-      );
+      if (!parentOpts.json) {
+        console.log(
+          chalk.blue("Recording... Press") +
+            chalk.yellow(" Enter ") +
+            chalk.blue("to stop.")
+        );
+      }
       audioPath = startRecording(config);
 
       // Wait for Enter key
@@ -91,28 +102,33 @@ program
       });
 
       stopRecording();
-      console.log(chalk.green("Recording stopped."));
+      if (!parentOpts.json) {
+        console.log(chalk.green("Recording stopped."));
+      }
     }
 
     // Transcribe
-    console.log(chalk.blue("Transcribing..."));
+    if (!parentOpts.json) {
+      console.log(chalk.blue("Transcribing..."));
+    }
     const transcription = await transcribeAudio(audioPath, config);
-    console.log(chalk.dim(`Raw: ${transcription.text}`));
+    if (!parentOpts.json) {
+      console.log(chalk.dim(`Raw: ${transcription.text}`));
+    }
 
     // Process (detect & enhance if needed)
     const processed = await processText(transcription.text, config);
 
-    if (processed.mode === "enhanced") {
+    if (!parentOpts.json && processed.mode === "enhanced") {
       console.log(chalk.green("\nEnhanced output:"));
       console.log(processed.text);
-    } else {
+    } else if (!parentOpts.json) {
       console.log(chalk.green("\nOutput:"));
       console.log(transcription.text);
     }
 
     // Save to database
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
-    const parentOpts = program.opts();
 
     const recording = await getStore().createRecording({
       audio_path: audioPath,
@@ -127,6 +143,11 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      metadata: buildTranscriptionMetadata(config, processed, {
+        transcriptionPromptFromRequest: opts.prompt !== undefined,
+        transcriberPromptFromRequest:
+          opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+      }),
     });
 
     if (parentOpts.json) {
@@ -147,10 +168,14 @@ program
   .option("--stream", "Stream transcription deltas while the file is processed")
   .option("-t, --tags <tags>", "Comma-separated tags")
   .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
-  .option("--system-prompt <prompt>", "System prompt for enhancement context")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
   .action(async (file, opts) => {
     const config = loadConfig();
     ensureDataDir(config);
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
     const parentOpts = program.opts();
@@ -159,15 +184,14 @@ program
     }
     const transcription = opts.stream
       ? await transcribeAudioStream(file, config, {
-          prompt: opts.prompt,
           onDelta: parentOpts.json ? undefined : (delta) => process.stdout.write(delta),
         })
-      : await transcribeAudio(file, config, { prompt: opts.prompt });
+      : await transcribeAudio(file, config);
     if (opts.stream && !parentOpts.json) {
       process.stdout.write("\n");
     }
 
-    const processed = await processText(transcription.text, config, opts.systemPrompt);
+    const processed = await processText(transcription.text, config);
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
     const recording = await getStore().createRecording({
@@ -183,9 +207,16 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      metadata: buildTranscriptionMetadata(config, processed, {
+        transcriptionPromptFromRequest: opts.prompt !== undefined,
+        transcriberPromptFromRequest:
+          opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+      }),
     });
 
-    if (processed.mode === "enhanced") {
+    if (parentOpts.json) {
+      console.log(JSON.stringify(recording, null, 2));
+    } else if (processed.mode === "enhanced") {
       console.log(chalk.green("Enhanced:"));
       console.log(processed.text);
     } else {
@@ -193,10 +224,74 @@ program
       console.log(transcription.text);
     }
 
+    if (!parentOpts.json) {
+      console.log(chalk.dim(`Saved as ${recording.id.slice(0, 8)}`));
+    }
+  });
+
+// ── save-text ───────────────────────────────────────────────────────────────
+
+program
+  .command("save-text [text]")
+  .description("Save already-transcribed text as a recording")
+  .option("--text-file <path>", "Read transcript text from a UTF-8 file")
+  .option("--stdin", "Read transcript text from stdin")
+  .option("--audio-path <path>", "Audio file path associated with this transcript")
+  .option("--model-used <model>", "Model/source used to produce the raw transcript")
+  .option("--source <source>", "Transcript source label for metadata", "direct_text")
+  .option("--duration-ms <ms>", "Recording duration in milliseconds")
+  .option("-l, --language <lang>", "Language code")
+  .option("-t, --tags <tags>", "Comma-separated tags")
+  .option("--no-enhance", "Skip AI enhancement")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
+  .action(async (text: string | undefined, opts) => {
+    const rawText = await readSaveTextInput(text, opts);
+    const config = loadConfig();
+    ensureDataDir(config);
+    if (opts.language) config.language = opts.language;
+    applyEnhancementOptions(config, opts);
+
+    const processed = await processText(rawText, config);
+    const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
+    const parentOpts = program.opts();
+    const metadata = {
+      ...buildTranscriptionMetadata(config, processed, {
+        transcriberPromptFromRequest:
+          opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+      }),
+      transcription_source: opts.source || "direct_text",
+      realtime: {
+        fast_path: opts.source === "realtime_fast_path",
+        model: opts.modelUsed || config.realtime_transcription_model || "direct-input",
+        bounded_fallback: false,
+      },
+    };
+
+    const recording = await getStore().createRecording({
+      audio_path: opts.audioPath || undefined,
+      raw_text: rawText,
+      processed_text: processed.mode === "enhanced" ? processed.text : undefined,
+      processing_mode: processed.mode,
+      model_used: opts.modelUsed || "direct-input",
+      enhancement_model: processed.enhancement_model || undefined,
+      duration_ms: opts.durationMs ? parseInt(opts.durationMs, 10) : 0,
+      language: opts.language || undefined,
+      tags,
+      agent_id: parentOpts.agent || undefined,
+      project_id: parentOpts.project || undefined,
+      session_id: parentOpts.session || undefined,
+      metadata,
+    });
+
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));
+    } else if (processed.mode === "enhanced") {
+      console.log(processed.text);
     } else {
-      console.log(chalk.dim(`Saved as ${recording.id.slice(0, 8)}`));
+      console.log(rawText);
     }
   });
 
@@ -292,19 +387,22 @@ program
   .command("list")
   .description("List recordings")
   .option("-n, --limit <n>", "Max results", "20")
+  .option("--offset <n>", "Skip results", "0")
   .option("--mode <mode>", "Filter by mode: raw or enhanced")
   .option("-t, --tags <tags>", "Filter by tags")
   .option("--since <date>", "After date (ISO)")
   .option("--until <date>", "Before date (ISO)")
   .action(async (opts) => {
     const parentOpts = program.opts();
+    const pagination = parseListPagination(opts.limit, opts.offset);
 
     const recordings = await getStore().listRecordings({
-      limit: parseInt(opts.limit, 10),
+      limit: pagination.limit,
       processing_mode: opts.mode,
       tags: opts.tags ? opts.tags.split(",") : undefined,
       since: opts.since,
       until: opts.until,
+      offset: pagination.offset,
       agent_id: parentOpts.agent,
       project_id: parentOpts.project,
       session_id: parentOpts.session,
@@ -498,8 +596,14 @@ program
     if (!existsSync(configFile)) {
       const defaultConf = {
         transcription_model: "gpt-4o-transcribe",
+        realtime_session_model: "gpt-realtime",
+        realtime_transcription_model: "gpt-realtime-whisper",
         enhancement_model: "gpt-4o",
+        transcriber_model: "gpt-4o",
         language: "en",
+        transcription_prompt: "",
+        transcriber_prompt: "",
+        post_processing_mode: "auto",
         auto_enhance: true,
       };
       writeFileSync(configFile, JSON.stringify(defaultConf, null, 2));
@@ -515,7 +619,7 @@ program
 
 const appCommand = program
   .command("app")
-  .description("Manage the macOS menu bar app installed from this package");
+  .description("Manage the macOS app installed from this package");
 
 appCommand
   .command("install")
@@ -697,6 +801,13 @@ program
         openai_api_key_configured: Boolean(config.openai_api_key),
         enhancement_api_key_configured: Boolean(enhKey),
         enhancement_model: config.enhancement_model,
+        transcriber_model: resolveTranscriberModel(config),
+        realtime_session_model: config.realtime_session_model,
+        realtime_transcription_model: config.realtime_transcription_model,
+        post_processing_mode: config.post_processing_mode,
+        transcription_prompt_configured: Boolean(config.transcription_prompt?.trim()),
+        transcriber_prompt_configured: Boolean(config.transcriber_prompt?.trim()),
+        config_warnings: config.config_warnings ?? [],
       }, null, 2));
       return;
     }
@@ -723,7 +834,7 @@ program
     // Check enhancement key
     if (enhKey) {
       console.log(
-        chalk.green(`✓ Enhancement API key configured (model: ${config.enhancement_model})`)
+        chalk.green(`✓ Enhancement API key configured (model: ${resolveTranscriberModel(config)})`)
       );
     } else {
       console.log(
@@ -739,6 +850,11 @@ program
   .description("Push-to-talk mode — press Space to start/stop recording, Esc to quit")
   .option("-t, --tags <tags>", "Comma-separated tags for all recordings")
   .option("--no-enhance", "Skip AI enhancement")
+  .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--prompt <prompt>", "Vocabulary/context prompt for transcription")
+  .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcriber-model <model>", "Model for post-transcription cleanup")
   .option("-l, --language <lang>", "Language code")
   .option("--copy", "Copy output to clipboard")
   .option("--paste", "Copy output to clipboard AND paste into frontmost app")
@@ -746,6 +862,7 @@ program
     const config = loadConfig();
     ensureDataDir(config);
     if (opts.language) config.language = opts.language;
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
     const deps = await checkRecordingDeps();
@@ -839,6 +956,11 @@ program
               agent_id: parentOpts.agent || undefined,
               project_id: parentOpts.project || undefined,
               session_id: parentOpts.session || undefined,
+              metadata: buildTranscriptionMetadata(config, processed, {
+                transcriptionPromptFromRequest: opts.prompt !== undefined,
+                transcriberPromptFromRequest:
+                  opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
+              }),
             });
 
             // Clear line and show output
@@ -1060,6 +1182,76 @@ ${scriptPath}
     console.log(`    Create a workflow with a Hotkey trigger → Run Script: ${scriptPath}\n`);
   });
 
+// ── Transcription metadata ──────────────────────────────────────────────────
+
+function buildTranscriptionMetadata(
+  config: ReturnType<typeof loadConfig>,
+  processed: Awaited<ReturnType<typeof processText>>,
+  sources: {
+    transcriptionPromptFromRequest?: boolean;
+    transcriberPromptFromRequest?: boolean;
+  } = {}
+): Record<string, unknown> {
+  const transcriptionPromptConfigured = Boolean(config.transcription_prompt?.trim());
+  const transcriberPromptConfigured = Boolean(config.transcriber_prompt?.trim());
+
+  return {
+    transcription_prompt: {
+      configured: transcriptionPromptConfigured,
+      source: sources.transcriptionPromptFromRequest
+        ? "request"
+        : transcriptionPromptConfigured
+          ? "config"
+          : "none",
+    },
+    transcriber_prompt: {
+      configured: transcriberPromptConfigured,
+      source: sources.transcriberPromptFromRequest
+        ? "request"
+        : transcriberPromptConfigured
+          ? "config"
+          : "none",
+    },
+    post_processing: {
+      mode: processed.post_processing_mode,
+      applied: processed.mode === "enhanced",
+      reason: processed.enhancement_reason,
+      model: processed.enhancement_model,
+    },
+    transcriber_model: resolveTranscriberModel(config),
+  };
+}
+
+async function readSaveTextInput(
+  text: string | undefined,
+  opts: { textFile?: string; stdin?: boolean }
+): Promise<string> {
+  const sourceCount = [
+    text !== undefined,
+    opts.textFile !== undefined,
+    Boolean(opts.stdin),
+  ].filter(Boolean).length;
+
+  if (sourceCount !== 1) {
+    throw new Error("Provide transcript text as an argument, --text-file, or --stdin");
+  }
+
+  let rawText: string;
+  if (opts.textFile !== undefined) {
+    rawText = readFileSync(opts.textFile, "utf8");
+  } else if (opts.stdin) {
+    rawText = await Bun.stdin.text();
+  } else {
+    rawText = text ?? "";
+  }
+
+  if (!rawText.trim()) {
+    throw new Error("Transcript text is empty");
+  }
+
+  return rawText;
+}
+
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
 function formatRecordingLine(r: Recording): string {
@@ -1163,7 +1355,7 @@ program
             // Remove first if it exists, then add fresh
             try { execSync("claude mcp remove recordings", { stdio: "pipe" }); } catch { /* ignore if not found */ }
             execSync(
-              `claude mcp add --transport stdio --scope user recordings -- ${mcpCmd}`,
+              `claude mcp add --transport stdio --scope user recordings -- ${mcpCmd} --stdio`,
               { stdio: "pipe" }
             );
           }
@@ -1207,7 +1399,7 @@ program
           if (opts.uninstall) {
             delete servers["recordings"];
           } else {
-            servers["recordings"] = { command: mcpCmd, args: [] };
+            servers["recordings"] = { command: mcpCmd, args: ["--stdio"] };
           }
           config["mcpServers"] = servers;
           writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");

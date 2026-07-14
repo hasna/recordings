@@ -70,6 +70,6 @@ export function upsertCodexStdioBlock(
 ): string {
   const { content: cleaned } = removeCodexServerBlock(content, name);
   const trimmed = cleaned.replace(/\s+$/, "");
-  const block = `[mcp_servers.${name}]\ncommand = "${mcpCmd}"\nargs = []\n`;
+  const block = `[mcp_servers.${name}]\ncommand = "${mcpCmd}"\nargs = ["--stdio"]\n`;
   return trimmed.length > 0 ? `${trimmed}\n\n${block}` : block;
 }

@@ -3,7 +3,7 @@ import { removeCodexServerBlock, upsertCodexStdioBlock } from "../cli/mcp-config
 
 const STDIO_BLOCK = `[mcp_servers.recordings]
 command = "recordings-mcp"
-args = []
+args = ["--stdio"]
 `;
 
 const HTTP_BLOCK = `[mcp_servers.recordings]
@@ -47,7 +47,7 @@ describe("removeCodexServerBlock", () => {
 describe("upsertCodexStdioBlock", () => {
   test("adds a stdio block to a config that lacks one", () => {
     const next = upsertCodexStdioBlock(OTHER, "recordings", "recordings-mcp");
-    expect(next).toContain(`[mcp_servers.recordings]\ncommand = "recordings-mcp"\nargs = []`);
+    expect(next).toContain(`[mcp_servers.recordings]\ncommand = "recordings-mcp"\nargs = ["--stdio"]`);
     expect(next).toContain("[mcp_servers.other]");
   });
 
