@@ -20,6 +20,7 @@ public struct SettingsView: View {
             shortcutsTab.tabItem { Label("Voice Shortcuts", systemImage: "text.badge.star") }
         }
         .frame(width: 520, height: 500)
+        .disabled(projectStore.isSynchronizingProjects)
         .alert("Project Settings Error", isPresented: Binding(
             get: { projectStore.persistenceError != nil },
             set: { if !$0 { projectStore.clearPersistenceError() } }

@@ -56,6 +56,61 @@ struct ProjectStoreTests {
         #expect(store.persistenceError?.contains("Failed to save projects") == true)
     }
 
+    @Test("project mutations are rejected while canonical reconciliation is in flight")
+    @MainActor
+    func serializesReconciliationAndMutations() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        let script = """
+        #!/bin/sh
+        root="$(cd "$(dirname "$0")/../.." && pwd)"
+        touch "$root/started"
+        while [ ! -f "$root/release" ]; do sleep 0.01; done
+        printf '%s' '{"id":"canonical-id","name":"Legacy","path":"recordings-app://projects/legacy-id"}'
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let store = ProjectStore(filePath: root.appendingPathComponent("projects.json").path)
+        store.settings.projects = [RecProject(id: "legacy-id", name: "Legacy")]
+        try store.save()
+        let reconciliation = Task { try await store.reconcileWithCanonicalStore(home: root.path) }
+        for _ in 0..<200 where !FileManager.default.fileExists(atPath: root.appendingPathComponent("started").path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(store.isSynchronizingProjects)
+        var edited = try #require(store.settings.projects.first)
+        edited.name = "Must Not Be Lost"
+        #expect(throws: ProjectStoreError.self) {
+            try store.updateProject(edited)
+        }
+        try Data().write(to: root.appendingPathComponent("release"))
+        try await reconciliation.value
+        #expect(store.settings.projects.first?.name == "Legacy")
+        #expect(!store.isSynchronizingProjects)
+    }
+
+    @Test("project decode failures are visible and prevent readiness")
+    @MainActor
+    func reportsLoadFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("projects.json")
+        try Data("not-json".utf8).write(to: file)
+
+        let store = ProjectStore(filePath: file.path)
+
+        #expect(store.persistenceError?.contains("Failed to load projects") == true)
+        #expect(!store.isReadyForRecording)
+        await #expect(throws: ProjectStoreError.self) {
+            try await store.reconcileWithCanonicalStore(home: root.path)
+        }
+    }
+
     @Test("matchProject by bundle ID")
     func matchByBundleId() {
         let projects = [

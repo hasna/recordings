@@ -94,28 +94,42 @@ public enum RecordingsCLI {
     private static func runDecoding<T: Decodable>(_ type: T.Type, _ args: [String], home: String) throws -> T {
         let output = CLIRunner.run(args, home: home)
         if let err = CLIRunner.parseError(output) { throw Failure(message: err) }
-        guard let json = Self.extractJSON(from: output), let data = json.data(using: .utf8) else {
+        let candidates = Self.jsonCandidates(from: output)
+        guard !candidates.isEmpty else {
             throw Failure(message: "No JSON in CLI output")
         }
-        do {
-            return try JSONDecoder().decode(T.self, from: data)
-        } catch {
-            throw Failure(message: "Failed to decode \(T.self): \(error.localizedDescription)")
+        var lastError: Error?
+        for json in candidates.reversed() {
+            guard let data = json.data(using: .utf8) else { continue }
+            do {
+                return try JSONDecoder().decode(T.self, from: data)
+            } catch {
+                lastError = error
+            }
         }
+        throw Failure(message: "Failed to decode \(T.self): \(lastError?.localizedDescription ?? "invalid JSON")")
     }
 
     /// Find a balanced, valid top-level JSON array or object while ignoring bracketed logs.
     static func extractJSON(from output: String) -> String? {
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        jsonCandidates(from: output).last
+    }
 
-        for start in trimmed.indices where trimmed[start] == "[" || trimmed[start] == "{" {
+    static func jsonCandidates(from output: String) -> [String] {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var candidates: [String] = []
+        var cursor = trimmed.startIndex
+
+        while cursor < trimmed.endIndex {
+            guard let start = trimmed[cursor...].firstIndex(where: { $0 == "[" || $0 == "{" }) else { break }
             var stack: [Character] = []
             var inString = false
             var escaped = false
             var index = start
+            var candidateEnd: String.Index?
 
-            while index < trimmed.endIndex {
+            scan: while index < trimmed.endIndex {
                 let character = trimmed[index]
                 if inString {
                     if escaped { escaped = false }
@@ -127,23 +141,30 @@ public enum RecordingsCLI {
                     case "[": stack.append("]")
                     case "{": stack.append("}")
                     case "]", "}":
-                        guard stack.last == character else { break }
+                        guard stack.last == character else { break scan }
                         stack.removeLast()
                         if stack.isEmpty {
-                            let candidate = String(trimmed[start...index])
-                            if let data = candidate.data(using: .utf8),
-                               let value = try? JSONSerialization.jsonObject(with: data),
-                               value is [Any] || value is [String: Any] {
-                                return candidate
-                            }
-                            break
+                            candidateEnd = index
+                            break scan
                         }
                     default: break
                     }
                 }
                 index = trimmed.index(after: index)
             }
+
+            if let end = candidateEnd {
+                let candidate = String(trimmed[start...end])
+                if let data = candidate.data(using: .utf8),
+                   let value = try? JSONSerialization.jsonObject(with: data),
+                   value is [Any] || value is [String: Any] {
+                    candidates.append(candidate)
+                }
+                cursor = trimmed.index(after: end)
+            } else {
+                cursor = trimmed.index(after: start)
+            }
         }
-        return nil
+        return candidates
     }
 }

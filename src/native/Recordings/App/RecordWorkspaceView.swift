@@ -199,6 +199,7 @@ struct RecordWorkspaceView: View {
                     Text(store.projectStore.activeProject?.name ?? "No project")
                 }
                 .menuStyle(.borderlessButton).fixedSize()
+                .disabled(store.projectStore.isSynchronizingProjects)
                 Text("· transcripts are tagged to this project").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
             }

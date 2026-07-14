@@ -16,6 +16,18 @@ public enum PostProcessingMode: String, CaseIterable, Identifiable, Codable, Sen
     }
 }
 
+public enum ProjectStoreError: Error, LocalizedError {
+    case synchronizationInProgress
+    case persistenceFailure(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .synchronizationInProgress: return "Project synchronization is in progress"
+        case .persistenceFailure(let message): return message
+        }
+    }
+}
+
 public struct RecProject: Codable, Identifiable, Sendable {
     public var id: String
     public var name: String
@@ -82,9 +94,11 @@ public struct ProjectSettings: Codable, Sendable {
 public final class ProjectStore: ObservableObject {
     @Published public var settings = ProjectSettings()
     @Published public private(set) var isReadyForRecording = false
+    @Published public private(set) var isSynchronizingProjects = false
     @Published public private(set) var persistenceError: String?
 
     private let filePath: String
+    private var loadSucceeded = true
 
     public var activeProject: RecProject? {
         settings.projects.first { $0.id == settings.activeProjectId }
@@ -107,21 +121,31 @@ public final class ProjectStore: ObservableObject {
     public init(filePath: String? = nil) {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         self.filePath = filePath ?? "\(home)/.hasna/recordings/projects.json"
-        load()
-        isReadyForRecording = settings.projects.isEmpty
+        let loaded = load()
+        loadSucceeded = loaded
+        isReadyForRecording = loaded && settings.projects.isEmpty
     }
 
-    func load() {
+    @discardableResult
+    func load() -> Bool {
         guard FileManager.default.fileExists(atPath: filePath),
-              let data = FileManager.default.contents(atPath: filePath) else { return }
+              let data = FileManager.default.contents(atPath: filePath) else { return true }
         do {
             settings = try JSONDecoder().decode(ProjectSettings.self, from: data)
+            persistenceError = nil
+            return true
         } catch {
-            fputs("[ProjectStore] Failed to load: \(error)\n", stderr)
+            persistenceError = "Failed to load projects: \(error.localizedDescription)"
+            return false
         }
     }
 
     public func save() throws {
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try persistSettings()
+    }
+
+    private func persistSettings() throws {
         do {
             let data = try JSONEncoder().encode(settings)
             let dir = (filePath as NSString).deletingLastPathComponent
@@ -139,6 +163,12 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func reconcileWithCanonicalStore(home: String = RecordingsCLI.defaultHome) async throws {
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        guard loadSucceeded else {
+            throw ProjectStoreError.persistenceFailure(persistenceError ?? "Failed to load projects")
+        }
+        isSynchronizingProjects = true
+        defer { isSynchronizingProjects = false }
         let original = settings
         guard !original.projects.isEmpty else {
             isReadyForRecording = true
@@ -179,7 +209,7 @@ public final class ProjectStore: ObservableObject {
         }
         settings = migrated
         do {
-            try save()
+            try persistSettings()
             isReadyForRecording = true
         } catch {
             settings = original
@@ -188,6 +218,9 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func addProject(name: String, path: String? = nil, systemPrompt: String? = nil, home: String = RecordingsCLI.defaultHome) async throws {
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        isSynchronizingProjects = true
+        defer { isSynchronizingProjects = false }
         let local = RecProject(name: name, path: path, systemPrompt: systemPrompt)
         let canonical: RecordingsCLI.CanonicalProject
         do {
@@ -208,11 +241,12 @@ public final class ProjectStore: ObservableObject {
         )
         let original = settings
         settings.projects.append(project)
-        do { try save() } catch { settings = original; throw error }
+        do { try persistSettings() } catch { settings = original; throw error }
         isReadyForRecording = true
     }
 
     public func updateProject(_ project: RecProject) throws {
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
         guard let idx = settings.projects.firstIndex(where: { $0.id == project.id }) else { return }
         let original = settings
         settings.projects[idx] = project
@@ -220,6 +254,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func removeProject(id: String) throws {
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
         let original = settings
         settings.projects.removeAll { $0.id == id }
         if settings.activeProjectId == id { settings.activeProjectId = nil }
@@ -227,6 +262,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func setActive(_ id: String?) throws {
+        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
         let original = settings
         settings.activeProjectId = id
         do { try save() } catch { settings = original; throw error }

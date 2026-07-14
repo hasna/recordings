@@ -87,6 +87,17 @@ struct RecordingBridgeTests {
         #expect(object["message"] == "literal [bracket] and {brace}")
     }
 
+    @Test("extractJSON selects the final payload after a valid JSON log line")
+    func extractJSONAfterValidJSONLog() throws {
+        let output = """
+        { "level": "info", "message": "opening database" }
+        [ { "id": "recording-1" } ]
+        """
+        let json = try #require(RecordingsCLI.extractJSON(from: output))
+        let array = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: String]])
+        #expect(array == [["id": "recording-1"]])
+    }
+
     @Test("extractJSON returns object payload when stdout is a JSON object")
     func extractObject() {
         let output = "noise line\n{ \"mode\": \"local\" }\n"
