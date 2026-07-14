@@ -191,6 +191,37 @@ describe("recordings CLI", () => {
     expect(status.log_path).toContain(".hasna/recordings/Recordings.log");
   });
 
+  test("app status is compact by default and verbose on request", async () => {
+    const compactProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "app", "status"],
+      { cwd: process.cwd(), env: process.env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [compactStdout, compactStderr, compactExit] = await Promise.all([
+      new Response(compactProc.stdout).text(),
+      new Response(compactProc.stderr).text(),
+      compactProc.exited,
+    ]);
+    expect(compactExit).toBe(0);
+    expect(compactStderr).toBe("");
+    expect(compactStdout).toContain("Recordings.app");
+    expect(compactStdout).toContain("Use --verbose");
+    expect(compactStdout).not.toContain(`Package: ${process.cwd()}`);
+
+    const verboseProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "app", "status", "--verbose"],
+      { cwd: process.cwd(), env: process.env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [verboseStdout, verboseStderr, verboseExit] = await Promise.all([
+      new Response(verboseProc.stdout).text(),
+      new Response(verboseProc.stderr).text(),
+      verboseProc.exited,
+    ]);
+    expect(verboseExit).toBe(0);
+    expect(verboseStderr).toBe("");
+    expect(verboseStdout).toContain(`Package: ${process.cwd()}`);
+    expect(verboseStdout).toContain("Executable path:");
+  });
+
   test("--json app permissions emits permission diagnostics", async () => {
     const proc = Bun.spawn(
       [process.execPath, "src/cli/index.ts", "--json", "app", "permissions"],
@@ -530,6 +561,172 @@ describe("recordings CLI", () => {
     });
     expect(recording.metadata.post_processing.mode).toBe("off");
     expect(recording.metadata.post_processing.applied).toBe(false);
+  });
+
+  test("list is compact by default while JSON and detail preserve full text", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-compact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const longText = `First compact transcript ${"middle words ".repeat(30)}hidden-tail-token`;
+    const hostileModel = `model\nInjected\u001b[31mred\u001b]0;esc-title\u0007\u009b32mgreen\u009d0;c1-title\u009c${"😀".repeat(100)}${"x".repeat(120)}`;
+    const env = {
+      ...process.env,
+      HOME: home,
+      OPENAI_API_KEY: "",
+      RECORDINGS_API_KEY: "",
+      RECORDINGS_ENHANCEMENT_KEY: "",
+      HASNA_RECORDINGS_STORAGE_MODE: "local",
+    };
+
+    const saveProc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli/index.ts",
+        "--json",
+        "save-text",
+        longText,
+        "--post-processing",
+        "off",
+        "--model-used",
+        hostileModel,
+        "--tags",
+        "safe\nInjected\u001b[31m,second,third,fourth,fifth",
+      ],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [saveStdout, saveStderr, saveExit] = await Promise.all([
+      new Response(saveProc.stdout).text(),
+      new Response(saveProc.stderr).text(),
+      saveProc.exited,
+    ]);
+    expect(saveExit).toBe(0);
+    expect(saveStderr).toBe("");
+    const saved = JSON.parse(saveStdout) as { id: string; raw_text: string };
+    expect(saved.raw_text).toBe(longText);
+
+    const listProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "list", "-n", "1"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [listStdout, listStderr, listExit] = await Promise.all([
+      new Response(listProc.stdout).text(),
+      new Response(listProc.stderr).text(),
+      listProc.exited,
+    ]);
+    expect(listExit).toBe(0);
+    expect(listStderr).toBe("");
+    expect(listStdout).toContain("recordings: showing 1 of 1");
+    expect(listStdout).toContain(saved.id.slice(0, 8));
+    expect(listStdout).toContain("Details: recordings show <id> or inspect <id>");
+    expect(listStdout).toContain("safe Injected, second, third, +2");
+    expect(listStdout).not.toContain("safe\nInjected");
+    expect(listStdout).not.toContain("\u001b");
+    expect(listStdout).not.toContain("[31m");
+    expect(listStdout).not.toContain("hidden-tail-token");
+
+    const verboseProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "list", "-n", "1", "--verbose"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [verboseStdout, verboseStderr, verboseExit] = await Promise.all([
+      new Response(verboseProc.stdout).text(),
+      new Response(verboseProc.stderr).text(),
+      verboseProc.exited,
+    ]);
+    expect(verboseExit).toBe(0);
+    expect(verboseStderr).toBe("");
+    expect(verboseStdout).toContain("model: model Injectedredgreen");
+    expect(verboseStdout).not.toContain("\u001b");
+    expect(verboseStdout).not.toContain("\u009b");
+    expect(verboseStdout).not.toContain("[31m");
+    expect(verboseStdout).not.toContain("32m");
+    expect(verboseStdout).not.toContain("esc-title");
+    expect(verboseStdout).not.toContain("c1-title");
+    expect(verboseStdout).not.toContain("�");
+    expect(verboseStdout).not.toContain("x".repeat(80));
+
+    const statsProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "stats"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [statsStdout, statsStderr, statsExit] = await Promise.all([
+      new Response(statsProc.stdout).text(),
+      new Response(statsProc.stderr).text(),
+      statsProc.exited,
+    ]);
+    expect(statsExit).toBe(0);
+    expect(statsStderr).toBe("");
+    expect(statsStdout).toContain("model Injectedredgreen");
+    expect(statsStdout).not.toContain("\u001b");
+    expect(statsStdout).not.toContain("\u009b");
+    expect(statsStdout).not.toContain("esc-title");
+    expect(statsStdout).not.toContain("c1-title");
+    expect(statsStdout).not.toContain("�");
+    expect(statsStdout).not.toContain("x".repeat(80));
+
+    const jsonProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "list", "-n", "1"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [jsonStdout, jsonStderr, jsonExit] = await Promise.all([
+      new Response(jsonProc.stdout).text(),
+      new Response(jsonProc.stderr).text(),
+      jsonProc.exited,
+    ]);
+    expect(jsonExit).toBe(0);
+    expect(jsonStderr).toBe("");
+    const listed = JSON.parse(jsonStdout) as Array<{ raw_text: string }>;
+    expect(listed[0]!.raw_text).toBe(longText);
+
+    const inspectProc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "inspect", saved.id.slice(0, 8)],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [inspectStdout, inspectStderr, inspectExit] = await Promise.all([
+      new Response(inspectProc.stdout).text(),
+      new Response(inspectProc.stderr).text(),
+      inspectProc.exited,
+    ]);
+    expect(inspectExit).toBe(0);
+    expect(inspectStderr).toBe("");
+    expect(inspectStdout).toContain("hidden-tail-token");
+  });
+
+  test("list prints cursor hints and caps oversized human limits", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-cursor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+    const env = {
+      ...process.env,
+      HOME: home,
+      OPENAI_API_KEY: "",
+      RECORDINGS_API_KEY: "",
+      RECORDINGS_ENHANCEMENT_KEY: "",
+      HASNA_RECORDINGS_STORAGE_MODE: "local",
+    };
+
+    for (const text of ["one", "two"]) {
+      const proc = Bun.spawn(
+        [process.execPath, "src/cli/index.ts", "save-text", text, "--post-processing", "off"],
+        { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      );
+      expect(await proc.exited).toBe(0);
+    }
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "list", "-n", "100"],
+      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("recordings: showing 2 of 2");
+    expect(stdout).toContain("limit 50");
+    expect(stdout).toContain("Limit capped at 50");
   });
 
   test("mcp installer configures stdio args for Codex and Gemini", async () => {

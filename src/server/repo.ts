@@ -177,6 +177,30 @@ export async function listRecordings(
   pg: PgAdapterAsync,
   filter?: RecordingFilter,
 ): Promise<Recording[]> {
+  const { where, params } = buildRecordingWhere(filter);
+  const limit = Math.min(Math.max(Number(filter?.limit) || 50, 1), 500);
+  const offset = Math.max(Number(filter?.offset) || 0, 0);
+
+  const sql = `SELECT * FROM recordings ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const rows = (await pg.all(sql, ...params, limit, offset)) as Record<string, unknown>[];
+  return rows.map(parseRecording);
+}
+
+export async function countRecordings(
+  pg: PgAdapterAsync,
+  filter?: RecordingFilter,
+): Promise<number> {
+  const { where, params } = buildRecordingWhere(filter);
+  const row = (await pg.get(`SELECT COUNT(*) as c FROM recordings ${where}`, ...params)) as {
+    c: number | string;
+  };
+  return Number(row.c);
+}
+
+function buildRecordingWhere(filter?: RecordingFilter): {
+  where: string;
+  params: (string | number)[];
+} {
   const conditions: string[] = [];
   const params: (string | number)[] = [];
 
@@ -217,13 +241,7 @@ export async function listRecordings(
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  const limit = Math.min(Math.max(Number(filter?.limit) || 50, 1), 500);
-  const offset = Math.max(Number(filter?.offset) || 0, 0);
-  params.push(limit, offset);
-
-  const sql = `SELECT * FROM recordings ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  const rows = (await pg.all(sql, ...params)) as Record<string, unknown>[];
-  return rows.map(parseRecording);
+  return { where, params };
 }
 
 export async function deleteRecording(

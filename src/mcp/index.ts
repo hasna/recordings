@@ -9,7 +9,7 @@ import {
   normalizePostProcessingConfig,
   normalizePostProcessingMode,
 } from "../lib/config.js";
-import { getStore } from "../store.js";
+import { countStoreRecordings, getStore } from "../store.js";
 import { transcribeAudio } from "../lib/transcriber.js";
 import { processText, needsEnhancement, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
@@ -51,28 +51,47 @@ function text(content: string) {
 
 function errorResult(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e);
-  return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
+  return { content: [{ type: "text" as const, text: `Error: ${truncateText(msg, 500)}` }], isError: true };
 }
 
 function compact(r: Recording): string {
-  const t = (r.processed_text || r.raw_text).slice(0, 80);
-  return `${r.id.slice(0, 8)} | ${r.processing_mode} | ${r.created_at.slice(0, 16)} | ${t}${t.length >= 80 ? "..." : ""}`;
+  const preview = truncateText(r.processed_text || r.raw_text, 100);
+  return `${truncateText(r.id, 8)} | ${truncateText(r.processing_mode, 16)} | ${truncateText(r.created_at, 16)} | ${preview}`;
 }
 
-function full(r: Recording): string {
-  const lines: string[] = [`ID: ${r.id}`, `Mode: ${r.processing_mode}`, `Model: ${r.model_used}`];
-  if (r.enhancement_model) lines.push(`Enhanced by: ${r.enhancement_model}`);
+function detail(r: Recording): string {
+  const lines: string[] = [`ID: ${truncateText(r.id, 80)}`, `Mode: ${truncateText(r.processing_mode, 16)}`, `Model: ${truncateText(r.model_used, 80)}`];
+  if (r.enhancement_model) lines.push(`Enhanced by: ${truncateText(r.enhancement_model, 80)}`);
   if (r.duration_ms) lines.push(`Duration: ${(r.duration_ms / 1000).toFixed(1)}s`);
-  if (r.language) lines.push(`Language: ${r.language}`);
-  if (r.tags.length > 0) lines.push(`Tags: ${r.tags.join(", ")}`);
-  if (r.agent_id) lines.push(`Agent: ${r.agent_id}`);
-  if (r.project_id) lines.push(`Project: ${r.project_id}`);
-  if (r.session_id) lines.push(`Session: ${r.session_id}`);
-  lines.push(`Created: ${r.created_at}`);
-  lines.push(`Text: ${r.raw_text}`);
+  if (r.language) lines.push(`Language: ${truncateText(r.language, 20)}`);
+  if (r.tags.length > 0) lines.push(`Tags: ${r.tags.map((tag) => truncateText(tag, 80)).join(", ")}`);
+  if (r.agent_id) lines.push(`Agent: ${truncateText(r.agent_id, 80)}`);
+  if (r.project_id) lines.push(`Project: ${truncateText(r.project_id, 80)}`);
+  if (r.session_id) lines.push(`Session: ${truncateText(r.session_id, 80)}`);
+  lines.push(`Created: ${truncateText(r.created_at, 40)}`);
+  lines.push(`Text: ${stripTerminalControls(r.raw_text)}`);
   if (r.processed_text && r.processed_text !== r.raw_text) {
-    lines.push(`Enhanced: ${r.processed_text}`);
+    lines.push(`Enhanced: ${stripTerminalControls(r.processed_text)}`);
   }
+  return lines.join("\n");
+}
+
+function verboseRecording(r: Recording): string {
+  const lines: string[] = [
+    `${truncateText(r.id, 8)} | ${truncateText(r.processing_mode, 16)} | ${truncateText(r.created_at, 16)}`,
+    `Preview: ${truncateText(r.processed_text || r.raw_text, 180)}`,
+    `Model: ${r.enhancement_model ? `${truncateText(r.model_used, 80)} -> ${truncateText(r.enhancement_model, 80)}` : truncateText(r.model_used, 80)}`,
+  ];
+  if (r.duration_ms) lines.push(`Duration: ${(r.duration_ms / 1000).toFixed(1)}s`);
+  if (r.language) lines.push(`Language: ${truncateText(r.language, 20)}`);
+  if (r.tags.length > 0) lines.push(`Tags: ${summarizeTags(r.tags)}`);
+  const scopes = [
+    r.agent_id ? `agent=${truncateText(r.agent_id, 80)}` : null,
+    r.project_id ? `project=${truncateText(r.project_id, 80)}` : null,
+    r.session_id ? `session=${truncateText(r.session_id, 80)}` : null,
+  ].filter(Boolean);
+  if (scopes.length > 0) lines.push(`Scope: ${scopes.join(" ")}`);
+  lines.push(`Details: get_recording { "id": "${truncateText(r.id, 8)}" }`);
   return lines.join("\n");
 }
 
@@ -184,6 +203,114 @@ function recordingJson(r: Recording): string {
   }, null, 2);
 }
 
+function truncateText(value: string, max: number): string {
+  const normalized = sanitizeInline(value);
+  const prefix: string[] = [];
+  for (const point of normalized) {
+    if (prefix.length === max) {
+      return `${prefix.slice(0, Math.max(0, max - 3)).join("")}...`;
+    }
+    prefix.push(point);
+  }
+  return normalized;
+}
+
+function stripTerminalControls(value: string): string {
+  return value
+    .replace(/(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c)/g, "")
+    .replace(/(?:\u001b[PX^_]|\u0090|\u0098|\u009e|\u009f)[\s\S]*?(?:\u001b\\|\u009c)/g, "")
+    .replace(/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b[@-_]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+}
+
+function sanitizeInline(value: string): string {
+  return stripTerminalControls(value).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function summarizeTags(tags: string[]): string {
+  const shown = tags.slice(0, 3).map((tag) => truncateText(tag, 20));
+  if (tags.length > shown.length) shown.push(`+${tags.length - shown.length}`);
+  return shown.join(", ");
+}
+
+function resolveMcpPagination(args: {
+  limit?: number;
+  offset?: number;
+  cursor?: number;
+  full?: boolean;
+}, defaultLimit = 10): { limit: number; offset: number; capped: boolean } {
+  const requested = Number.isFinite(args.limit) && args.limit && args.limit > 0
+    ? Math.floor(args.limit)
+    : defaultLimit;
+  const max = args.full ? 10 : 50;
+  const rawOffset = args.cursor ?? args.offset ?? 0;
+  return {
+    limit: Math.min(requested, max),
+    offset: Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0,
+    capped: requested > max,
+  };
+}
+
+function withoutPagination(filter: RecordingFilter): RecordingFilter {
+  const { limit: _limit, offset: _offset, ...rest } = filter;
+  return rest;
+}
+
+function formatMcpCollection(
+  label: string,
+  recordings: Recording[],
+  options: {
+    total: number;
+    offset: number;
+    limit: number;
+    full?: boolean;
+    capped?: boolean;
+  }
+): string {
+  if (recordings.length === 0) {
+    return options.total === 0
+      ? `No ${label} found.`
+      : `No ${label} at cursor ${options.offset}.`;
+  }
+  const format = options.full ? verboseRecording : compact;
+  const separator = options.full ? "\n---\n" : "\n";
+  const end = options.offset + recordings.length;
+  const total = Math.max(options.total, end);
+  const lines = [
+    `${label}: showing ${recordings.length} of ${total} (${options.offset + 1}-${end}, limit ${options.limit})`,
+    recordings.map(format).join(separator),
+  ];
+  const hints: string[] = [];
+  if (options.capped) hints.push(`limit capped at ${options.limit} for MCP output`);
+  if (end < total) hints.push(`next cursor: ${end}`);
+  hints.push("use get_recording { id } for full details; set full=true for richer rows");
+  lines.push(`Hints: ${hints.join("; ")}.`);
+  return lines.join(separator);
+}
+
+function formatMcpPage<T>(
+  label: string,
+  items: T[],
+  args: { limit?: number; offset?: number; cursor?: number },
+  format: (item: T) => string
+): string {
+  const pagination = resolveMcpPagination(args, 20);
+  const page = items.slice(pagination.offset, pagination.offset + pagination.limit);
+  if (page.length === 0) {
+    return items.length === 0 ? `No ${label}.` : `No ${label} at cursor ${pagination.offset}.`;
+  }
+  const end = pagination.offset + page.length;
+  const hints: string[] = [];
+  if (pagination.capped) hints.push(`limit capped at ${pagination.limit} for MCP output`);
+  if (end < items.length) hints.push(`next cursor: ${end}`);
+  return [
+    `${label}: showing ${page.length} of ${items.length} (${pagination.offset + 1}-${end}, limit ${pagination.limit})`,
+    page.map(format).join("\n"),
+    hints.length > 0 ? `Hints: ${hints.join("; ")}.` : "",
+  ].filter(Boolean).join("\n");
+}
+
 async function saveRecordingMemento(args: {
   key: string;
   value: string;
@@ -225,18 +352,18 @@ const toolDocs: Record<string, string> = {
   transcribe_audio: "Transcribe audio file and save raw plus optional processed text.\nParams: audio_path (string, required): path to wav/mp3/m4a/webm | language (string): ISO code e.g. en/es/fr | transcription_prompt or prompt (string): STT vocabulary/context only | transcriber_prompt or system_prompt (string): post-transcription cleanup instructions | post_processing_mode ('off'|'auto'|'always') | transcriber_model (string) | no_enhance (bool): alias for post_processing_mode=off | tags (string[]) | agent_id (string) | project_id (string) | session_id (string)\nReturns: JSON recording summary with raw_text, processed_text, processing_mode, and safe metadata.",
   save_recording: "Save text as recording. Auto-enhances if needed.\nParams: text (string, required): text to save | enhance (bool): true forces always, false disables | transcriber_prompt or system_prompt (string): post-processing instructions | post_processing_mode ('off'|'auto'|'always') | tags (string[]) | agent_id (string) | project_id (string) | session_id (string) | metadata (object)",
   get_recording: "Get recording by ID or prefix.\nParams: id (string, required): recording ID or prefix",
-  list_recordings: "List recordings, compact by default, most recent first.\nParams: limit (number, default 10) | offset (number) | processing_mode ('raw'|'enhanced') | tags (string[]) | search (string): text search | since/until (ISO date) | agent_id | project_id | session_id | full (bool): verbose output",
-  search_recordings: "Search recordings by text content.\nParams: query (string, required) | limit (number, default 10) | agent_id | project_id | full (bool): verbose output",
+  list_recordings: "List recordings, compact and capped by default, most recent first.\nParams: limit (number, default 10, max 50 compact / 10 verbose) | offset or cursor (number) | processing_mode ('raw'|'enhanced') | tags (string[]) | search (string): text search | since/until (ISO date) | agent_id | project_id | session_id | full (bool): richer metadata rows with bounded previews. Use get_recording for full text/details.",
+  search_recordings: "Search recordings by text content, compact and capped by default.\nParams: query (string, required) | limit (number, default 10, max 50 compact / 10 verbose) | offset or cursor (number) | agent_id | project_id | full (bool): richer metadata rows with bounded previews. Use get_recording for full text/details.",
   delete_recording: "Delete recording by ID.\nParams: id (string, required)",
-  recording_stats: "Recording count, mode breakdown, duration.\nParams: none",
+  recording_stats: "Recording count, mode breakdown, duration, and capped model breakdown.\nParams: limit_models (number, default 10, max 10 compact / 50 verbose) | verbose (bool): allow up to 50 model counts",
   detect_enhancement: "Check if text needs AI enhancement.\nParams: text (string, required)",
   register_agent: "Register agent (idempotent). Auto-updates last_seen_at on re-register.\nParams: name (string, required) | description (string) | role (string)",
-  list_agents: "List registered agents.\nParams: none",
+  list_agents: "List registered agents, capped by default.\nParams: limit (number, default 20, max 50) | offset or cursor (number)",
   get_agent: "Get agent by ID or name.\nParams: id (string, required)",
   heartbeat: "Update last_seen_at to signal agent is active.\nParams: agent_id (string, required): agent ID or name",
   set_focus: "Set active project context for this agent session.\nParams: agent_id (string, required) | project_id (string, nullable): project ID or null to clear",
   register_project: "Register project (idempotent).\nParams: name (string, required) | path (string, required): absolute path | description (string)",
-  list_projects: "List registered projects.\nParams: none",
+  list_projects: "List registered projects, capped by default.\nParams: limit (number, default 20, max 50) | offset or cursor (number)",
 };
 
 // ── Meta Tool ───────────────────────────────────────────────────────────────
@@ -247,7 +374,7 @@ registerTool(
   { name: z.string() },
   async (args) => {
     const doc = toolDocs[args.name];
-    return doc ? text(doc) : text(`Unknown tool: ${args.name}. Available: ${Object.keys(toolDocs).join(", ")}`);
+    return doc ? text(doc) : text(`Unknown tool: ${truncateText(args.name, 80)}. Available: ${Object.keys(toolDocs).join(", ")}`);
   }
 );
 
@@ -449,8 +576,8 @@ registerTool(
   async (args) => {
     try {
       const r = await getStore().getRecording(args.id);
-      if (!r) return text(`Not found: ${args.id}`);
-      return text(full(r));
+      if (!r) return text(`Not found: ${truncateText(args.id, 80)}`);
+      return text(detail(r));
     } catch (e) {
       return errorResult(e);
     }
@@ -463,6 +590,7 @@ registerTool(
   {
     limit: z.number().optional(),
     offset: z.number().optional(),
+    cursor: z.number().optional(),
     processing_mode: z.enum(["raw", "enhanced"]).optional(),
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
@@ -475,9 +603,10 @@ registerTool(
   },
   async (args) => {
     try {
+      const pagination = resolveMcpPagination(args);
       const filter: RecordingFilter = {
-        limit: args.limit || 10,
-        offset: args.offset,
+        limit: pagination.limit,
+        offset: pagination.offset,
         processing_mode: args.processing_mode,
         tags: args.tags,
         search: args.search,
@@ -488,12 +617,18 @@ registerTool(
         session_id: args.session_id,
       };
 
-      const recordings = await getStore().listRecordings(filter);
-      if (recordings.length === 0) return text("No recordings found.");
-
-      const fmt = args.full ? full : compact;
-      const sep = args.full ? "\n---\n" : "\n";
-      return text(`${recordings.length} recording(s):${sep}${recordings.map(fmt).join(sep)}`);
+      const store = getStore();
+      const [recordings, total] = await Promise.all([
+        store.listRecordings(filter),
+        countStoreRecordings(store, withoutPagination(filter)),
+      ]);
+      return text(formatMcpCollection("recordings", recordings, {
+        total,
+        offset: pagination.offset,
+        limit: pagination.limit,
+        full: args.full,
+        capped: pagination.capped,
+      }));
     } catch (e) {
       return errorResult(e);
     }
@@ -506,23 +641,36 @@ registerTool(
   {
     query: z.string(),
     limit: z.number().optional(),
+    offset: z.number().optional(),
+    cursor: z.number().optional(),
     agent_id: z.string().optional(),
     project_id: z.string().optional(),
+    session_id: z.string().optional(),
     full: z.boolean().optional(),
   },
   async (args) => {
     try {
-      const results = await getStore().searchRecordings(args.query, {
-        limit: args.limit || 10,
+      const pagination = resolveMcpPagination(args);
+      const filter: RecordingFilter = {
+        limit: pagination.limit,
+        offset: pagination.offset,
         agent_id: args.agent_id,
         project_id: args.project_id,
-      });
+        session_id: args.session_id,
+      };
+      const store = getStore();
+      const [results, total] = await Promise.all([
+        store.searchRecordings(args.query, filter),
+        countStoreRecordings(store, withoutPagination({ ...filter, search: args.query })),
+      ]);
 
-      if (results.length === 0) return text("No results.");
-
-      const fmt = args.full ? full : compact;
-      const sep = args.full ? "\n---\n" : "\n";
-      return text(`${results.length} result(s):${sep}${results.map(fmt).join(sep)}`);
+      return text(formatMcpCollection("results", results, {
+        total,
+        offset: pagination.offset,
+        limit: pagination.limit,
+        full: args.full,
+        capped: pagination.capped,
+      }));
     } catch (e) {
       return errorResult(e);
     }
@@ -535,7 +683,7 @@ registerTool(
   { id: z.string() },
   async (args) => {
     try {
-      return text((await getStore().deleteRecording(args.id)) ? `Deleted ${args.id}` : `Not found: ${args.id}`);
+      return text((await getStore().deleteRecording(args.id)) ? `Deleted ${truncateText(args.id, 80)}` : `Not found: ${truncateText(args.id, 80)}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -544,14 +692,26 @@ registerTool(
 
 registerTool(
   "recording_stats",
-  "Recording stats: count, modes, duration.",
-  {},
-  async () => {
+  "Recording stats: count, modes, duration, and capped model breakdown.",
+  {
+    limit_models: z.number().optional(),
+    verbose: z.boolean().optional(),
+  },
+  async (args) => {
     try {
       const s = await getStore().getRecordingStats();
       let out = `Total: ${s.total} | Raw: ${s.raw} | Enhanced: ${s.enhanced} | Duration: ${(s.total_duration_ms / 1000).toFixed(1)}s`;
-      if (Object.keys(s.by_model).length > 0) {
-        out += "\n" + Object.entries(s.by_model).map(([m, c]) => `${m}: ${c}`).join(", ");
+      const models = Object.entries(s.by_model).sort((a, b) => b[1] - a[1]);
+      if (models.length > 0) {
+        const maxModels = args.verbose ? 50 : 10;
+        const requested = Number.isFinite(args.limit_models) && args.limit_models && args.limit_models > 0
+          ? Math.floor(args.limit_models)
+          : maxModels;
+        const limit = Math.min(requested, maxModels);
+        out += "\nModels: " + models.slice(0, limit).map(([m, c]) => `${truncateText(m, 80)}: ${c}`).join(", ");
+        if (limit < models.length) {
+          out += `\nHints: ${models.length - limit} more model(s); call recording_stats with verbose=true and limit_models up to 50.`;
+        }
       }
       return text(out);
     } catch (e) {
@@ -583,7 +743,7 @@ registerTool(
   async (args) => {
     try {
       const a = await getStore().registerAgent(args.name, args.description, args.role);
-      return text(`${a.id} | ${a.name} | ${a.role}`);
+      return text(`${truncateText(a.id, 80)} | ${truncateText(a.name, 80)} | ${truncateText(a.role, 40)}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -592,13 +752,21 @@ registerTool(
 
 registerTool(
   "list_agents",
-  "List registered agents.",
-  {},
-  async () => {
+  "List registered agents, capped by default.",
+  {
+    limit: z.number().optional(),
+    offset: z.number().optional(),
+    cursor: z.number().optional(),
+  },
+  async (args) => {
     try {
       const agents = await getStore().listAgents();
-      if (agents.length === 0) return text("None.");
-      return text(agents.map((a) => `${a.id} | ${a.name} | ${a.role}`).join("\n"));
+      return text(formatMcpPage(
+        "agents",
+        agents,
+        args,
+        (agent) => `${truncateText(agent.id, 80)} | ${truncateText(agent.name, 80)} | ${truncateText(agent.role, 40)} | last_seen: ${truncateText(agent.last_seen_at, 40)}`
+      ));
     } catch (e) {
       return errorResult(e);
     }
@@ -612,8 +780,8 @@ registerTool(
   async (args) => {
     try {
       const a = await getStore().getAgent(args.id);
-      if (!a) return text(`Not found: ${args.id}`);
-      return text(`${a.id} | ${a.name} | ${a.role} | ${a.last_seen_at}`);
+      if (!a) return text(`Not found: ${truncateText(args.id, 80)}`);
+      return text(`${truncateText(a.id, 80)} | ${truncateText(a.name, 80)} | ${truncateText(a.role, 40)} | ${truncateText(a.last_seen_at, 40)}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -629,7 +797,7 @@ registerTool(
   async (args) => {
     try {
       const p = await getStore().registerProject(args.name, args.path, args.description);
-      return text(`${p.id.slice(0, 8)} | ${p.name} | ${p.path}`);
+      return text(`${truncateText(p.id, 8)} | ${truncateText(p.name, 80)} | ${truncateText(p.path, 120)}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -638,13 +806,21 @@ registerTool(
 
 registerTool(
   "list_projects",
-  "List registered projects.",
-  {},
-  async () => {
+  "List registered projects, capped by default.",
+  {
+    limit: z.number().optional(),
+    offset: z.number().optional(),
+    cursor: z.number().optional(),
+  },
+  async (args) => {
     try {
       const projects = await getStore().listProjects();
-      if (projects.length === 0) return text("None.");
-      return text(projects.map((p) => `${p.id.slice(0, 8)} | ${p.name} | ${p.path}`).join("\n"));
+      return text(formatMcpPage(
+        "projects",
+        projects,
+        args,
+        (project) => `${truncateText(project.id, 8)} | ${truncateText(project.name, 80)} | ${truncateText(project.path, 120)}`
+      ));
     } catch (e) {
       return errorResult(e);
     }
@@ -660,8 +836,8 @@ registerTool(
   async (args) => {
     try {
       const agent = await getStore().heartbeatAgent(args.agent_id);
-      if (!agent) return text(`Agent not found: ${args.agent_id}`);
-      return text(`${agent.id} | ${agent.name} | last_seen: ${agent.last_seen_at}`);
+      if (!agent) return text(`Agent not found: ${truncateText(args.agent_id, 80)}`);
+      return text(`${truncateText(agent.id, 80)} | ${truncateText(agent.name, 80)} | last_seen: ${truncateText(agent.last_seen_at, 40)}`);
     } catch (e) {
       return errorResult(e);
     }
@@ -675,8 +851,8 @@ registerTool(
   async (args) => {
     try {
       const agent = await getStore().setAgentFocus(args.agent_id, args.project_id ?? null);
-      if (!agent) return text(`Agent not found: ${args.agent_id}`);
-      return text(args.project_id ? `Focus set: ${args.project_id}` : "Focus cleared");
+      if (!agent) return text(`Agent not found: ${truncateText(args.agent_id, 80)}`);
+      return text(args.project_id ? `Focus set: ${truncateText(args.project_id, 80)}` : "Focus cleared");
     } catch (e) {
       return errorResult(e);
     }

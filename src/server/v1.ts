@@ -81,12 +81,20 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
             ...(url.searchParams.get("processing_mode")
               ? { processing_mode: url.searchParams.get("processing_mode") as CreateRecordingInput["processing_mode"] }
               : {}),
+            ...(url.searchParams.getAll("tags").length > 0
+              ? { tags: url.searchParams.getAll("tags") }
+              : {}),
             ...(url.searchParams.get("search") ? { search: url.searchParams.get("search")! } : {}),
+            ...(url.searchParams.get("since") ? { since: url.searchParams.get("since")! } : {}),
+            ...(url.searchParams.get("until") ? { until: url.searchParams.get("until")! } : {}),
             ...(url.searchParams.get("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
             ...(url.searchParams.get("offset") ? { offset: Number(url.searchParams.get("offset")) } : {}),
           };
-          const recordings = await repo.listRecordings(pg, filter);
-          return json({ recordings, count: recordings.length });
+          const [recordings, count] = await Promise.all([
+            repo.listRecordings(pg, filter),
+            repo.countRecordings(pg, filter),
+          ]);
+          return json({ recordings, count });
         }
         if (method === "POST") {
           const body = await readJson<CreateRecordingInput>(req);

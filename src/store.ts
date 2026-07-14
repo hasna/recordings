@@ -27,6 +27,7 @@ import * as agentsDb from "./db/agents.js";
 import * as projectsDb from "./db/projects.js";
 import { saveFeedback as saveFeedbackLocal, type FeedbackInput } from "./db/feedback.js";
 import { resolveStorageClient, type StorageClient } from "./http/client.js";
+import { createHash } from "node:crypto";
 
 export const APP = "recordings";
 
@@ -48,6 +49,7 @@ export interface Store {
   createRecording(input: CreateRecordingInput): Promise<Recording>;
   getRecording(id: string): Promise<Recording | null>;
   listRecordings(filter?: RecordingFilter): Promise<Recording[]>;
+  countRecordings?(filter?: RecordingFilter): Promise<number>;
   searchRecordings(query: string, filter?: RecordingFilter): Promise<Recording[]>;
   deleteRecording(id: string): Promise<boolean>;
   getRecordingStats(): Promise<RecordingStats>;
@@ -68,13 +70,16 @@ export interface Store {
   saveFeedback(input: FeedbackInput): Promise<void>;
 }
 
-function listQuery(filter?: RecordingFilter): Record<string, string | number | undefined> {
+function listQuery(
+  filter?: RecordingFilter,
+): Record<string, string | number | string[] | undefined> {
   if (!filter) return {};
   return {
     agent_id: filter.agent_id,
     project_id: filter.project_id,
     session_id: filter.session_id,
     processing_mode: filter.processing_mode,
+    tags: filter.tags,
     search: filter.search,
     since: filter.since,
     until: filter.until,
@@ -103,6 +108,9 @@ const localStore: Store = {
   },
   async listRecordings(filter) {
     return recordingsDb.listRecordings(filter);
+  },
+  async countRecordings(filter) {
+    return recordingsDb.countRecordings(filter);
   },
   async searchRecordings(query, filter) {
     return recordingsDb.searchRecordings(query, filter);
@@ -159,6 +167,41 @@ function apiStore(client: StorageClient): Store {
     async listRecordings(filter) {
       const { items } = await client.list<Recording>("recordings", listQuery(filter));
       return items;
+    },
+    async countRecordings(filter) {
+      const pageLimit = 500;
+      const maxPageRequests = 10_000;
+      let offset = 0;
+      let pageRequests = 0;
+      const seenPageKeys = new Set<string>();
+
+      while (pageRequests < maxPageRequests) {
+        pageRequests += 1;
+        const { items, raw } = await client.list<Recording>("recordings", {
+          ...listQuery(filter),
+          limit: pageLimit,
+          offset,
+        });
+        const count = raw && typeof raw === "object"
+          ? (raw as { count?: unknown }).count
+          : undefined;
+        if (typeof count !== "number" || !Number.isFinite(count)) {
+          throw new Error("Recordings API response is missing a valid count");
+        }
+
+        // Current servers return the filtered total. Legacy servers returned
+        // the current page length, so a full page must be followed until EOF.
+        if (count > items.length) return count;
+        if (items.length === 0) return offset;
+        offset += items.length;
+
+        const pageKey = recordingPageFingerprint(items);
+        if (seenPageKeys.has(pageKey)) {
+          throw new Error("Recordings API ignored pagination while counting legacy results");
+        }
+        seenPageKeys.add(pageKey);
+      }
+      throw new Error(`Recordings API exceeded ${maxPageRequests} pages while counting legacy results`);
     },
     async searchRecordings(query, filter) {
       const { items } = await client.list<Recording>("recordings", listQuery({ ...(filter ?? {}), search: query }));
@@ -242,6 +285,49 @@ function apiStore(client: StorageClient): Store {
       await client.create<unknown>("feedback", input);
     },
   };
+}
+
+function recordingPageFingerprint(items: Recording[]): string {
+  const hash = createHash("sha256");
+  const ids = items.map((item) => String(item.id ?? "")).sort();
+  for (const id of ids) {
+    hash.update(String(id.length));
+    hash.update(":");
+    hash.update(id);
+    hash.update(";");
+  }
+  return `${items.length}:${hash.digest("hex")}`;
+}
+
+export async function countStoreRecordings(
+  store: Store,
+  filter?: RecordingFilter,
+): Promise<number> {
+  if (store.countRecordings) return store.countRecordings(filter);
+
+  const pageLimit = 500;
+  const maxPageRequests = 10_000;
+  const { limit: _limit, offset: _offset, ...unpaginated } = filter ?? {};
+  const seenPageKeys = new Set<string>();
+  let offset = 0;
+
+  for (let pageRequests = 0; pageRequests < maxPageRequests; pageRequests += 1) {
+    const items = await store.listRecordings({
+      ...unpaginated,
+      limit: pageLimit,
+      offset,
+    });
+    if (items.length === 0) return offset;
+
+    const pageKey = recordingPageFingerprint(items);
+    if (seenPageKeys.has(pageKey)) {
+      throw new Error("Legacy Store ignored pagination while counting recordings");
+    }
+    seenPageKeys.add(pageKey);
+    offset += items.length;
+  }
+
+  throw new Error(`Legacy Store exceeded ${maxPageRequests} pages while counting recordings`);
 }
 
 let cached: Store | null = null;

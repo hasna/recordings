@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, readFileSync, mkdirSync, readdirSync, statSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { copyFileSync, existsSync, readFileSync, mkdirSync, readdirSync, realpathSync, statSync } from "fs";
+import { dirname, join, resolve, sep } from "path";
 import { homedir } from "os";
 import type { PostProcessingMode, RecordingsConfig } from "../types/index.js";
 
@@ -312,20 +312,49 @@ export function getDataDir(): string {
 }
 
 function findProjectRecordingsPath(entry?: string): string | null {
-  const home = resolve(getHomeDir());
-  let dir = resolve(process.cwd());
+  const cwd = canonicalExistingPath(process.cwd());
+  const home = canonicalExistingPath(getHomeDir());
+  const repositoryRoot = findRepositoryRoot(cwd);
+  const cwdIsInsideHome = cwd === home || cwd.startsWith(`${home}${sep}`);
+  const repositoryIsInsideHome = repositoryRoot !== null &&
+    repositoryRoot !== home &&
+    repositoryRoot.startsWith(`${home}${sep}`);
+  const boundary = cwdIsInsideHome
+    ? (repositoryIsInsideHome ? repositoryRoot! : home)
+    : (repositoryRoot ?? cwd);
+  const excludeBoundary = boundary === home;
+  let dir = cwd;
+
   while (true) {
-    if (dir !== home) {
-      const candidate = entry
-        ? join(dir, ".recordings", entry)
-        : join(dir, ".recordings");
-      if (existsSync(candidate)) return candidate;
-    }
+    if (excludeBoundary && dir === boundary) break;
+    const candidate = entry
+      ? join(dir, ".recordings", entry)
+      : join(dir, ".recordings");
+    if (existsSync(candidate)) return candidate;
+    if (dir === boundary) break;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   return null;
+}
+
+function findRepositoryRoot(start: string): string | null {
+  let dir = start;
+  while (true) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function canonicalExistingPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function mergeDirectoryContents(sourceDir: string, targetDir: string): void {

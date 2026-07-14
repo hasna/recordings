@@ -11,6 +11,7 @@ import {
   createRecording,
   getRecording,
   listRecordings,
+  countRecordings,
   deleteRecording,
   searchRecordings,
   getRecordingStats,
@@ -318,6 +319,18 @@ describe("searchRecordings", () => {
     const results = searchRecordings("meeting", { session_id: "s1" }, db);
     expect(results).toHaveLength(1);
     expect(results[0]!.raw_text).toBe("meeting notes alpha");
+  });
+});
+
+describe("countRecordings", () => {
+  test("counts filtered recordings without applying pagination", () => {
+    createRecording({ raw_text: "alpha one", tags: ["work"], session_id: "s1" }, db);
+    createRecording({ raw_text: "alpha two", tags: ["work"], session_id: "s2" }, db);
+    createRecording({ raw_text: "beta", tags: ["home"], session_id: "s1" }, db);
+
+    expect(countRecordings(undefined, db)).toBe(3);
+    expect(countRecordings({ search: "alpha", limit: 1, offset: 1 }, db)).toBe(2);
+    expect(countRecordings({ tags: ["work"], session_id: "s1" }, db)).toBe(1);
   });
 });
 

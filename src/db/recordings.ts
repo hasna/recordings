@@ -103,6 +103,31 @@ export function listRecordings(
   db?: Database
 ): Recording[] {
   const d = db || getDatabase();
+  const { where, params } = buildRecordingWhere(filter);
+  const limit = filter?.limit || 50;
+  const offset = filter?.offset || 0;
+
+  const sql = `SELECT * FROM recordings ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const rows = d.query(sql).all(...params, limit, offset) as Record<string, unknown>[];
+  return rows.map(parseRow);
+}
+
+export function countRecordings(
+  filter?: RecordingFilter,
+  db?: Database
+): number {
+  const d = db || getDatabase();
+  const { where, params } = buildRecordingWhere(filter);
+  const row = d.query(`SELECT COUNT(*) as c FROM recordings ${where}`).get(...params) as {
+    c: number;
+  };
+  return row.c;
+}
+
+function buildRecordingWhere(filter?: RecordingFilter): {
+  where: string;
+  params: (string | number)[];
+} {
   const conditions: string[] = [];
   const params: (string | number)[] = [];
 
@@ -148,14 +173,7 @@ export function listRecordings(
 
   const where =
     conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  const limit = filter?.limit || 50;
-  const offset = filter?.offset || 0;
-
-  const sql = `SELECT * FROM recordings ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  params.push(limit, offset);
-
-  const rows = d.query(sql).all(...params) as Record<string, unknown>[];
-  return rows.map(parseRow);
+  return { where, params };
 }
 
 export function deleteRecording(

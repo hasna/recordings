@@ -71,11 +71,30 @@ recordings --help
 - `recordings transcribe <file> --transcriber-prompt "Clean up punctuation only" --post-processing always`
 - `recordings save-text --text-file transcript.txt --source realtime_fast_path`
 - `recordings rewrite <text> --instruction "<instruction>"`
-- `recordings list`
-- `recordings show <id>`
-- `recordings search <query>`
+- `recordings list --limit 20 --cursor 0`
+- `recordings list --verbose`
+- `recordings show <id>` / `recordings inspect <id>`
+- `recordings search <query> --limit 20 --cursor 0`
 - `recordings delete <id>`
 - `recordings stats`
+
+### Compact Output
+
+Agent-facing list commands are compact by default. Terminal output shows bounded
+rows, short text previews, totals, pagination cursors, and the next detail command
+instead of dumping full recording objects.
+
+```bash
+recordings list                 # compact rows, default limit 20
+recordings list --cursor 20     # next page
+recordings list --verbose       # more metadata, still no full transcript dump
+recordings show <id>            # full recording detail
+recordings inspect <id>         # alias for show
+recordings --json list -n 100   # machine-readable records for integrations
+```
+
+Terminal list output is capped at 50 rows. JSON list output preserves complete
+recording objects and accepts up to 500 rows per page.
 
 ### Transcription Prompts
 
@@ -197,6 +216,11 @@ const { recordings } = await client.listRecordings({ limit: 20 });
 Useful agent tools include `recordings_status` for safe service/config diagnostics,
 `transcribe_audio`, `save_recording`, `list_recordings`, `search_recordings`,
 `register_agent`, `heartbeat`, and `set_focus`.
+
+MCP `list_recordings` and `search_recordings` are compact by default. Compact output
+is capped at 50 rows, `full=true` metadata rows are capped at 10, previews remain
+bounded, and results include next-cursor hints. Use `get_recording { id }` for full
+transcript details.
 
 For MCP, `transcribe_audio` accepts `transcription_prompt` (or legacy `prompt`) for STT
 context, `transcriber_prompt` for cleanup instructions, and `post_processing_mode` with
