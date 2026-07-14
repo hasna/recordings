@@ -86,4 +86,43 @@ struct TranscriptResolutionTests {
             cleanedText: "working"
         ))
     }
+
+    @Test("Realtime fast path rejects cleanup that removes spoken repetition")
+    func repeatedSpeechFallsBackToWholeAudio() {
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "very very good",
+            pcmByteCount: 24_000,
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "muy muy bien",
+            pcmByteCount: 24_000,
+            language: "es"
+        ) == nil)
+    }
+
+    @Test("Realtime fast path rejects cleanup that removes spoken filler words")
+    func fillerSpeechFallsBackToWholeAudio() {
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "um I agree",
+            pcmByteCount: 24_000,
+            language: "en"
+        ) == nil)
+    }
+
+    @Test("Lexically altered realtime text is never used after whole-audio failure")
+    func alteredRealtimeTextIsNotAFailureFallback() {
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "very very good",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "um I agree",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "Actually 리수 Zoom your goal",
+            language: "en"
+        ) == "Actually Zoom your goal")
+    }
 }

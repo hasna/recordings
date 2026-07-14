@@ -48,7 +48,7 @@ final class RecordingsStore: ObservableObject {
         self.projectStore = projectStore
         self.voiceShortcuts = voiceShortcuts
         self.home = FileManager.default.homeDirectoryForCurrentUser.path
-        self.localMachineID = (Host.current().localizedName ?? ProcessInfo.processInfo.hostName)
+        self.localMachineID = NativeMachineIdentity.current()
         engine.projectStore = projectStore
         engine.voiceShortcuts = voiceShortcuts
 

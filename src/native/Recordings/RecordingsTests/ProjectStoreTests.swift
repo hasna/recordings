@@ -77,6 +77,36 @@ struct ProjectStoreTests {
         #expect(persisted.projects.first?.color == "#12AB34")
     }
 
+    @Test("duplicate legacy project ids reconcile without crashing or duplicating canonical rows")
+    @MainActor
+    func duplicateProjectIDsAreDeduplicated() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        let script = """
+        #!/bin/sh
+        printf '%s' '{"id":"canonical-id","name":"Legacy","path":"recordings-app://projects/duplicate-id"}'
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let store = ProjectStore(filePath: root.appendingPathComponent("projects.json").path)
+        store.settings.projects = [
+            RecProject(id: "duplicate-id", name: "First"),
+            RecProject(id: "duplicate-id", name: "Second"),
+        ]
+        store.settings.activeProjectId = "duplicate-id"
+        try store.save()
+
+        try await store.reconcileWithCanonicalStore(home: root.path)
+
+        #expect(store.settings.projects.count == 1)
+        #expect(store.settings.projects.first?.id == "canonical-id")
+        #expect(store.settings.activeProjectId == "canonical-id")
+    }
+
     @Test("adding a project preserves color in canonical local metadata")
     @MainActor
     func addProjectPreservesColor() async throws {

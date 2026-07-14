@@ -14,6 +14,7 @@ import { transcribeAudio } from "../lib/transcriber.js";
 import { processText, needsEnhancement, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
+import { currentMachineId } from "../lib/machine.js";
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 // Config is loaded eagerly for the transcription/enhancement tools. Storage is
@@ -339,6 +340,7 @@ registerTool(
         agent_id: args.agent_id,
         project_id: args.project_id,
         session_id: args.session_id,
+        machine_id: currentMachineId(),
         metadata,
       });
 
@@ -426,6 +428,7 @@ registerTool(
         goal: args.goal,
         role: args.role,
         task_list_id: args.task_list_id,
+        machine_id: currentMachineId(),
         metadata: {
           ...(args.metadata ?? {}),
           ...processingMetadata,

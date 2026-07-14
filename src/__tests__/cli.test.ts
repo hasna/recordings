@@ -486,6 +486,7 @@ describe("recordings CLI", () => {
           OPENAI_API_KEY: "",
           RECORDINGS_API_KEY: "",
           RECORDINGS_ENHANCEMENT_KEY: "",
+          HASNA_MACHINE_ID: "station-test",
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -507,6 +508,7 @@ describe("recordings CLI", () => {
       model_used: string;
       duration_ms: number;
       language: string;
+      machine_id: string;
       metadata: {
         transcription_source: string;
         realtime: { fast_path: boolean; model: string; bounded_fallback: boolean };
@@ -519,6 +521,7 @@ describe("recordings CLI", () => {
     expect(recording.model_used).toBe("gpt-realtime-whisper");
     expect(recording.duration_ms).toBe(1200);
     expect(recording.language).toBe("en");
+    expect(recording.machine_id).toBe("station-test");
     expect(recording.metadata.transcription_source).toBe("realtime_fast_path");
     expect(recording.metadata.realtime).toEqual({
       fast_path: true,

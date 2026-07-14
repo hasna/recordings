@@ -622,6 +622,10 @@ public final class RecordingEngine: ObservableObject {
             }
 
             let realtimeText = Self.normalizedRealtimeTranscript(streamingResult.text)
+            let safeRealtimeFallbackText = Self.safeRealtimeFallbackTranscript(
+                realtimeText: streamingResult.text,
+                language: self.transcriptionLanguage
+            )
             let realtimeFastPathText = streamingResult.settled && streamingResult.error == nil ? Self.realtimeFastPathTranscript(
                 realtimeText: streamingResult.text,
                 pcmByteCount: self.recordedPCM.count,
@@ -655,7 +659,7 @@ public final class RecordingEngine: ObservableObject {
                             targetAppPid: targetAppPid,
                             activeProjectId: activeProjectId,
                             activeProjectName: activeProjectName,
-                            realtimeText: realtimeText
+                            realtimeText: safeRealtimeFallbackText
                         )
                     } else {
                         self.finish(saveResult.error ?? "Failed to save transcription")
@@ -685,10 +689,14 @@ public final class RecordingEngine: ObservableObject {
                     targetAppPid: targetAppPid,
                     activeProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
-                    realtimeText: realtimeText
+                    realtimeText: safeRealtimeFallbackText
                 )
             } else {
-                let resolved = Self.resolveFinalTranscript(cliText: nil, cliError: "No audio captured", realtimeText: realtimeText)
+                let resolved = Self.resolveFinalTranscript(
+                    cliText: nil,
+                    cliError: "No audio captured",
+                    realtimeText: safeRealtimeFallbackText
+                )
                 if let text = resolved.text {
                     self.log("no audio file written; using realtime transcript chars=\(text.count)")
                     self.isTranscribing = false
@@ -741,17 +749,26 @@ public final class RecordingEngine: ObservableObject {
         pcmByteCount: Int,
         language: String = "en"
     ) -> String? {
-        guard let text = normalizedRealtimeTranscript(realtimeText) else { return nil }
-        guard isSafeRealtimeFastPathText(rawText: realtimeText ?? "", cleanedText: text, language: language) else {
-            return nil
-        }
+        guard let text = safeRealtimeFallbackTranscript(realtimeText: realtimeText, language: language) else { return nil }
         return shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount) ? nil : text
+    }
+
+    public nonisolated static func safeRealtimeFallbackTranscript(
+        realtimeText: String?,
+        language: String = "en"
+    ) -> String? {
+        guard let text = normalizedRealtimeTranscript(realtimeText) else { return nil }
+        guard isSafeRealtimeFastPathText(
+            rawText: realtimeText ?? "",
+            cleanedText: text,
+            language: language
+        ) else { return nil }
+        return text
     }
 
     public nonisolated static func isSafeRealtimeFastPathText(rawText: String, cleanedText: String, language: String) -> Bool {
         guard !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let languageHint = OpenAIAPIKeyStore.apiLanguageHint(for: language)
-        guard languageHint == "en" else { return true }
 
         let rawTrimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawNormalized = normalizedTranscriptText(rawTrimmed)
@@ -760,11 +777,18 @@ public final class RecordingEngine: ObservableObject {
         guard rawNormalized != cleanedNormalized else { return true }
         guard cjkLetterCount(in: cleanedNormalized) == 0 else { return false }
 
-        let cleanedWords = canonicalTranscriptWords(cleanedNormalized, droppingArtifacts: false)
+        let cleanedWords = canonicalTranscriptWords(cleanedNormalized)
         guard !cleanedWords.isEmpty else { return false }
 
-        let rawWords = canonicalTranscriptWords(rawNormalized, droppingArtifacts: true)
-        guard isSubsequence(cleanedWords, of: rawWords) else { return false }
+        // CJK fragments are known realtime transport artifacts, but repeated words and
+        // fillers may be intentional speech. The fast path is only safe when cleanup
+        // preserves every lexical token; otherwise the whole WAV is transcribed.
+        let rawWords = languageHint == "en"
+            ? canonicalTranscriptWordsPreservingSpeechTokens(rawNormalized)
+            : canonicalTranscriptWords(rawNormalized)
+        guard cleanedWords == rawWords else { return false }
+
+        guard languageHint == "en" else { return true }
 
         let rawCJKCount = cjkLetterCount(in: rawNormalized)
         if rawCJKCount > 0 {
@@ -773,8 +797,7 @@ public final class RecordingEngine: ObservableObject {
             guard rawCJKCount <= max(6, cleanedLatinCount / 3) else { return false }
         }
 
-        let removedWordCount = max(0, rawWords.count - cleanedWords.count)
-        return removedWordCount <= max(8, cleanedWords.count + 3)
+        return true
     }
 
     public nonisolated static func wasRealtimeTranscriptRepaired(rawText: String, cleanedText: String) -> Bool {
@@ -835,41 +858,28 @@ public final class RecordingEngine: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private nonisolated static func canonicalTranscriptWords(_ text: String, droppingArtifacts: Bool) -> [String] {
+    private nonisolated static func canonicalTranscriptWords(_ text: String) -> [String] {
         text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).compactMap { rawWord in
-            var normalized = String(rawWord)
+            let normalized = String(rawWord)
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
                 .lowercased()
-            if droppingArtifacts {
-                normalized = normalized.unicodeScalars.reduce(into: "") { output, scalar in
-                    if !isCJKScalar(scalar) {
-                        output.unicodeScalars.append(scalar)
-                    }
-                }
-            }
             guard !normalized.isEmpty else { return nil }
-            if droppingArtifacts, isStandaloneRealtimeArtifact(normalized) {
-                return nil
-            }
             return normalized
         }
     }
 
-    private nonisolated static func isSubsequence(_ needle: [String], of haystack: [String]) -> Bool {
-        guard !needle.isEmpty else { return true }
-        var index = 0
-        for word in haystack where word == needle[index] {
-            index += 1
-            if index == needle.count {
-                return true
+    private nonisolated static func canonicalTranscriptWordsPreservingSpeechTokens(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).compactMap { rawWord in
+            var normalized = String(rawWord)
+                .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+                .lowercased()
+            normalized = normalized.unicodeScalars.reduce(into: "") { output, scalar in
+                if !isCJKScalar(scalar) {
+                    output.unicodeScalars.append(scalar)
+                }
             }
+            return normalized.isEmpty ? nil : normalized
         }
-        return false
-    }
-
-    private nonisolated static func isStandaloneRealtimeArtifact(_ word: String) -> Bool {
-        let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
-        return artifactTokens.contains(word) || isMostlyCJKArtifact(word)
     }
 
     private nonisolated static func collapseAdjacentDuplicateWords(in text: String) -> String {
@@ -1545,11 +1555,11 @@ enum CLIRunner: Sendable {
             let output = try runExecutable(executable, arguments: arguments, environment: environment)
             if output.terminationStatus != 0 {
                 let details = output.stderr.isEmpty ? output.stdout : output.stderr
-                return "ERROR: \(details.trimmingCharacters(in: .whitespacesAndNewlines))"
+                return "ERROR: \(NativeErrorSanitizer.sanitize(details.trimmingCharacters(in: .whitespacesAndNewlines)))"
             }
             return output.stdout.isEmpty ? output.stderr : output.stdout
         } catch {
-            return "ERROR: \(error.localizedDescription)"
+            return "ERROR: \(NativeErrorSanitizer.sanitize(error.localizedDescription))"
         }
     }
 
@@ -1595,7 +1605,9 @@ enum CLIRunner: Sendable {
     static func parseError(_ output: String) -> String? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("ERROR:") else { return nil }
-        let message = trimmed.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = NativeErrorSanitizer.sanitize(
+            trimmed.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        )
         let lowercased = message.lowercased()
         if lowercased.contains("401") || lowercased.contains("incorrect api key")
             || lowercased.contains("invalid_api_key") || lowercased.contains("invalid or expired") {

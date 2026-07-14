@@ -128,6 +128,52 @@ struct CLIRunnerTests {
         #expect(result.count <= 120)
     }
 
+    @Test("parseError sanitizes generic credential-bearing failures")
+    func genericErrorsAreSanitized() {
+        let key = "sk-" + "synthetic-cli-secret-123456"
+        let bearer = "synthetic-bearer-secret-123456"
+        let token = "synthetic-query-secret-123456"
+        let result = CLIRunner.parseError(
+            "ERROR: upstream failed key=\(key) Authorization: Bearer \(bearer) https://example.test?access_token=\(token)"
+        )
+
+        #expect(result?.contains(key) == false)
+        #expect(result?.contains(bearer) == false)
+        #expect(result?.contains(token) == false)
+        #expect(result?.contains("[REDACTED]") == true)
+
+        let structured = CLIRunner.parseError(
+            "ERROR: OPENAI_API_KEY=plain-synthetic-secret payload={\"api_key\":\"json-synthetic-secret\"}"
+        )
+        #expect(structured?.contains("plain-synthetic-secret") == false)
+        #expect(structured?.contains("json-synthetic-secret") == false)
+    }
+
+    @Test("parseError preserves ordinary generic failures")
+    func ordinaryErrorsRemainUseful() {
+        #expect(CLIRunner.parseError("ERROR: microphone disconnected") == "microphone disconnected")
+    }
+
+    @Test("run sanitizes failed process stderr before returning it")
+    func failedProcessStderrIsSanitized() throws {
+        let key = "sk-" + "synthetic-process-secret-123456"
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-cli-sanitize-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        try "#!/bin/sh\nprintf 'request failed: %s' '$KEY' >&2\nexit 1\n"
+            .replacingOccurrences(of: "$KEY", with: key)
+            .write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let output = CLIRunner.run([], home: home.path)
+
+        #expect(!output.contains(key))
+        #expect(output.contains("[REDACTED]"))
+    }
+
     @Test("parseJSON extracts raw_text from JSON")
     func parseJSONRawText() {
         let output = """

@@ -5,6 +5,15 @@ import Foundation
 /// Tests for the CLI bridge layer the full macOS app relies on: decoding the `recordings`
 /// CLI JSON into models and tolerating leading log noise in stdout.
 struct RecordingBridgeTests {
+    @Test("native machine identity matches CLI host and explicit fleet override")
+    func nativeMachineIdentity() {
+        #expect(NativeMachineIdentity.current(environment: [:], hostName: "station05.local") == "station05.local")
+        #expect(NativeMachineIdentity.current(
+            environment: ["HASNA_MACHINE_ID": "station05"],
+            hostName: "station05.local"
+        ) == "station05")
+    }
+
     @Test("Recording decodes from CLI snake_case JSON")
     func decodeRecording() throws {
         let json = """

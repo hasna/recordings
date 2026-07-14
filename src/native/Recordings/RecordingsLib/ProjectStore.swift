@@ -287,10 +287,16 @@ public final class ProjectStore: ObservableObject {
             persistenceError = "Failed to register projects: \((error as? RecordingsCLI.Failure)?.message ?? error.localizedDescription)"
             throw error
         }
-        let canonicalByLocalID = Dictionary(uniqueKeysWithValues: registrations)
         var migrated = original
-        migrated.projects = original.projects.map { project in
-            guard let canonical = canonicalByLocalID[project.id] else { return project }
+        var canonicalIDByLocalID: [String: String] = [:]
+        var seenCanonicalIDs = Set<String>()
+        migrated.projects = zip(original.projects, registrations).compactMap { pair -> RecProject? in
+            let (project, registration) = pair
+            let canonical = registration.1
+            if canonicalIDByLocalID[project.id] == nil {
+                canonicalIDByLocalID[project.id] = canonical.id
+            }
+            guard seenCanonicalIDs.insert(canonical.id).inserted else { return nil }
             return RecProject(
                 id: canonical.id,
                 name: project.name,
@@ -302,7 +308,7 @@ public final class ProjectStore: ObservableObject {
             )
         }
         if let active = original.activeProjectId {
-            migrated.activeProjectId = canonicalByLocalID[active]?.id
+            migrated.activeProjectId = canonicalIDByLocalID[active]
         }
         settings = migrated
         do {

@@ -4,6 +4,8 @@ public enum NativeErrorSanitizer {
     private static let replacements: [(pattern: String, template: String)] = [
         (#"(?i)\b(?:sk|sess)-[A-Za-z0-9_-]{8,}\b"#, "[REDACTED]"),
         (#"(?i)(\bBearer\s+)[^\s,;]+"#, "$1[REDACTED]"),
+        (#"(?i)(\b[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN)\s*=\s*)[^\s,;]+"#, "$1[REDACTED]"),
+        (#"(?i)(\"?(?:api[_-]?key|access[_-]?token|auth[_-]?token|token)\"?\s*:\s*\"?)[^\"\s,;}]+"#, "$1[REDACTED]"),
         (#"(?i)((?:[?&]|\b)(?:api[_-]?key|access[_-]?token|auth[_-]?token|token)=)[^&\s,;]+"#, "$1[REDACTED]"),
         (#"(?i)(api\s+key(?:\s+provided)?\s*[:=]\s*)[^\s,;]+"#, "$1[REDACTED]"),
     ]

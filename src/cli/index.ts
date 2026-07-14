@@ -21,6 +21,7 @@ import type { Recording } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions, parseListPagination } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
+import { currentMachineId } from "../lib/machine.js";
 
 const program = new Command();
 
@@ -143,6 +144,7 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      machine_id: currentMachineId(),
       metadata: buildTranscriptionMetadata(config, processed, {
         transcriptionPromptFromRequest: opts.prompt !== undefined,
         transcriberPromptFromRequest:
@@ -207,6 +209,7 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      machine_id: currentMachineId(),
       metadata: buildTranscriptionMetadata(config, processed, {
         transcriptionPromptFromRequest: opts.prompt !== undefined,
         transcriberPromptFromRequest:
@@ -283,6 +286,7 @@ program
       agent_id: parentOpts.agent || undefined,
       project_id: parentOpts.project || undefined,
       session_id: parentOpts.session || undefined,
+      machine_id: currentMachineId(),
       metadata,
     });
 
@@ -367,6 +371,7 @@ program
         agent_id: parentOpts.agent,
         project_id: parentOpts.project,
         session_id: parentOpts.session,
+        machine_id: currentMachineId(),
       });
 
       if (parentOpts.json) {
@@ -976,6 +981,7 @@ program
               agent_id: parentOpts.agent || undefined,
               project_id: parentOpts.project || undefined,
               session_id: parentOpts.session || undefined,
+              machine_id: currentMachineId(),
               metadata: buildTranscriptionMetadata(config, processed, {
                 transcriptionPromptFromRequest: opts.prompt !== undefined,
                 transcriberPromptFromRequest:

@@ -2,6 +2,29 @@ import Testing
 @testable import RecordingsLib
 
 struct RecordingStartGateTests {
+    @Test("permission-only launch skips global handlers and terminates after handling")
+    func permissionHelperLaunchPlan() {
+        let plan = PermissionRequestLaunchPlan(arguments: [
+            "/Applications/Recordings.app/Contents/MacOS/Recordings",
+            "--request-permissions",
+            "--open-permission-settings",
+        ])
+
+        #expect(plan.isHelper)
+        #expect(plan.opensPermissionSettings)
+        #expect(!plan.installsGlobalHandlers)
+        #expect(plan.terminatesAfterHandling)
+    }
+
+    @Test("regular launch retains global handlers and never self-terminates")
+    func regularLaunchPlan() {
+        let plan = PermissionRequestLaunchPlan(arguments: ["Recordings"])
+
+        #expect(!plan.isHelper)
+        #expect(plan.installsGlobalHandlers)
+        #expect(!plan.terminatesAfterHandling)
+    }
+
     @Test("recording cannot begin while already recording or transcribing")
     func cannotBeginWhenBusy() {
         #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false) == true)
