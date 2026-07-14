@@ -215,7 +215,7 @@ struct RealtimeTranscriptionTests {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 12_000) == false)
     }
 
-    @Test("Realtime fast path accepts useful and safely repaired text")
+    @Test("Realtime fast path accepts safe text and rejects lexical cleanup")
     func realtimeFastPathDecision() {
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "  this is a useful transcript  ", pcmByteCount: 96_000))
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 12_000))
@@ -230,7 +230,7 @@ struct RealtimeTranscriptionTests {
             realtimeText: "어 Okay I don't know if this This is working어 Okay I don't know if this This is working",
             pcmByteCount: 96_000,
             language: "en"
-        ) == "Okay I don't know if this is working")
+        ) == nil)
         #expect(RecordingEngine.realtimeFastPathTranscript(
             realtimeText: "Actually Zoom your goal",
             pcmByteCount: 96_000,
