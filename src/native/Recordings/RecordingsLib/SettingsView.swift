@@ -20,7 +20,6 @@ public struct SettingsView: View {
             shortcutsTab.tabItem { Label("Voice Shortcuts", systemImage: "text.badge.star") }
         }
         .frame(width: 520, height: 500)
-        .disabled(!projectStore.canMutateProjects)
         .alert("Project Settings Error", isPresented: Binding(
             get: { projectStore.persistenceError != nil },
             set: { if !$0 { projectStore.clearPersistenceError() } }
@@ -111,6 +110,7 @@ public struct SettingsView: View {
                 Text("Instructions for post-transcription cleanup and formatting.")
                     .foregroundStyle(.secondary)
             }
+            .disabled(!projectStore.canMutateProjects)
         }
         .formStyle(.grouped).padding()
     }
@@ -163,6 +163,7 @@ public struct SettingsView: View {
                 }
             }
         }
+        .disabled(!projectStore.canMutateProjects)
         .sheet(item: $editingProject) { project in
             ProjectEditView(project: project, store: projectStore) {
                 editingProject = nil
@@ -264,6 +265,7 @@ struct ProjectEditView: View {
                 }
             }
             .formStyle(.grouped)
+            .disabled(!store.canMutateProjects)
 
             HStack {
                 Spacer()
@@ -274,6 +276,7 @@ struct ProjectEditView: View {
                         onDismiss()
                     } catch {}
                 }
+                .disabled(!store.canMutateProjects)
             }
             .padding()
         }

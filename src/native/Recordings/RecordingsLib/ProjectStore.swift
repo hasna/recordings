@@ -103,6 +103,7 @@ public final class ProjectStore: ObservableObject {
     private let dataLoader: SettingsDataLoader
     private var loadSucceeded = true
     private var loadFailureMessage: String?
+    private var persistedData: Data?
 
     public var canMutateProjects: Bool {
         loadSucceeded && !isSynchronizingProjects
@@ -159,18 +160,19 @@ public final class ProjectStore: ObservableObject {
     func load() -> Bool {
         do {
             guard let data = try dataLoader(filePath) else {
+                persistedData = nil
                 loadFailureMessage = nil
                 persistenceError = nil
                 return true
             }
             settings = try JSONDecoder().decode(ProjectSettings.self, from: data)
+            persistedData = data
             loadFailureMessage = nil
             persistenceError = nil
             return true
         } catch {
             let message = "Failed to load projects: \(error.localizedDescription)"
-            loadFailureMessage = message
-            persistenceError = message
+            blockMutations(message: message)
             return false
         }
     }
@@ -185,16 +187,46 @@ public final class ProjectStore: ObservableObject {
             throw ProjectStoreError.persistenceFailure(loadFailureMessage ?? "Failed to load projects")
         }
         guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
+        try validatePersistedData()
+    }
+
+    private func validatePersistedData() throws {
+        guard loadSucceeded else {
+            throw ProjectStoreError.persistenceFailure(loadFailureMessage ?? "Failed to load projects")
+        }
+        do {
+            guard try dataLoader(filePath) == persistedData else {
+                let message = "Project settings changed on disk. Restart Recordings before making changes."
+                blockMutations(message: message)
+                throw ProjectStoreError.persistenceFailure(message)
+            }
+        } catch let error as ProjectStoreError {
+            throw error
+        } catch {
+            let message = "Failed to read projects before saving: \(error.localizedDescription)"
+            blockMutations(message: message)
+            throw ProjectStoreError.persistenceFailure(message)
+        }
+    }
+
+    private func blockMutations(message: String) {
+        loadSucceeded = false
+        isReadyForRecording = false
+        loadFailureMessage = message
+        persistenceError = message
     }
 
     private func persistSettings() throws {
         do {
+            try validatePersistedData()
             let data = try JSONEncoder().encode(settings)
             let dir = (filePath as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+            persistedData = data
             persistenceError = nil
         } catch {
+            if error is ProjectStoreError { throw error }
             persistenceError = "Failed to save projects: \(error.localizedDescription)"
             throw error
         }
@@ -205,10 +237,7 @@ public final class ProjectStore: ObservableObject {
     }
 
     public func reconcileWithCanonicalStore(home: String = RecordingsCLI.defaultHome) async throws {
-        guard !isSynchronizingProjects else { throw ProjectStoreError.synchronizationInProgress }
-        guard loadSucceeded else {
-            throw ProjectStoreError.persistenceFailure(loadFailureMessage ?? "Failed to load projects")
-        }
+        try requireWritableState()
         isSynchronizingProjects = true
         defer { isSynchronizingProjects = false }
         let original = settings

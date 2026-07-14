@@ -150,6 +150,50 @@ struct ProjectStoreTests {
         #expect(try Data(contentsOf: file) == sentinel)
     }
 
+    @Test("a project file that becomes unreadable after launch is never overwritten")
+    @MainActor
+    func postLaunchReadFailureBlocksMutations() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("projects.json")
+        let initial = try JSONEncoder().encode(ProjectSettings())
+        try initial.write(to: file)
+        var readError: SyntheticReadError?
+        let store = ProjectStore(filePath: file.path) { path in
+            if let readError { throw readError }
+            return try Data(contentsOf: URL(fileURLWithPath: path))
+        }
+
+        readError = SyntheticReadError()
+        store.settings.globalSystemPrompt = "Must not be persisted"
+
+        #expect(throws: ProjectStoreError.self) { try store.save() }
+        #expect(!store.canMutateProjects)
+        #expect(store.persistenceError?.contains("synthetic read failure") == true)
+        #expect(try Data(contentsOf: file) == initial)
+    }
+
+    @Test("external project file changes are never replaced by stale in-memory settings")
+    @MainActor
+    func externalChangeBlocksMutations() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("projects.json")
+        try JSONEncoder().encode(ProjectSettings()).write(to: file)
+        let store = ProjectStore(filePath: file.path)
+        let external = Data("externally-replaced-data".utf8)
+        try external.write(to: file)
+
+        store.settings.globalSystemPrompt = "Must not replace external data"
+
+        #expect(throws: ProjectStoreError.self) { try store.save() }
+        #expect(!store.canMutateProjects)
+        #expect(store.persistenceError?.contains("changed on disk") == true)
+        #expect(try Data(contentsOf: file) == external)
+    }
+
     @Test("absent project data remains a writable empty store")
     @MainActor
     func absentDataIsWritable() {
