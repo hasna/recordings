@@ -16,9 +16,42 @@ final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class RecordingsAppState: ObservableObject {
     let store: RecordingsStore?
+    private var mainWindow: NSWindow?
 
     init(plan: PermissionRequestLaunchPlan) {
-        store = plan.installsGlobalHandlers ? RecordingsStore() : nil
+        if plan.installsGlobalHandlers {
+            let store = RecordingsStore()
+            self.store = store
+            if plan.declaresMainWindow {
+                Task { @MainActor [weak self] in
+                    self?.showMainWindow(for: store)
+                }
+            }
+        } else {
+            store = nil
+        }
+    }
+
+    private func showMainWindow(for store: RecordingsStore) {
+        if let mainWindow {
+            mainWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Recordings"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(store: store))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        mainWindow = window
     }
 }
 
@@ -26,11 +59,9 @@ final class RecordingsAppState: ObservableObject {
 struct RecordingsApp: App {
     @NSApplicationDelegateAdaptor(RecordingsAppDelegate.self) private var appDelegate
     @StateObject private var state: RecordingsAppState
-    private let launchPlan: PermissionRequestLaunchPlan
 
     init() {
         let plan = PermissionRequestLaunchPlan(arguments: CommandLine.arguments)
-        launchPlan = plan
         _state = StateObject(wrappedValue: RecordingsAppState(plan: plan))
         if plan.isHelper {
             Self.handlePermissionRequest(plan)
@@ -41,40 +72,27 @@ struct RecordingsApp: App {
         }
     }
 
-    @SceneBuilder
     var body: some Scene {
-        if launchPlan.declaresMainWindow {
-            WindowGroup("Recordings") {
-                if let store = state.store {
-                    ContentView(store: store)
-                }
-            }
-            .windowStyle(.hiddenTitleBar)
-            .defaultSize(width: 1180, height: 760)
-            .commands {
-                if let store = state.store {
-                    CommandGroup(replacing: .newItem) {
-                        Button("New Recording") {
-                            store.pane = .record
-                            store.engine.startRecording()
-                        }
-                        .keyboardShortcut("n", modifiers: .command)
-                    }
-                    CommandGroup(after: .toolbar) {
-                        Button("Recordings Library") { store.pane = .library }
-                            .keyboardShortcut("l", modifiers: .command)
-                    }
-                }
-            }
-
-            Settings {
-                if let store = state.store {
-                    SettingsView(engine: store.engine, shortcuts: store.voiceShortcuts, projectStore: store.projectStore)
-                }
-            }
-        } else {
-            Settings {
+        Settings {
+            if let store = state.store {
+                SettingsView(engine: store.engine, shortcuts: store.voiceShortcuts, projectStore: store.projectStore)
+            } else {
                 EmptyView()
+            }
+        }
+        .commands {
+            if let store = state.store {
+                CommandGroup(replacing: .newItem) {
+                    Button("New Recording") {
+                        store.pane = .record
+                        store.engine.startRecording()
+                    }
+                    .keyboardShortcut("n", modifiers: .command)
+                }
+                CommandGroup(after: .toolbar) {
+                    Button("Recordings Library") { store.pane = .library }
+                        .keyboardShortcut("l", modifiers: .command)
+                }
             }
         }
     }
