@@ -162,6 +162,14 @@ struct CLIRunnerTests {
         #expect(quoted?.contains("bare secret phrase") == false)
         #expect(quoted?.contains("private phrase") == false)
         #expect(quoted?.contains("horse battery staple") == false)
+
+        let escapedAndUnquoted = CLIRunner.parseError(
+            "ERROR: payload={\"secret\":\"alpha \\\"quoted\\\" beta gamma\"}; "
+                + "private: delta echo foxtrot"
+        )
+        #expect(escapedAndUnquoted?.contains("quoted") == false)
+        #expect(escapedAndUnquoted?.contains("beta gamma") == false)
+        #expect(escapedAndUnquoted?.contains("echo foxtrot") == false)
     }
 
     @Test("parseError preserves ordinary generic failures")

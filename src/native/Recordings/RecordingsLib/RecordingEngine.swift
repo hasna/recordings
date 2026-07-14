@@ -774,6 +774,9 @@ public final class RecordingEngine: ObservableObject {
         let rawNormalized = normalizedTranscriptText(rawTrimmed)
         let cleanedNormalized = normalizedTranscriptText(cleanedText)
         guard !cleanedNormalized.isEmpty else { return false }
+        if languageHint == "en" {
+            guard cjkLetterCount(in: cleanedNormalized) == 0 else { return false }
+        }
         guard rawNormalized != cleanedNormalized else { return true }
         guard cjkLetterCount(in: cleanedNormalized) == 0 else { return false }
 

@@ -124,5 +124,14 @@ struct TranscriptResolutionTests {
             realtimeText: "Actually 리수 Zoom your goal",
             language: "en"
         ) == "Actually Zoom your goal")
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "这是 完全 错误 的 实时 转录 内容",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "这是 完全 错误 的 实时 转录 内容",
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
     }
 }
