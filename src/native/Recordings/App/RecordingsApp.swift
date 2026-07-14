@@ -26,9 +26,11 @@ final class RecordingsAppState: ObservableObject {
 struct RecordingsApp: App {
     @NSApplicationDelegateAdaptor(RecordingsAppDelegate.self) private var appDelegate
     @StateObject private var state: RecordingsAppState
+    private let launchPlan: PermissionRequestLaunchPlan
 
     init() {
         let plan = PermissionRequestLaunchPlan(arguments: CommandLine.arguments)
+        launchPlan = plan
         _state = StateObject(wrappedValue: RecordingsAppState(plan: plan))
         if plan.isHelper {
             Self.handlePermissionRequest(plan)
@@ -39,40 +41,39 @@ struct RecordingsApp: App {
         }
     }
 
+    @SceneBuilder
     var body: some Scene {
-        WindowGroup("Recordings") {
-            if let store = state.store {
-                ContentView(store: store)
-            } else {
-                Color.clear
-                    .frame(width: 1, height: 1)
-                    .onAppear {
-                        NSApplication.shared.windows.forEach { $0.orderOut(nil) }
-                    }
-            }
-        }
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1180, height: 760)
-        .commands {
-            if let store = state.store {
-                CommandGroup(replacing: .newItem) {
-                    Button("New Recording") {
-                        store.pane = .record
-                        store.engine.startRecording()
-                    }
-                    .keyboardShortcut("n", modifiers: .command)
-                }
-                CommandGroup(after: .toolbar) {
-                    Button("Recordings Library") { store.pane = .library }
-                        .keyboardShortcut("l", modifiers: .command)
+        if launchPlan.declaresMainWindow {
+            WindowGroup("Recordings") {
+                if let store = state.store {
+                    ContentView(store: store)
                 }
             }
-        }
+            .windowStyle(.hiddenTitleBar)
+            .defaultSize(width: 1180, height: 760)
+            .commands {
+                if let store = state.store {
+                    CommandGroup(replacing: .newItem) {
+                        Button("New Recording") {
+                            store.pane = .record
+                            store.engine.startRecording()
+                        }
+                        .keyboardShortcut("n", modifiers: .command)
+                    }
+                    CommandGroup(after: .toolbar) {
+                        Button("Recordings Library") { store.pane = .library }
+                            .keyboardShortcut("l", modifiers: .command)
+                    }
+                }
+            }
 
-        Settings {
-            if let store = state.store {
-                SettingsView(engine: store.engine, shortcuts: store.voiceShortcuts, projectStore: store.projectStore)
-            } else {
+            Settings {
+                if let store = state.store {
+                    SettingsView(engine: store.engine, shortcuts: store.voiceShortcuts, projectStore: store.projectStore)
+                }
+            }
+        } else {
+            Settings {
                 EmptyView()
             }
         }

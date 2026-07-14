@@ -1557,7 +1557,9 @@ enum CLIRunner: Sendable {
                 let details = output.stderr.isEmpty ? output.stdout : output.stderr
                 return "ERROR: \(NativeErrorSanitizer.sanitize(details.trimmingCharacters(in: .whitespacesAndNewlines)))"
             }
-            return output.stdout.isEmpty ? output.stderr : output.stdout
+            return output.stdout.isEmpty
+                ? NativeErrorSanitizer.sanitize(output.stderr)
+                : output.stdout
         } catch {
             return "ERROR: \(NativeErrorSanitizer.sanitize(error.localizedDescription))"
         }

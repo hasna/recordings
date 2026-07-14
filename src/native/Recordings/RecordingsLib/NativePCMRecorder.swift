@@ -2,6 +2,7 @@
 import Foundation
 
 enum NativePCMRecorderError: LocalizedError {
+    case alreadyActive
     case noInputDevice
     case unsupportedInputFormat
     case failedToCreateConverter
@@ -9,6 +10,8 @@ enum NativePCMRecorderError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .alreadyActive:
+            return "Microphone capture is already starting, running, or stopping"
         case .noInputDevice:
             return "No microphone input device is available"
         case .unsupportedInputFormat:
@@ -33,6 +36,9 @@ final class NativePCMRecorder: @unchecked Sendable {
     private let onPCM: @Sendable (Data) -> Void
     private let lifecycle = NSCondition()
     private let conversionLock = NSLock()
+    private let deliveryQueue = DispatchQueue(label: "com.hasna.recordings.native-pcm-delivery")
+    private let deliveryQueueKey = DispatchSpecificKey<UInt8>()
+    private let stopWorkQueue = DispatchQueue(label: "com.hasna.recordings.native-pcm-stop")
     private let stopCaptureForTesting: (@Sendable () -> Void)?
     private let onCallbackAdmittedForTesting: (@Sendable () -> Void)?
     private let finalizeConverter: @Sendable (AVAudioConverter, AVAudioFormat) -> [Data]
@@ -48,6 +54,7 @@ final class NativePCMRecorder: @unchecked Sendable {
         self.stopCaptureForTesting = nil
         self.onCallbackAdmittedForTesting = nil
         self.finalizeConverter = Self.finalizeConverterTail
+        deliveryQueue.setSpecific(key: deliveryQueueKey, value: 1)
     }
 
     init(
@@ -57,6 +64,7 @@ final class NativePCMRecorder: @unchecked Sendable {
         stopCapture: @escaping @Sendable () -> Void,
         onCallbackAdmitted: @escaping @Sendable () -> Void,
         finalizeConverter: @escaping @Sendable (AVAudioConverter, AVAudioFormat) -> [Data],
+        startsRunning: Bool = true,
         onPCM: @escaping @Sendable (Data) -> Void
     ) {
         self.onPCM = onPCM
@@ -66,18 +74,13 @@ final class NativePCMRecorder: @unchecked Sendable {
         self.converter = converter
         self.inputFormat = testingInputFormat
         self.outputFormat = outputFormat
-        self.state = .running
-        self.acceptingCallbacks = true
+        self.state = startsRunning ? .running : .idle
+        self.acceptingCallbacks = startsRunning
+        deliveryQueue.setSpecific(key: deliveryQueueKey, value: 1)
     }
 
     func start() throws {
-        lifecycle.lock()
-        guard state == .idle else {
-            lifecycle.unlock()
-            return
-        }
-        state = .starting
-        lifecycle.unlock()
+        try reserveStart()
 
         let inputNode = engine.inputNode
         let inputFormat = inputNode.inputFormat(forBus: 0)
@@ -102,7 +105,6 @@ final class NativePCMRecorder: @unchecked Sendable {
         self.converter = converter
         self.inputFormat = inputFormat
         self.outputFormat = outputFormat
-        acceptingCallbacks = true
         lifecycle.unlock()
 
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
@@ -113,6 +115,7 @@ final class NativePCMRecorder: @unchecked Sendable {
             engine.prepare()
             try engine.start()
             lifecycle.lock()
+            acceptingCallbacks = true
             state = .running
             lifecycle.broadcast()
             lifecycle.unlock()
@@ -130,9 +133,20 @@ final class NativePCMRecorder: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    private func reserveStart() throws {
         lifecycle.lock()
-        while state == .starting || state == .stopping {
+        guard state == .idle else {
+            lifecycle.unlock()
+            throw NativePCMRecorderError.alreadyActive
+        }
+        state = .starting
+        lifecycle.unlock()
+    }
+
+    func stop() {
+        let isReentrantDelivery = DispatchQueue.getSpecific(key: deliveryQueueKey) != nil
+        lifecycle.lock()
+        while state == .starting || (state == .stopping && !isReentrantDelivery) {
             lifecycle.wait()
         }
         guard state == .running else {
@@ -143,6 +157,16 @@ final class NativePCMRecorder: @unchecked Sendable {
         state = .stopping
         lifecycle.unlock()
 
+        if isReentrantDelivery {
+            stopWorkQueue.async { [self] in
+                stopCaptureAndFinish()
+            }
+        } else {
+            stopCaptureAndFinish()
+        }
+    }
+
+    private func stopCaptureAndFinish() {
         if let stopCaptureForTesting {
             stopCaptureForTesting()
         } else {
@@ -163,7 +187,7 @@ final class NativePCMRecorder: @unchecked Sendable {
             let tailChunks = finalizeConverter(converter, outputFormat)
             conversionLock.unlock()
             for data in tailChunks where !data.isEmpty {
-                onPCM(data)
+                deliverPCM(data)
             }
         }
 
@@ -192,6 +216,33 @@ final class NativePCMRecorder: @unchecked Sendable {
         processInputBuffer(inputBuffer)
     }
 
+    func deliverPCMForTesting(_ data: Data) {
+        lifecycle.lock()
+        guard acceptingCallbacks else {
+            lifecycle.unlock()
+            return
+        }
+        inFlightCallbacks += 1
+        lifecycle.unlock()
+
+        defer { finishCallback() }
+        deliverPCM(data)
+    }
+
+    func reserveStartForTesting() throws {
+        try reserveStart()
+    }
+
+    func abandonStartForTesting() {
+        abandonStart()
+    }
+
+    var isIdleForTesting: Bool {
+        lifecycle.lock()
+        defer { lifecycle.unlock() }
+        return state == .idle
+    }
+
     private func processInputBuffer(_ inputBuffer: AVAudioPCMBuffer) {
         lifecycle.lock()
         guard acceptingCallbacks,
@@ -206,14 +257,7 @@ final class NativePCMRecorder: @unchecked Sendable {
 
         onCallbackAdmittedForTesting?()
 
-        defer {
-            lifecycle.lock()
-            inFlightCallbacks -= 1
-            if inFlightCallbacks == 0 {
-                lifecycle.broadcast()
-            }
-            lifecycle.unlock()
-        }
+        defer { finishCallback() }
 
         conversionLock.lock()
         let data = convert(
@@ -224,8 +268,27 @@ final class NativePCMRecorder: @unchecked Sendable {
         )
         conversionLock.unlock()
         if !data.isEmpty {
-            onPCM(data)
+            deliverPCM(data)
         }
+    }
+
+    private func deliverPCM(_ data: Data) {
+        if DispatchQueue.getSpecific(key: deliveryQueueKey) != nil {
+            onPCM(data)
+        } else {
+            deliveryQueue.sync {
+                onPCM(data)
+            }
+        }
+    }
+
+    private func finishCallback() {
+        lifecycle.lock()
+        inFlightCallbacks -= 1
+        if inFlightCallbacks == 0 {
+            lifecycle.broadcast()
+        }
+        lifecycle.unlock()
     }
 
     private func convert(

@@ -144,10 +144,15 @@ struct CLIRunnerTests {
         #expect(result?.contains("[REDACTED]") == true)
 
         let structured = CLIRunner.parseError(
-            "ERROR: OPENAI_API_KEY=plain-synthetic-secret payload={\"api_key\":\"json-synthetic-secret\"}"
+            "ERROR: OPENAI_API_KEY=plain-synthetic-secret CLIENT_SECRET=client-synthetic-secret "
+                + "PASSWORD=password-synthetic-secret payload={\"api_key\":\"json-synthetic-secret\","
+                + "\"private_key\":\"private-synthetic-secret\"}"
         )
         #expect(structured?.contains("plain-synthetic-secret") == false)
+        #expect(structured?.contains("client-synthetic-secret") == false)
+        #expect(structured?.contains("password-synthetic-secret") == false)
         #expect(structured?.contains("json-synthetic-secret") == false)
+        #expect(structured?.contains("private-synthetic-secret") == false)
     }
 
     @Test("parseError preserves ordinary generic failures")
@@ -172,6 +177,26 @@ struct CLIRunnerTests {
         let output = CLIRunner.run([], home: home.path)
 
         #expect(!output.contains(key))
+        #expect(output.contains("[REDACTED]"))
+    }
+
+    @Test("run sanitizes stderr-only output from a successful process")
+    func successfulProcessStderrIsSanitized() throws {
+        let password = "synthetic-process-password-123456"
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-cli-success-sanitize-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        try "#!/bin/sh\nprintf 'PASSWORD=%s' '$PASSWORD' >&2\n"
+            .replacingOccurrences(of: "$PASSWORD", with: password)
+            .write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let output = CLIRunner.run([], home: home.path)
+
+        #expect(!output.contains(password))
         #expect(output.contains("[REDACTED]"))
     }
 

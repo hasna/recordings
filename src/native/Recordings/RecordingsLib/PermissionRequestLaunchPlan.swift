@@ -5,6 +5,7 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
     public let opensPermissionSettings: Bool
 
     public var installsGlobalHandlers: Bool { !isHelper }
+    public var declaresMainWindow: Bool { !isHelper }
     public var terminatesAfterHandling: Bool { isHelper }
 
     public init(arguments: [String]) {

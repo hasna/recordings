@@ -123,6 +123,159 @@ struct NativePCMRecorderTests {
         #expect(probe.finalizationCount == 1)
         #expect(probe.emittedByteCount > bytesBeforeStop)
     }
+
+    @Test("start reports busy while recorder is running or another start is failing")
+    func concurrentStartNeverReportsFalseSuccess() throws {
+        let inputFormat = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let outputFormat = try #require(NativePCMRecorder.realtimeOutputFormat())
+        let converter = try #require(AVAudioConverter(from: inputFormat, to: outputFormat))
+        let runningRecorder = NativePCMRecorder(
+            testingInputFormat: inputFormat,
+            outputFormat: outputFormat,
+            converter: converter,
+            stopCapture: {},
+            onCallbackAdmitted: {},
+            finalizeConverter: { _, _ in [] },
+            onPCM: { _ in }
+        )
+
+        expectBusyStart(runningRecorder)
+        runningRecorder.stop()
+
+        let startingRecorder = NativePCMRecorder(
+            testingInputFormat: inputFormat,
+            outputFormat: outputFormat,
+            converter: converter,
+            stopCapture: {},
+            onCallbackAdmitted: {},
+            finalizeConverter: { _, _ in [] },
+            startsRunning: false,
+            onPCM: { _ in }
+        )
+        try startingRecorder.reserveStartForTesting()
+
+        expectBusyStart(startingRecorder)
+        startingRecorder.abandonStartForTesting()
+        #expect(startingRecorder.isIdleForTesting)
+    }
+
+    @Test("start reports busy while stop owns the recorder")
+    func startRacingStopReportsBusy() throws {
+        let inputFormat = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let outputFormat = try #require(NativePCMRecorder.realtimeOutputFormat())
+        let converter = try #require(AVAudioConverter(from: inputFormat, to: outputFormat))
+        let probe = NativeRecorderLifecycleProbe()
+        let recorder = NativePCMRecorder(
+            testingInputFormat: inputFormat,
+            outputFormat: outputFormat,
+            converter: converter,
+            stopCapture: {
+                probe.captureStopped.signal()
+                probe.releaseCaptureStop.wait()
+            },
+            onCallbackAdmitted: {},
+            finalizeConverter: { _, _ in [] },
+            onPCM: { _ in }
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            recorder.stop()
+            probe.stopReturned.signal()
+        }
+        #expect(probe.captureStopped.wait(timeout: .now() + 1) == .success)
+
+        expectBusyStart(recorder)
+        probe.releaseCaptureStop.signal()
+        #expect(probe.stopReturned.wait(timeout: .now() + 1) == .success)
+        #expect(recorder.isIdleForTesting)
+    }
+
+    @Test("stop called from a normal PCM delivery finishes without waiting on itself")
+    func reentrantStopFromPCMDelivery() throws {
+        let inputFormat = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let outputFormat = try #require(NativePCMRecorder.realtimeOutputFormat())
+        let converter = try #require(AVAudioConverter(from: inputFormat, to: outputFormat))
+        let recorderBox = NativeRecorderReferenceBox()
+        let probe = NativeRecorderLifecycleProbe()
+        let recorder = NativePCMRecorder(
+            testingInputFormat: inputFormat,
+            outputFormat: outputFormat,
+            converter: converter,
+            stopCapture: { probe.captureStopped.signal() },
+            onCallbackAdmitted: {},
+            finalizeConverter: { _, _ in
+                probe.finalizerRan()
+                return []
+            },
+            onPCM: { _ in
+                guard probe.claimFirstReentrantStop() else { return }
+                recorderBox.recorder?.stop()
+                probe.reentrantStopReturned.signal()
+            }
+        )
+        recorderBox.recorder = recorder
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            recorder.deliverPCMForTesting(Data([0x50, 0x43, 0x4d]))
+            probe.callbackReturned.signal()
+        }
+
+        #expect(probe.reentrantStopReturned.wait(timeout: .now() + 1) == .success)
+        #expect(probe.callbackReturned.wait(timeout: .now() + 1) == .success)
+        recorder.stop()
+        #expect(probe.finalizationCount == 1)
+        #expect(recorder.isIdleForTesting)
+    }
+
+    @Test("stop called from converter tail delivery returns without deadlock")
+    func reentrantStopFromTailDelivery() throws {
+        let inputFormat = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let outputFormat = try #require(NativePCMRecorder.realtimeOutputFormat())
+        let converter = try #require(AVAudioConverter(from: inputFormat, to: outputFormat))
+        let recorderBox = NativeRecorderReferenceBox()
+        let probe = NativeRecorderLifecycleProbe()
+        let recorder = NativePCMRecorder(
+            testingInputFormat: inputFormat,
+            outputFormat: outputFormat,
+            converter: converter,
+            stopCapture: {},
+            onCallbackAdmitted: {},
+            finalizeConverter: { _, _ in [Data([0x54])] },
+            onPCM: { _ in
+                recorderBox.recorder?.stop()
+                probe.reentrantStopReturned.signal()
+            }
+        )
+        recorderBox.recorder = recorder
+
+        recorder.stop()
+
+        #expect(probe.reentrantStopReturned.wait(timeout: .now() + 1) == .success)
+        #expect(recorder.isIdleForTesting)
+    }
+
+    private func expectBusyStart(_ recorder: NativePCMRecorder) {
+        do {
+            try recorder.start()
+            Issue.record("start unexpectedly reported success for a non-idle recorder")
+        } catch NativePCMRecorderError.alreadyActive {
+            // Expected: a competing caller must never observe false success.
+        } catch {
+            Issue.record("start returned the wrong error: \(error)")
+        }
+    }
 }
 
 private final class NativeRecorderAudioBufferBox: @unchecked Sendable {
@@ -133,17 +286,24 @@ private final class NativeRecorderAudioBufferBox: @unchecked Sendable {
     }
 }
 
+private final class NativeRecorderReferenceBox: @unchecked Sendable {
+    var recorder: NativePCMRecorder?
+}
+
 private final class NativeRecorderLifecycleProbe: @unchecked Sendable {
     let firstCallbackEntered = DispatchSemaphore(value: 0)
     let releaseFirstCallback = DispatchSemaphore(value: 0)
     let callbackReturned = DispatchSemaphore(value: 0)
     let captureStopped = DispatchSemaphore(value: 0)
     let stopReturned = DispatchSemaphore(value: 0)
+    let releaseCaptureStop = DispatchSemaphore(value: 0)
+    let reentrantStopReturned = DispatchSemaphore(value: 0)
 
     private let lock = NSLock()
     private var admissions = 0
     private var finalizations = 0
     private var emitted: [Data] = []
+    private var didClaimReentrantStop = false
 
     var admissionCount: Int {
         lock.lock()
@@ -190,5 +350,13 @@ private final class NativeRecorderLifecycleProbe: @unchecked Sendable {
         lock.lock()
         emitted.append(data)
         lock.unlock()
+    }
+
+    func claimFirstReentrantStop() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didClaimReentrantStop else { return false }
+        didClaimReentrantStop = true
+        return true
     }
 }
