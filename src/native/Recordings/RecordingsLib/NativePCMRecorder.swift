@@ -170,7 +170,7 @@ final class NativePCMRecorder: @unchecked Sendable {
         lifecycle.lock()
         self.converter = nil
         inputFormat = nil
-        outputFormat = nil
+        self.outputFormat = nil
         state = .idle
         lifecycle.broadcast()
         lifecycle.unlock()
