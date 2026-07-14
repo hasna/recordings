@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum PostProcessingMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case off
@@ -218,18 +219,39 @@ public final class ProjectStore: ObservableObject {
 
     private func persistSettings() throws {
         do {
-            try validatePersistedData()
             let data = try JSONEncoder().encode(settings)
             let dir = (filePath as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
-            persistedData = data
+            try withExclusivePersistenceLock {
+                try validatePersistedData()
+                try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+                persistedData = data
+            }
             persistenceError = nil
         } catch {
             if error is ProjectStoreError { throw error }
             persistenceError = "Failed to save projects: \(error.localizedDescription)"
             throw error
         }
+    }
+
+    private func withExclusivePersistenceLock<T>(_ operation: () throws -> T) throws -> T {
+        let lockPath = "\(filePath).lock"
+        let descriptor = Darwin.open(lockPath, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
+        guard descriptor >= 0 else { throw posixError() }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.lockf(descriptor, F_LOCK, 0) == 0 else { throw posixError() }
+        defer { Darwin.lockf(descriptor, F_ULOCK, 0) }
+        return try operation()
+    }
+
+    private func posixError() -> NSError {
+        let code = errno
+        return NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+        )
     }
 
     public func clearPersistenceError() {

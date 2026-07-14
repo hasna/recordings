@@ -194,6 +194,29 @@ struct ProjectStoreTests {
         #expect(try Data(contentsOf: file) == external)
     }
 
+    @Test("a stale app instance cannot overwrite a newer project save")
+    @MainActor
+    func staleStoreCannotOverwriteNewerSave() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("projects.json")
+        try JSONEncoder().encode(ProjectSettings()).write(to: file)
+        let first = ProjectStore(filePath: file.path)
+        let stale = ProjectStore(filePath: file.path)
+
+        first.settings.globalSystemPrompt = "newer value"
+        try first.save()
+        let newerData = try Data(contentsOf: file)
+        stale.settings.globalSystemPrompt = "stale value"
+
+        #expect(throws: ProjectStoreError.self) { try stale.save() }
+        #expect(!stale.canMutateProjects)
+        #expect(try Data(contentsOf: file) == newerData)
+        let persisted = try JSONDecoder().decode(ProjectSettings.self, from: newerData)
+        #expect(persisted.globalSystemPrompt == "newer value")
+    }
+
     @Test("absent project data remains a writable empty store")
     @MainActor
     func absentDataIsWritable() {
