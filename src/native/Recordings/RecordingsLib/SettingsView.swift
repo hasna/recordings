@@ -19,7 +19,15 @@ public struct SettingsView: View {
             projectsTab.tabItem { Label("Projects", systemImage: "folder") }
             shortcutsTab.tabItem { Label("Voice Shortcuts", systemImage: "text.badge.star") }
         }
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: 500)
+        .alert("Project Settings Error", isPresented: Binding(
+            get: { projectStore.persistenceError != nil },
+            set: { if !$0 { projectStore.clearPersistenceError() } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(projectStore.persistenceError ?? "The project settings could not be saved.")
+        }
     }
 
     // MARK: - General
@@ -84,15 +92,25 @@ public struct SettingsView: View {
                 }
             }
 
-            Section("System Prompt") {
+            Section("Transcription Cleanup") {
+                Picker("Mode", selection: $projectStore.settings.postProcessingMode) {
+                    ForEach(PostProcessingMode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: projectStore.settings.postProcessingMode) {
+                    try? projectStore.save()
+                }
                 TextEditor(text: $projectStore.settings.globalSystemPrompt)
                     .frame(height: 80)
                     .onChange(of: projectStore.settings.globalSystemPrompt) {
-                        projectStore.save()
+                        try? projectStore.save()
                     }
-                Text("Applied to all transcription enhancements.")
+                Text("Instructions for post-transcription cleanup and formatting.")
                     .foregroundStyle(.secondary)
             }
+            .disabled(!projectStore.canMutateProjects)
         }
         .formStyle(.grouped).padding()
     }
@@ -109,8 +127,13 @@ public struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
                 Button("Add") {
                     guard !newProjectName.isEmpty else { return }
-                    projectStore.addProject(name: newProjectName)
-                    newProjectName = ""
+                    let name = newProjectName
+                    Task {
+                        do {
+                            try await projectStore.addProject(name: name)
+                            newProjectName = ""
+                        } catch {}
+                    }
                 }
                 .disabled(newProjectName.isEmpty)
             }
@@ -134,12 +157,13 @@ public struct SettingsView: View {
                     }
                     .onDelete { indexSet in
                         for i in indexSet {
-                            projectStore.removeProject(id: projectStore.settings.projects[i].id)
+                            try? projectStore.removeProject(id: projectStore.settings.projects[i].id)
                         }
                     }
                 }
             }
         }
+        .disabled(!projectStore.canMutateProjects)
         .sheet(item: $editingProject) { project in
             ProjectEditView(project: project, store: projectStore) {
                 editingProject = nil
@@ -230,25 +254,29 @@ struct ProjectEditView: View {
                     .textFieldStyle(.roundedBorder)
                 }
 
-                Section("System Prompt") {
+                Section("Transcriber Instructions") {
                     TextEditor(text: Binding(
                         get: { project.systemPrompt ?? "" },
                         set: { project.systemPrompt = $0.isEmpty ? nil : $0 }
                     ))
                     .frame(height: 100)
-                    Text("Additional context for transcription enhancement in this project.")
+                    Text("Project-specific cleanup and formatting instructions.")
                         .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
+            .disabled(!store.canMutateProjects)
 
             HStack {
                 Spacer()
                 Button("Cancel") { onDismiss() }
                 Button("Save") {
-                    store.updateProject(project)
-                    onDismiss()
+                    do {
+                        try store.updateProject(project)
+                        onDismiss()
+                    } catch {}
                 }
+                .disabled(!store.canMutateProjects)
             }
             .padding()
         }

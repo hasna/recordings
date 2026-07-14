@@ -6,7 +6,7 @@ import SwiftUI
 // MARK: - Custom shortcut (not fn — fn is handled by FnKeyMonitor)
 
 extension KeyboardShortcuts.Name {
-    @MainActor static let toggleRecording = Self("toggleRecording", default: .init(.f5))
+    @MainActor public static let toggleRecording = Self("toggleRecording", default: .init(.f5))
 }
 
 // MARK: - Recording Mode
@@ -17,6 +17,13 @@ public enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
     case command = "Command"
 
     public var id: String { rawValue }
+    public var shortName: String {
+        switch self {
+        case .pushToTalk: return "Talk"
+        case .dictation: return "Dictate"
+        case .command: return "Command"
+        }
+    }
     public var icon: String {
         switch self {
         case .pushToTalk: return "hand.tap.fill"
@@ -35,19 +42,57 @@ public enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
 
 // MARK: - Transcription Result
 
-public struct TranscriptionResult: Sendable {
+public struct TranscriptionResult: Identifiable, Sendable {
+    public let id = UUID()
     let rawText: String
     let processedText: String?
     let timestamp: Date
     let projectId: String?
     let projectName: String?
-    var displayText: String { processedText ?? rawText }
+    public var displayText: String { processedText ?? rawText }
+
+    init(rawText: String, processedText: String?, timestamp: Date, projectId: String?, projectName: String?) {
+        self.rawText = rawText
+        self.processedText = processedText
+        self.timestamp = timestamp
+        self.projectId = projectId
+        self.projectName = projectName
+    }
+}
+
+private struct RealtimeFastPathSaveResult: Sendable {
+    let text: String?
+    let error: String?
 }
 
 public enum RecordingTrigger: Equatable, Sendable {
     case manual
     case fnKey
     case keyboardShortcut
+}
+
+struct MicrophonePermissionStartGate {
+    private(set) var activeRequestID: UUID?
+
+    var isAwaitingResponse: Bool {
+        activeRequestID != nil
+    }
+
+    mutating func reserve(requestID: UUID = UUID()) -> UUID? {
+        guard activeRequestID == nil else { return nil }
+        activeRequestID = requestID
+        return requestID
+    }
+
+    mutating func consumeResponse(for requestID: UUID) -> Bool {
+        guard activeRequestID == requestID else { return false }
+        activeRequestID = nil
+        return true
+    }
+
+    mutating func cancel() {
+        activeRequestID = nil
+    }
 }
 
 struct PasteTargetCandidate: Equatable, Sendable {
@@ -143,6 +188,7 @@ public final class RecordingEngine: ObservableObject {
     private var nativeRecorder: NativePCMRecorder?
     private var recordingTimer: Timer?
     private var activeTrigger: RecordingTrigger?
+    private var microphonePermissionStartGate = MicrophonePermissionStartGate()
     private var keyboardShortcutIsDown = false
     private var fnKeyIsDown = false
     private var targetAppBundleIdentifier: String?
@@ -195,7 +241,11 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fnKeyIsDown = true
-                guard self.useFnKey, Self.canBeginRecording(isRecording: self.isRecording, isTranscribing: self.isTranscribing) else { return }
+                guard self.useFnKey, Self.canBeginRecording(
+                    isRecording: self.isRecording,
+                    isTranscribing: self.isTranscribing,
+                    isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse
+                ) else { return }
                 self.startRecording(trigger: .fnKey)
             }
         }
@@ -219,7 +269,11 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, !self.keyboardShortcutIsDown else { return }
                 self.keyboardShortcutIsDown = true
-                guard Self.canBeginRecording(isRecording: self.isRecording, isTranscribing: self.isTranscribing) else { return }
+                guard Self.canBeginRecording(
+                    isRecording: self.isRecording,
+                    isTranscribing: self.isTranscribing,
+                    isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse
+                ) else { return }
                 self.startRecording(trigger: .keyboardShortcut)
             }
         }
@@ -333,7 +387,11 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Start Recording (Streaming)
 
     public func startRecording(trigger: RecordingTrigger = .manual) {
-        guard Self.canBeginRecording(isRecording: isRecording, isTranscribing: isTranscribing) else {
+        guard Self.canBeginRecording(
+            isRecording: isRecording,
+            isTranscribing: isTranscribing,
+            isAwaitingMicrophonePermission: microphonePermissionStartGate.isAwaitingResponse
+        ) else {
             if isTranscribing {
                 statusMessage = "Finish transcribing before recording again"
             }
@@ -350,11 +408,22 @@ public final class RecordingEngine: ObservableObject {
         targetAppPid = isOwnApp ? nil : frontmostApp?.processIdentifier
 
         if let store = projectStore {
+            guard store.isReadyForRecording else {
+                resetRecordingIntent()
+                statusMessage = store.persistenceError ?? "Preparing projects before recording"
+                return
+            }
             let windowTitle = Self.focusedWindowTitle(pid: frontmostApp?.processIdentifier)
             let projects = store.settings.projects
             let detected = ProjectStore.matchProject(windowTitle: windowTitle, bundleId: targetAppBundleIdentifier, projects: projects)
             if let detected {
-                store.setActive(detected.id)
+                do {
+                    try store.setActive(detected.id)
+                } catch {
+                    resetRecordingIntent()
+                    statusMessage = store.persistenceError ?? "Failed to select project"
+                    return
+                }
             }
         }
 
@@ -362,11 +431,16 @@ public final class RecordingEngine: ObservableObject {
         case .authorized:
             startNativeRecording()
         case .notDetermined:
+            guard let requestID = microphonePermissionStartGate.reserve() else { return }
             statusMessage = "Allow microphone access to record"
             log("requesting microphone access before recording")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    guard self.microphonePermissionStartGate.consumeResponse(for: requestID) else {
+                        self.log("ignoring stale microphone permission response")
+                        return
+                    }
                     self.log("microphone access response granted=\(granted)")
                     if granted {
                         guard self.shouldContinueStarting(trigger: trigger) else {
@@ -392,8 +466,12 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
-    nonisolated static func canBeginRecording(isRecording: Bool, isTranscribing: Bool) -> Bool {
-        !isRecording && !isTranscribing
+    nonisolated static func canBeginRecording(
+        isRecording: Bool,
+        isTranscribing: Bool,
+        isAwaitingMicrophonePermission: Bool = false
+    ) -> Bool {
+        !isRecording && !isTranscribing && !isAwaitingMicrophonePermission
     }
 
     nonisolated static func shouldContinueStartingAfterPermission(
@@ -516,6 +594,35 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    // MARK: - Cancel (discard without transcribing)
+
+    public func cancelRecording() {
+        guard isRecording else { return }
+        log("cancelRecording")
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        let recorder = nativeRecorder
+        nativeRecorder = nil
+        recorder?.stop()
+
+        realtimeClient?.stop()
+        realtimeClient = nil
+        streamingTask?.cancel()
+        streamingTask = nil
+        pcmStreamPipe?.cancel()
+        pcmStreamPipe = nil
+
+        isRecording = false
+        isTranscribing = false
+        liveTranscriptionText = ""
+        recordedPCM.removeAll(keepingCapacity: true)
+        activeAudioPath = nil
+        resetRecordingIntent()
+        statusMessage = "Ready"
+    }
+
     // MARK: - Stop & Transcribe
 
     public func stopAndTranscribe() {
@@ -549,17 +656,77 @@ public final class RecordingEngine: ObservableObject {
             }
             self.log("captured pcm bytes=\(self.recordedPCM.count)")
 
-            let streamingResult = await client?.finish(timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds) ?? ""
+            let streamingResult = await client?.finish(timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds)
+                ?? RealtimeFinishResult(text: "", settled: false, error: nil)
 
             self.realtimeClient = nil
             self.streamingTask?.cancel()
             self.streamingTask = nil
 
-            let realtimeText = Self.normalizedRealtimeTranscript(streamingResult)
+            if let error = streamingResult.error {
+                self.log("realtime finish reported error=\(error)")
+            }
+
+            let realtimeText = Self.normalizedRealtimeTranscript(streamingResult.text)
+            let safeRealtimeFallbackText = Self.safeRealtimeFallbackTranscript(
+                realtimeText: streamingResult.text,
+                language: self.transcriptionLanguage
+            )
+            let realtimeFastPathText = streamingResult.settled && streamingResult.error == nil ? Self.realtimeFastPathTranscript(
+                realtimeText: streamingResult.text,
+                pcmByteCount: self.recordedPCM.count,
+                language: self.transcriptionLanguage
+            ) : nil
 
             self.liveTranscriptionText = ""
 
-            if let audioPath, self.writeCapturedWAV(to: audioPath) {
+            if let realtimeFastPathText {
+                let pcmData = self.recordedPCM
+                let durationMs = Int(self.recordingDuration * 1_000)
+                self.log("using realtime fast path chars=\(realtimeFastPathText.count) pcmBytes=\(pcmData.count)")
+                let saveResult = await Self.saveRealtimeTranscript(
+                    text: realtimeFastPathText,
+                    audioPath: audioPath,
+                    pcmData: pcmData,
+                    durationMs: durationMs,
+                    activeProjectId: activeProjectId,
+                    transcriberPrompt: self.projectStore?.effectiveSystemPrompt ?? "",
+                    postProcessingMode: self.projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue,
+                    language: OpenAIAPIKeyStore.apiLanguageHint(for: self.transcriptionLanguage),
+                    homePath: self.home
+                )
+                guard let savedText = saveResult.text else {
+                    self.log("realtime fast-path save failed error=\(saveResult.error ?? "unknown")")
+                    if let audioPath, FileManager.default.fileExists(atPath: audioPath) || self.writeCapturedWAV(to: audioPath) {
+                        self.fallbackTranscribe(
+                            audioPath: audioPath,
+                            curMode: curMode,
+                            targetAppBundleIdentifier: targetAppBundleIdentifier,
+                            targetAppPid: targetAppPid,
+                            activeProjectId: activeProjectId,
+                            activeProjectName: activeProjectName,
+                            realtimeText: safeRealtimeFallbackText
+                        )
+                    } else {
+                        self.finish(saveResult.error ?? "Failed to save transcription")
+                    }
+                    self.activeAudioPath = nil
+                    self.recordedPCM.removeAll(keepingCapacity: true)
+                    return
+                }
+                self.isTranscribing = false
+                self.finishWithText(
+                    savedText,
+                    curMode: curMode,
+                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
+                    activeProjectId: activeProjectId,
+                    activeProjectName: activeProjectName
+                )
+            } else if let audioPath, self.writeCapturedWAV(to: audioPath) {
+                if realtimeText != nil, !streamingResult.settled {
+                    self.log("realtime fast path skipped because final transcript did not settle")
+                }
                 self.log("transcribing captured full audio with quality model audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
@@ -568,10 +735,14 @@ public final class RecordingEngine: ObservableObject {
                     targetAppPid: targetAppPid,
                     activeProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
-                    realtimeText: realtimeText
+                    realtimeText: safeRealtimeFallbackText
                 )
             } else {
-                let resolved = Self.resolveFinalTranscript(cliText: nil, cliError: "No audio captured", realtimeText: realtimeText)
+                let resolved = Self.resolveFinalTranscript(
+                    cliText: nil,
+                    cliError: "No audio captured",
+                    realtimeText: safeRealtimeFallbackText
+                )
                 if let text = resolved.text {
                     self.log("no audio file written; using realtime transcript chars=\(text.count)")
                     self.isTranscribing = false
@@ -624,30 +795,49 @@ public final class RecordingEngine: ObservableObject {
         pcmByteCount: Int,
         language: String = "en"
     ) -> String? {
-        guard let text = normalizedRealtimeTranscript(realtimeText) else { return nil }
-        guard isSafeRealtimeFastPathText(rawText: realtimeText ?? "", cleanedText: text, language: language) else {
-            return nil
-        }
+        guard let text = safeRealtimeFallbackTranscript(realtimeText: realtimeText, language: language) else { return nil }
         return shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount) ? nil : text
+    }
+
+    public nonisolated static func safeRealtimeFallbackTranscript(
+        realtimeText: String?,
+        language: String = "en"
+    ) -> String? {
+        guard let text = normalizedRealtimeTranscript(realtimeText) else { return nil }
+        guard isSafeRealtimeFastPathText(
+            rawText: realtimeText ?? "",
+            cleanedText: text,
+            language: language
+        ) else { return nil }
+        return text
     }
 
     public nonisolated static func isSafeRealtimeFastPathText(rawText: String, cleanedText: String, language: String) -> Bool {
         guard !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let languageHint = OpenAIAPIKeyStore.apiLanguageHint(for: language)
-        guard languageHint == "en" else { return true }
 
         let rawTrimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawNormalized = normalizedTranscriptText(rawTrimmed)
         let cleanedNormalized = normalizedTranscriptText(cleanedText)
         guard !cleanedNormalized.isEmpty else { return false }
+        if languageHint == "en" {
+            guard cjkLetterCount(in: cleanedNormalized) == 0 else { return false }
+        }
         guard rawNormalized != cleanedNormalized else { return true }
         guard cjkLetterCount(in: cleanedNormalized) == 0 else { return false }
 
-        let cleanedWords = canonicalTranscriptWords(cleanedNormalized, droppingArtifacts: false)
+        let cleanedWords = canonicalTranscriptWords(cleanedNormalized)
         guard !cleanedWords.isEmpty else { return false }
 
-        let rawWords = canonicalTranscriptWords(rawNormalized, droppingArtifacts: true)
-        guard isSubsequence(cleanedWords, of: rawWords) else { return false }
+        // CJK fragments are known realtime transport artifacts, but repeated words and
+        // fillers may be intentional speech. The fast path is only safe when cleanup
+        // preserves every lexical token; otherwise the whole WAV is transcribed.
+        let rawWords = languageHint == "en"
+            ? canonicalTranscriptWordsPreservingSpeechTokens(rawNormalized)
+            : canonicalTranscriptWords(rawNormalized)
+        guard cleanedWords == rawWords else { return false }
+
+        guard languageHint == "en" else { return true }
 
         let rawCJKCount = cjkLetterCount(in: rawNormalized)
         if rawCJKCount > 0 {
@@ -656,8 +846,7 @@ public final class RecordingEngine: ObservableObject {
             guard rawCJKCount <= max(6, cleanedLatinCount / 3) else { return false }
         }
 
-        let removedWordCount = max(0, rawWords.count - cleanedWords.count)
-        return removedWordCount <= max(8, cleanedWords.count + 3)
+        return true
     }
 
     public nonisolated static func wasRealtimeTranscriptRepaired(rawText: String, cleanedText: String) -> Bool {
@@ -691,17 +880,11 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static func removeStandaloneRealtimeArtifacts(from text: String) -> String {
         let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
-        let englishDominant = latinLetterCount(in: text) >= max(12, cjkLetterCount(in: text) * 3)
         let words = text.split(separator: " ").compactMap { rawWord -> String? in
             let normalized = rawWord
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
                 .lowercased()
             return artifactTokens.contains(normalized) ? nil : String(rawWord)
-        }.compactMap { word -> String? in
-            guard englishDominant else { return word }
-            let normalized = word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
-            guard !normalized.isEmpty else { return word }
-            return isMostlyCJKArtifact(normalized) ? nil : word
         }
         return words.joined(separator: " ")
     }
@@ -718,41 +901,32 @@ public final class RecordingEngine: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private nonisolated static func canonicalTranscriptWords(_ text: String, droppingArtifacts: Bool) -> [String] {
+    private nonisolated static func canonicalTranscriptWords(_ text: String) -> [String] {
         text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).compactMap { rawWord in
-            var normalized = String(rawWord)
+            let normalized = String(rawWord)
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
                 .lowercased()
-            if droppingArtifacts {
-                normalized = normalized.unicodeScalars.reduce(into: "") { output, scalar in
-                    if !isCJKScalar(scalar) {
-                        output.unicodeScalars.append(scalar)
-                    }
-                }
-            }
             guard !normalized.isEmpty else { return nil }
-            if droppingArtifacts, isStandaloneRealtimeArtifact(normalized) {
-                return nil
-            }
             return normalized
         }
     }
 
-    private nonisolated static func isSubsequence(_ needle: [String], of haystack: [String]) -> Bool {
-        guard !needle.isEmpty else { return true }
-        var index = 0
-        for word in haystack where word == needle[index] {
-            index += 1
-            if index == needle.count {
-                return true
+    private nonisolated static func canonicalTranscriptWordsPreservingSpeechTokens(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).compactMap { rawWord in
+            var normalized = String(rawWord)
+                .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+                .lowercased()
+            if normalized == "어" || normalized == "음" {
+                return nil
             }
+            if normalized.hasSuffix("어") {
+                let withoutSuffix = String(normalized.dropLast())
+                if latinLetterCount(in: withoutSuffix) > 0 {
+                    normalized = withoutSuffix
+                }
+            }
+            return normalized.isEmpty ? nil : normalized
         }
-        return false
-    }
-
-    private nonisolated static func isStandaloneRealtimeArtifact(_ word: String) -> Bool {
-        let artifactTokens: Set<String> = ["어", "음", "um", "umm", "uh", "uhh", "erm", "hmm", "eh"]
-        return artifactTokens.contains(word) || isMostlyCJKArtifact(word)
     }
 
     private nonisolated static func collapseAdjacentDuplicateWords(in text: String) -> String {
@@ -798,13 +972,6 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static func normalizedTranscriptWord(_ word: String) -> String {
         word.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines)).lowercased()
-    }
-
-    private nonisolated static func isMostlyCJKArtifact(_ word: String) -> Bool {
-        let cjkCount = word.unicodeScalars.filter(isCJKScalar).count
-        guard cjkCount > 0 else { return false }
-        let letterCount = word.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
-        return cjkCount >= max(1, letterCount - cjkCount)
     }
 
     private nonisolated static func latinLetterCount(in text: String) -> Int {
@@ -872,21 +1039,68 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
-    private nonisolated static func saveCapturedWAVInBackground(pcmData: Data, audioPath: String, homePath: String) {
-        Task.detached(priority: .utility) {
+    private nonisolated static func saveRealtimeTranscript(
+        text: String,
+        audioPath: String?,
+        pcmData: Data,
+        durationMs: Int,
+        activeProjectId: String?,
+        transcriberPrompt: String,
+        postProcessingMode: String,
+        language: String,
+        homePath: String
+    ) async -> RealtimeFastPathSaveResult {
+        await Task.detached(priority: .utility) {
             do {
-                try Self.writeWAV(
-                    pcmData: pcmData,
-                    sampleRate: 24_000,
-                    channelCount: 1,
-                    bitsPerSample: 16,
-                    to: URL(fileURLWithPath: audioPath)
+                var savedAudioPath: String?
+                if let audioPath, !pcmData.isEmpty {
+                    try Self.writeWAV(
+                        pcmData: pcmData,
+                        sampleRate: 24_000,
+                        channelCount: 1,
+                        bitsPerSample: 16,
+                        to: URL(fileURLWithPath: audioPath)
+                    )
+                    savedAudioPath = audioPath
+                    NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
+                }
+
+                let textFile = try Self.writeTemporaryTranscript(text: text, homePath: homePath)
+                defer { try? FileManager.default.removeItem(atPath: textFile) }
+
+                let args = saveTextCLIArgs(
+                    textFile: textFile,
+                    audioPath: savedAudioPath,
+                    activeProjectId: activeProjectId,
+                    transcriberPrompt: transcriberPrompt,
+                    postProcessingMode: postProcessingMode,
+                    language: language,
+                    durationMs: durationMs,
+                    source: "realtime_fast_path",
+                    modelUsed: RealtimeTranscriptionClient.transcriptionModelID
                 )
-                NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
+                let output = CLIRunner.run(args, home: homePath)
+                if let error = CLIRunner.parseError(output) {
+                    return RealtimeFastPathSaveResult(text: nil, error: error)
+                }
+
+                NativeAppLog.write("realtime fast-path save completed", homePath: homePath)
+                return RealtimeFastPathSaveResult(text: CLIRunner.parseJSON(output) ?? text, error: nil)
             } catch {
-                NativeAppLog.write("failed to save wav after realtime fast path error=\(error.localizedDescription)", homePath: homePath)
+                return RealtimeFastPathSaveResult(text: nil, error: error.localizedDescription)
             }
-        }
+        }.value
+    }
+
+    private nonisolated static func writeTemporaryTranscript(text: String, homePath: String) throws -> String {
+        let dir = URL(fileURLWithPath: homePath)
+            .appendingPathComponent(".hasna", isDirectory: true)
+            .appendingPathComponent("recordings", isDirectory: true)
+            .appendingPathComponent("tmp", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("realtime-\(UUID().uuidString).txt")
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url.path
     }
 
     private nonisolated static func writeWAV(pcmData: Data, sampleRate: UInt32, channelCount: UInt16, bitsPerSample: UInt16, to url: URL) throws {
@@ -944,8 +1158,17 @@ public final class RecordingEngine: ObservableObject {
         isTranscribing = true
         statusMessage = "Transcribing..."
 
+        // Tag the persisted recording with the active project so the app's library/filters
+        // (which use the same local project id) line up. Global flags precede the subcommand.
+        let transcribeArgs = Self.transcribeCLIArgs(
+            audioPath: audioPath,
+            activeProjectId: activeProjectId,
+            transcriberPrompt: projectStore?.effectiveSystemPrompt ?? "",
+            postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+        )
+
         Task.detached {
-            let output = CLIRunner.run(["--json", "transcribe", audioPath, "--no-enhance"], home: homePath)
+            let output = CLIRunner.run(transcribeArgs, home: homePath)
             let cliError = CLIRunner.parseError(output)
             let cliText = cliError == nil ? CLIRunner.parseJSON(output) : nil
 
@@ -986,6 +1209,67 @@ public final class RecordingEngine: ObservableObject {
         return wavFiles.first.map { "\(audioDir)/\($0)" }
     }
 
+    nonisolated static func transcribeCLIArgs(
+        audioPath: String,
+        activeProjectId: String?,
+        transcriberPrompt: String,
+        postProcessingMode: String
+    ) -> [String] {
+        var args = ["--json"]
+        if let activeProjectId, !activeProjectId.isEmpty {
+            args += ["--project", activeProjectId]
+        }
+        args += ["transcribe", audioPath]
+
+        let mode = PostProcessingMode(rawValue: postProcessingMode)?.rawValue ?? PostProcessingMode.auto.rawValue
+        args += ["--post-processing", mode]
+
+        let prompt = transcriberPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !prompt.isEmpty {
+            args += ["--transcriber-prompt", prompt]
+        }
+
+        return args
+    }
+
+    nonisolated static func saveTextCLIArgs(
+        textFile: String,
+        audioPath: String?,
+        activeProjectId: String?,
+        transcriberPrompt: String,
+        postProcessingMode: String,
+        language: String,
+        durationMs: Int,
+        source: String,
+        modelUsed: String
+    ) -> [String] {
+        var args = ["--json"]
+        if let activeProjectId, !activeProjectId.isEmpty {
+            args += ["--project", activeProjectId]
+        }
+        args += [
+            "save-text",
+            "--text-file", textFile,
+            "--source", source,
+            "--model-used", modelUsed,
+            "--post-processing", PostProcessingMode(rawValue: postProcessingMode)?.rawValue ?? PostProcessingMode.auto.rawValue,
+        ]
+        if let audioPath, !audioPath.isEmpty {
+            args += ["--audio-path", audioPath]
+        }
+        if durationMs > 0 {
+            args += ["--duration-ms", String(durationMs)]
+        }
+        if !language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--language", language]
+        }
+        let prompt = transcriberPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !prompt.isEmpty {
+            args += ["--transcriber-prompt", prompt]
+        }
+        return args
+    }
+
     private func finish(_ msg: String) {
         log("finish status=\(msg)")
         isTranscribing = false
@@ -995,6 +1279,7 @@ public final class RecordingEngine: ObservableObject {
 
     private func resetRecordingIntent() {
         activeTrigger = nil
+        microphonePermissionStartGate.cancel()
         keyboardShortcutIsDown = false
         fnKeyIsDown = false
         targetAppBundleIdentifier = nil
@@ -1082,7 +1367,7 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
+    public func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
         log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") pid=\(targetAppPid.map(String.init) ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
         let previousClipboard = restoreClipboard ? ClipboardSnapshot(pasteboard: pb) : nil
@@ -1269,43 +1554,103 @@ private struct ClipboardSnapshot {
 
 // MARK: - CLI Runner
 
+private final class ProcessDataCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func store(_ data: Data) {
+        lock.lock()
+        storage = data
+        lock.unlock()
+    }
+
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 enum CLIRunner: Sendable {
+    struct ProcessOutput: Sendable {
+        let stdout: String
+        let stderr: String
+        let terminationStatus: Int32
+    }
+
     static func run(_ args: [String], home: String) -> String {
         let bin = "\(home)/.bun/bin/recordings"
-        let proc = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
+        let executable: String
+        let arguments: [String]
         if FileManager.default.fileExists(atPath: bin) {
-            proc.executableURL = URL(fileURLWithPath: bin)
-            proc.arguments = args
+            executable = bin
+            arguments = args
         } else {
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["recordings"] + args
+            executable = "/usr/bin/env"
+            arguments = ["recordings"] + args
         }
-        proc.environment = ProcessInfo.processInfo.environment.merging([
+        let environment = ProcessInfo.processInfo.environment.merging([
             "PATH": "\(home)/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         ]) { _, new in new }
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
         do {
-            try proc.run()
-            proc.waitUntilExit()
-            let stdout = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            if proc.terminationStatus != 0 {
-                let details = stderr.isEmpty ? stdout : stderr
-                return "ERROR: \(details.trimmingCharacters(in: .whitespacesAndNewlines))"
+            let output = try runExecutable(executable, arguments: arguments, environment: environment)
+            if output.terminationStatus != 0 {
+                let details = output.stderr.isEmpty ? output.stdout : output.stderr
+                return "ERROR: \(NativeErrorSanitizer.sanitize(details.trimmingCharacters(in: .whitespacesAndNewlines)))"
             }
-            return stdout.isEmpty ? stderr : stdout
+            return output.stdout.isEmpty
+                ? NativeErrorSanitizer.sanitize(output.stderr)
+                : output.stdout
         } catch {
-            return "ERROR: \(error.localizedDescription)"
+            return "ERROR: \(NativeErrorSanitizer.sanitize(error.localizedDescription))"
         }
+    }
+
+    static func runExecutable(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) throws -> ProcessOutput {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = environment
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+
+        let stdoutCapture = ProcessDataCapture()
+        let stderrCapture = ProcessDataCapture()
+        let readers = DispatchGroup()
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stdoutCapture.store(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrCapture.store(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+
+        process.waitUntilExit()
+        readers.wait()
+        return ProcessOutput(
+            stdout: String(decoding: stdoutCapture.data, as: UTF8.self),
+            stderr: String(decoding: stderrCapture.data, as: UTF8.self),
+            terminationStatus: process.terminationStatus
+        )
     }
 
     static func parseError(_ output: String) -> String? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("ERROR:") else { return nil }
-        let message = trimmed.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = NativeErrorSanitizer.sanitize(
+            trimmed.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        )
         let lowercased = message.lowercased()
         if lowercased.contains("401") || lowercased.contains("incorrect api key")
             || lowercased.contains("invalid_api_key") || lowercased.contains("invalid or expired") {

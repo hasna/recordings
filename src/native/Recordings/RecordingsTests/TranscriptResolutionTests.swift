@@ -70,7 +70,7 @@ struct TranscriptResolutionTests {
             rawText: "Actually 리수 Zoom your goal",
             cleanedText: "Actually Zoom your goal",
             language: "en"
-        ))
+        ) == false)
         #expect(RecordingEngine.isSafeRealtimeFastPathText(
             rawText: "Actually Zoom your goal",
             cleanedText: "Actually Zoom your goal",
@@ -81,9 +81,70 @@ struct TranscriptResolutionTests {
             cleanedText: "Actually invented Zoom your goal",
             language: "en"
         ) == false)
+        #expect(RecordingEngine.isSafeRealtimeFastPathText(
+            rawText: "working어",
+            cleanedText: "working",
+            language: "en"
+        ))
         #expect(RecordingEngine.wasRealtimeTranscriptRepaired(
             rawText: "working어",
             cleanedText: "working"
         ))
+    }
+
+    @Test("Realtime fast path rejects cleanup that removes spoken repetition")
+    func repeatedSpeechFallsBackToWholeAudio() {
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "very very good",
+            pcmByteCount: 24_000,
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "muy muy bien",
+            pcmByteCount: 24_000,
+            language: "es"
+        ) == nil)
+    }
+
+    @Test("Realtime fast path rejects cleanup that removes spoken filler words")
+    func fillerSpeechFallsBackToWholeAudio() {
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "um I agree",
+            pcmByteCount: 24_000,
+            language: "en"
+        ) == nil)
+    }
+
+    @Test("Lexically altered realtime text is never used after whole-audio failure")
+    func alteredRealtimeTextIsNotAFailureFallback() {
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "very very good",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "um I agree",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "Actually 리수 Zoom your goal",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "Please send 五百 dollars to Alice",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "这是 完全 错误 的 实时 转录 内容",
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.realtimeFastPathTranscript(
+            realtimeText: "这是 完全 错误 的 实时 转录 内容",
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.safeRealtimeFallbackTranscript(
+            realtimeText: "这是有效内容",
+            language: "zh"
+        ) == "这是有效内容")
     }
 }

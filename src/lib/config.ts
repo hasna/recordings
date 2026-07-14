@@ -1,18 +1,33 @@
 import { copyFileSync, existsSync, readFileSync, mkdirSync, readdirSync, statSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { homedir } from "os";
-import type { RecordingsConfig } from "../types/index.js";
+import type { PostProcessingMode, RecordingsConfig } from "../types/index.js";
+
+const POST_PROCESSING_MODES = new Set<PostProcessingMode>([
+  "off",
+  "auto",
+  "always",
+]);
+export const DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
+export const DEFAULT_REALTIME_SESSION_MODEL = "gpt-realtime";
+export const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper";
 
 export const DEFAULT_CONFIG: RecordingsConfig = {
   openai_api_key: "",
   enhancement_api_key: "",
-  transcription_model: "gpt-4o-transcribe",
+  transcription_model: DEFAULT_TRANSCRIPTION_MODEL,
+  realtime_session_model: DEFAULT_REALTIME_SESSION_MODEL,
+  realtime_transcription_model: DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
   enhancement_model: "gpt-4o",
+  transcriber_model: "gpt-4o",
   language: "en",
   audio_format: "wav",
   sample_rate: 16000,
   record_command: "sox",
   hotkey: "space",
+  transcription_prompt: "",
+  transcriber_prompt: "",
+  post_processing_mode: "auto",
   auto_enhance: true,
   enhance_triggers: [
     "say it better",
@@ -30,10 +45,14 @@ export const DEFAULT_CONFIG: RecordingsConfig = {
   db_path: "",
   audio_dir: "",
   max_recording_seconds: 1800,
+  config_warnings: [],
 };
 
 export function loadConfig(configPath?: string): RecordingsConfig {
   const config = { ...DEFAULT_CONFIG };
+  config.config_warnings = [];
+  let explicitPostProcessingMode = false;
+  let explicitTranscriberModel = false;
 
   // 1. Load from config file
   const filePath =
@@ -50,6 +69,8 @@ export function loadConfig(configPath?: string): RecordingsConfig {
       const raw = readFileSync(filePath, "utf-8");
       const fileConfig = JSON.parse(raw) as Partial<RecordingsConfig>;
       const expanded = expandEnvBackedConfig(fileConfig);
+      explicitPostProcessingMode = typeof fileConfig.post_processing_mode === "string";
+      explicitTranscriberModel = typeof fileConfig.transcriber_model === "string";
       Object.assign(config, expanded);
       fileProvidedOpenAIKey =
         typeof expanded.openai_api_key === "string" &&
@@ -76,11 +97,40 @@ export function loadConfig(configPath?: string): RecordingsConfig {
   if (process.env.RECORDINGS_MODEL) {
     config.transcription_model = process.env.RECORDINGS_MODEL;
   }
+  if (process.env.RECORDINGS_REALTIME_SESSION_MODEL) {
+    config.realtime_session_model = process.env.RECORDINGS_REALTIME_SESSION_MODEL;
+  }
+  if (process.env.RECORDINGS_REALTIME_TRANSCRIPTION_MODEL) {
+    config.realtime_transcription_model = process.env.RECORDINGS_REALTIME_TRANSCRIPTION_MODEL;
+  }
   if (process.env.RECORDINGS_ENHANCEMENT_MODEL) {
     config.enhancement_model = process.env.RECORDINGS_ENHANCEMENT_MODEL;
   }
+  if (process.env.RECORDINGS_TRANSCRIBER_MODEL) {
+    config.transcriber_model = process.env.RECORDINGS_TRANSCRIBER_MODEL;
+    explicitTranscriberModel = true;
+  }
   if (process.env.RECORDINGS_LANGUAGE) {
     config.language = process.env.RECORDINGS_LANGUAGE;
+  }
+  if (process.env.RECORDINGS_TRANSCRIPTION_PROMPT) {
+    config.transcription_prompt = process.env.RECORDINGS_TRANSCRIPTION_PROMPT;
+  }
+  if (process.env.RECORDINGS_TRANSCRIBER_PROMPT) {
+    config.transcriber_prompt = process.env.RECORDINGS_TRANSCRIBER_PROMPT;
+  }
+  if (process.env.RECORDINGS_POST_PROCESSING_MODE) {
+    config.post_processing_mode = normalizePostProcessingMode(
+      process.env.RECORDINGS_POST_PROCESSING_MODE,
+      config.post_processing_mode ?? "auto"
+    );
+    explicitPostProcessingMode = true;
+  }
+  if (process.env.RECORDINGS_AUTO_ENHANCE) {
+    config.auto_enhance = parseBooleanEnv(
+      process.env.RECORDINGS_AUTO_ENHANCE,
+      config.auto_enhance
+    );
   }
   if (process.env.HASNA_RECORDINGS_DB_PATH) {
     config.db_path = process.env.HASNA_RECORDINGS_DB_PATH;
@@ -105,6 +155,12 @@ export function loadConfig(configPath?: string): RecordingsConfig {
     config.enhancement_api_key =
       config.openai_api_key || loadSecretKey("OPENAI_API_KEY");
   }
+  if (!explicitTranscriberModel) {
+    config.transcriber_model = config.enhancement_model;
+  }
+
+  normalizeModelSlots(config);
+  normalizePostProcessingConfig(config, explicitPostProcessingMode);
 
   // 4. Set defaults for paths
   if (!config.db_path) {
@@ -115,6 +171,105 @@ export function loadConfig(configPath?: string): RecordingsConfig {
   }
 
   return config;
+}
+
+export function normalizeModelSlots(config: RecordingsConfig): RecordingsConfig {
+  const warnings = config.config_warnings ?? [];
+  config.config_warnings = warnings;
+
+  const boundedModel = config.transcription_model?.trim() || DEFAULT_TRANSCRIPTION_MODEL;
+  if (isRealtimeOnlyModel(boundedModel)) {
+    warnings.push(
+      `Ignoring RECORDINGS_MODEL=${boundedModel}; bounded transcription uses ${DEFAULT_TRANSCRIPTION_MODEL}.`
+    );
+    config.transcription_model = DEFAULT_TRANSCRIPTION_MODEL;
+  } else {
+    config.transcription_model = boundedModel;
+  }
+
+  const realtimeSessionModel = config.realtime_session_model?.trim() || DEFAULT_REALTIME_SESSION_MODEL;
+  if (isTranscriptionOnlyModel(realtimeSessionModel)) {
+    warnings.push(
+      `Ignoring realtime session model ${realtimeSessionModel}; use ${DEFAULT_REALTIME_TRANSCRIPTION_MODEL} as realtime_transcription_model instead.`
+    );
+    config.realtime_session_model = DEFAULT_REALTIME_SESSION_MODEL;
+  } else {
+    config.realtime_session_model = realtimeSessionModel;
+  }
+
+  const realtimeTranscriptionModel = config.realtime_transcription_model?.trim()
+    || DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
+  if (!isRealtimeTranscriptionModel(realtimeTranscriptionModel)) {
+    warnings.push(
+      `Ignoring realtime transcription model ${realtimeTranscriptionModel}; realtime transcription uses ${DEFAULT_REALTIME_TRANSCRIPTION_MODEL}.`
+    );
+    config.realtime_transcription_model = DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
+  } else {
+    config.realtime_transcription_model = realtimeTranscriptionModel;
+  }
+
+  return config;
+}
+
+export function isTranscriptionOnlyModel(model: string): boolean {
+  const m = model.trim().toLowerCase();
+  return m === "whisper-1"
+    || m === DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+    || m.includes("transcribe");
+}
+
+function isRealtimeOnlyModel(model: string): boolean {
+  const m = model.trim().toLowerCase();
+  return m.startsWith("gpt-realtime");
+}
+
+function isRealtimeTranscriptionModel(model: string): boolean {
+  const m = model.trim().toLowerCase();
+  return m === DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+    || (m.startsWith("gpt-realtime") && m.includes("whisper"));
+}
+
+export function normalizePostProcessingMode(
+  value: string | undefined,
+  fallback: PostProcessingMode = "auto"
+): PostProcessingMode {
+  const mode = value?.trim().toLowerCase();
+  if (mode && POST_PROCESSING_MODES.has(mode as PostProcessingMode)) {
+    return mode as PostProcessingMode;
+  }
+  return fallback;
+}
+
+export function normalizePostProcessingConfig(
+  config: RecordingsConfig,
+  preferPostProcessingMode = true
+): RecordingsConfig {
+  if (preferPostProcessingMode) {
+    config.post_processing_mode = normalizePostProcessingMode(
+      config.post_processing_mode,
+      "auto"
+    );
+    config.auto_enhance = config.post_processing_mode !== "off";
+    return config;
+  }
+
+  if (config.auto_enhance === false) {
+    config.post_processing_mode = "off";
+  } else {
+    config.post_processing_mode = normalizePostProcessingMode(
+      config.post_processing_mode,
+      "auto"
+    );
+  }
+  config.auto_enhance = config.post_processing_mode !== "off";
+  return config;
+}
+
+function parseBooleanEnv(value: string, fallback: boolean): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
 function expandEnvBackedConfig(config: Partial<RecordingsConfig>): Partial<RecordingsConfig> {

@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import RecordingsLib
 
 // MARK: - RealtimeTranscriptionClient Event Parsing Tests
@@ -6,6 +7,8 @@ import Testing
 struct RealtimeTranscriptionTests {
     @Test("Model ID is set to low-latency realtime transcription model")
     func modelID() {
+        #expect(RealtimeTranscriptionClient.sessionModelID == "gpt-realtime")
+        #expect(RealtimeTranscriptionClient.transcriptionModelID == "gpt-realtime-whisper")
         #expect(RealtimeTranscriptionClient.modelID == "gpt-realtime-whisper")
         #expect(RealtimeTranscriptionClient.transcriptionDelay == "low")
     }
@@ -71,6 +74,44 @@ struct RealtimeTranscriptionTests {
         #expect(RealtimeTranscriptionClient.parseErrorTestHelper(errorJSON) == "Model not found")
     }
 
+    @Test("Realtime error parsing redacts credentials before returning display-safe text")
+    func parseErrorMessageRedactsCredentials() throws {
+        let keyFragment = "sk-" + "synthetic-fragment-123456"
+        let bearerFragment = "synthetic-bearer-123456"
+        let tokenFragment = "synthetic-query-token-123456"
+        let message = "401 Incorrect API key provided: \(keyFragment); Authorization: Bearer \(bearerFragment); request?token=\(tokenFragment)"
+        let event: [String: Any] = ["type": "error", "error": ["message": message, "code": 401]]
+        let data = try JSONSerialization.data(withJSONObject: event)
+        let json = try #require(String(data: data, encoding: .utf8))
+
+        let parsed = try #require(RealtimeTranscriptionClient.parseErrorTestHelper(json))
+
+        #expect(!parsed.contains(keyFragment))
+        #expect(!parsed.contains(bearerFragment))
+        #expect(!parsed.contains(tokenFragment))
+        #expect(parsed.contains("401 Incorrect API key provided"))
+    }
+
+    @Test("Realtime error events store only sanitized state and preserve ordinary errors")
+    @MainActor
+    func errorEventStateIsSanitized() throws {
+        let keyFragment = "sk-" + "synthetic-state-fragment-123456"
+        let event: [String: Any] = [
+            "type": "conversation.item.input_audio_transcription.failed",
+            "error": ["message": "401 rejected \(keyFragment)"],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: event)
+        let json = try #require(String(data: data, encoding: .utf8))
+        let client = RealtimeTranscriptionClient(apiKey: "synthetic-test-value", homePath: "/tmp")
+
+        client.handleEventTestHelper(json)
+
+        #expect(client.error == "401 rejected [REDACTED]")
+        #expect(RealtimeTranscriptionClient.parseErrorTestHelper(
+            #"{"type":"error","error":{"message":"Model not found"}}"#
+        ) == "Model not found")
+    }
+
     @Test("Builds strict verbatim prompt with vocabulary context")
     func buildPrompt() {
         let prompt = RealtimeTranscriptionClient.buildPromptTestHelper("Alumia, Takumi")
@@ -100,8 +141,7 @@ struct RealtimeTranscriptionTests {
         #expect(transcription?["prompt"] as? String == nil)
         #expect(transcription?["language"] as? String == "en")
 
-        let turnDetection = input?["turn_detection"] as? [String: Any]
-        #expect(turnDetection == nil)
+        #expect(input?["turn_detection"] is NSNull)
 
         let include = session?["include"] as? [String]
         #expect(include == nil)
@@ -119,6 +159,55 @@ struct RealtimeTranscriptionTests {
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 5_760) == true)
     }
 
+    @Test("Realtime finish only settles after completed transcription events")
+    func finishSettledDecision() {
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: true,
+            completedCountBeforeCommit: 0,
+            completedEventCount: 0,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: true,
+            uncommittedAudioBytes: 0,
+            secondsSinceLastEvent: 0.5
+        ) == false)
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: true,
+            completedCountBeforeCommit: 0,
+            completedEventCount: 1,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: false,
+            uncommittedAudioBytes: 0,
+            secondsSinceLastEvent: 0.5
+        ))
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: true,
+            completedCountBeforeCommit: 0,
+            completedEventCount: 1,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: false,
+            uncommittedAudioBytes: 0,
+            secondsSinceLastEvent: 0.1
+        ) == false)
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: false,
+            completedCountBeforeCommit: 1,
+            completedEventCount: 1,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: false,
+            uncommittedAudioBytes: 1,
+            secondsSinceLastEvent: 0.5
+        ) == false)
+        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
+            didManualCommit: false,
+            completedCountBeforeCommit: 1,
+            completedEventCount: 1,
+            expectedCommitCount: 1,
+            hasIncompleteCommittedItems: false,
+            uncommittedAudioBytes: 5_759,
+            secondsSinceLastEvent: 0.5
+        ) == false)
+    }
+
     @Test("Partial realtime text falls back for longer recordings")
     func partialRealtimeFallback() {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 96_000) == true)
@@ -126,7 +215,7 @@ struct RealtimeTranscriptionTests {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 12_000) == false)
     }
 
-    @Test("Realtime fast path accepts useful and safely repaired text")
+    @Test("Realtime fast path accepts safe text and rejects lexical cleanup")
     func realtimeFastPathDecision() {
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "  this is a useful transcript  ", pcmByteCount: 96_000))
         #expect(RecordingEngine.shouldUseRealtimeFastPath(realtimeText: "Hi", pcmByteCount: 12_000))
@@ -136,12 +225,12 @@ struct RealtimeTranscriptionTests {
             realtimeText: "Actually 리수 Zoom your goal",
             pcmByteCount: 96_000,
             language: "en"
-        ) == "Actually Zoom your goal")
+        ) == nil)
         #expect(RecordingEngine.realtimeFastPathTranscript(
             realtimeText: "어 Okay I don't know if this This is working어 Okay I don't know if this This is working",
             pcmByteCount: 96_000,
             language: "en"
-        ) == "Okay I don't know if this is working")
+        ) == nil)
         #expect(RecordingEngine.realtimeFastPathTranscript(
             realtimeText: "Actually Zoom your goal",
             pcmByteCount: 96_000,
@@ -162,11 +251,11 @@ struct RealtimeTranscriptionTests {
         #expect(cleaned == "Okay I don't know if this is working")
     }
 
-    @Test("Realtime artifact cleanup removes CJK tokens from English-dominant text")
-    func realtimeCJKArtifactCleanup() {
+    @Test("Realtime artifact cleanup preserves mixed-language lexical tokens")
+    func realtimeMixedLanguageCleanup() {
         let cleaned = RecordingEngine.cleanRealtimeArtifactText(
             "Actually 리수 Zoom your goal and do this work with sabi 度扫 agents actually"
         )
-        #expect(cleaned == "Actually Zoom your goal and do this work with sabi agents actually")
+        #expect(cleaned == "Actually 리수 Zoom your goal and do this work with sabi 度扫 agents actually")
     }
 }

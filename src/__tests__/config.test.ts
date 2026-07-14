@@ -14,8 +14,15 @@ const envKeys = [
   "RECORDINGS_API_KEY",
   "RECORDINGS_ENHANCEMENT_KEY",
   "RECORDINGS_MODEL",
+  "RECORDINGS_REALTIME_SESSION_MODEL",
+  "RECORDINGS_REALTIME_TRANSCRIPTION_MODEL",
   "RECORDINGS_ENHANCEMENT_MODEL",
+  "RECORDINGS_TRANSCRIBER_MODEL",
   "RECORDINGS_LANGUAGE",
+  "RECORDINGS_TRANSCRIPTION_PROMPT",
+  "RECORDINGS_TRANSCRIBER_PROMPT",
+  "RECORDINGS_POST_PROCESSING_MODE",
+  "RECORDINGS_AUTO_ENHANCE",
   "RECORDINGS_DB_PATH",
   "RECORDINGS_AUDIO_DIR",
   "RECORDINGS_MAX_SECONDS",
@@ -72,8 +79,14 @@ afterEach(() => {
 describe("DEFAULT_CONFIG", () => {
   test("has expected default values", () => {
     expect(DEFAULT_CONFIG.transcription_model).toBe("gpt-4o-transcribe");
+    expect(DEFAULT_CONFIG.realtime_session_model).toBe("gpt-realtime");
+    expect(DEFAULT_CONFIG.realtime_transcription_model).toBe("gpt-realtime-whisper");
     expect(DEFAULT_CONFIG.enhancement_model).toBe("gpt-4o");
+    expect(DEFAULT_CONFIG.transcriber_model).toBe("gpt-4o");
     expect(DEFAULT_CONFIG.language).toBe("en");
+    expect(DEFAULT_CONFIG.transcription_prompt).toBe("");
+    expect(DEFAULT_CONFIG.transcriber_prompt).toBe("");
+    expect(DEFAULT_CONFIG.post_processing_mode).toBe("auto");
     expect(DEFAULT_CONFIG.audio_format).toBe("wav");
     expect(DEFAULT_CONFIG.sample_rate).toBe(16000);
     expect(DEFAULT_CONFIG.record_command).toBe("sox");
@@ -89,10 +102,14 @@ describe("loadConfig", () => {
   test("returns defaults when no config file or env vars", () => {
     const config = loadConfig(join(tempDir, "nonexistent.json"));
     expect(config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(config.realtime_session_model).toBe("gpt-realtime");
+    expect(config.realtime_transcription_model).toBe("gpt-realtime-whisper");
     expect(config.enhancement_model).toBe("gpt-4o");
+    expect(config.transcriber_model).toBe("gpt-4o");
     expect(config.language).toBe("en");
     expect(config.audio_format).toBe("wav");
     expect(config.auto_enhance).toBe(true);
+    expect(config.post_processing_mode).toBe("auto");
   });
 
   test("loads config from file", () => {
@@ -102,6 +119,9 @@ describe("loadConfig", () => {
       JSON.stringify({
         transcription_model: "whisper-1",
         language: "fr",
+        transcription_prompt: "Alumia, Hasna",
+        transcriber_prompt: "Use bullet points",
+        post_processing_mode: "always",
         auto_enhance: false,
       })
     );
@@ -109,9 +129,26 @@ describe("loadConfig", () => {
     const config = loadConfig(configPath);
     expect(config.transcription_model).toBe("whisper-1");
     expect(config.language).toBe("fr");
-    expect(config.auto_enhance).toBe(false);
+    expect(config.transcription_prompt).toBe("Alumia, Hasna");
+    expect(config.transcriber_prompt).toBe("Use bullet points");
+    expect(config.post_processing_mode).toBe("always");
+    expect(config.auto_enhance).toBe(true);
     // Other defaults still present
     expect(config.audio_format).toBe("wav");
+  });
+
+  test("legacy auto_enhance false maps to post-processing off when mode is absent", () => {
+    const configPath = join(tempDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        auto_enhance: false,
+      })
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.post_processing_mode).toBe("off");
+    expect(config.auto_enhance).toBe(false);
   });
 
   test("ignores invalid JSON config file", () => {
@@ -173,16 +210,82 @@ describe("loadConfig", () => {
     expect(config.transcription_model).toBe("whisper-1");
   });
 
+  test("realtime-only model is rejected for bounded transcription", () => {
+    process.env.RECORDINGS_MODEL = "gpt-realtime-2";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.transcription_model).toBe("gpt-4o-transcribe");
+    expect(config.config_warnings?.some((warning) =>
+      warning.includes("bounded transcription uses gpt-4o-transcribe")
+    )).toBe(true);
+  });
+
+  test("transcription-only model is rejected for realtime session slot", () => {
+    process.env.RECORDINGS_REALTIME_SESSION_MODEL = "gpt-4o-transcribe";
+    process.env.RECORDINGS_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.realtime_session_model).toBe("gpt-realtime");
+    expect(config.realtime_transcription_model).toBe("gpt-realtime-whisper");
+    expect(config.config_warnings?.some((warning) =>
+      warning.includes("Ignoring realtime session model gpt-4o-transcribe")
+    )).toBe(true);
+  });
+
+  test("bounded transcription model is rejected for realtime transcription slot", () => {
+    process.env.RECORDINGS_REALTIME_TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.realtime_transcription_model).toBe("gpt-realtime-whisper");
+    expect(config.config_warnings?.some((warning) =>
+      warning.includes("Ignoring realtime transcription model gpt-4o-transcribe")
+    )).toBe(true);
+  });
+
   test("env var RECORDINGS_ENHANCEMENT_MODEL overrides enhancement_model", () => {
     process.env.RECORDINGS_ENHANCEMENT_MODEL = "gpt-3.5-turbo";
     const config = loadConfig(join(tempDir, "nonexistent.json"));
     expect(config.enhancement_model).toBe("gpt-3.5-turbo");
+    expect(config.transcriber_model).toBe("gpt-3.5-turbo");
+  });
+
+  test("env var RECORDINGS_TRANSCRIBER_MODEL overrides only transcriber_model", () => {
+    process.env.RECORDINGS_ENHANCEMENT_MODEL = "gpt-4o-mini";
+    process.env.RECORDINGS_TRANSCRIBER_MODEL = "gpt-4.1";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.enhancement_model).toBe("gpt-4o-mini");
+    expect(config.transcriber_model).toBe("gpt-4.1");
   });
 
   test("env var RECORDINGS_LANGUAGE overrides language", () => {
     process.env.RECORDINGS_LANGUAGE = "de";
     const config = loadConfig(join(tempDir, "nonexistent.json"));
     expect(config.language).toBe("de");
+  });
+
+  test("transcription prompt env vars are loaded without affecting API keys", () => {
+    process.env.RECORDINGS_TRANSCRIPTION_PROMPT = "DALL-E, Hasna";
+    process.env.RECORDINGS_TRANSCRIBER_PROMPT = "Clean up grammar";
+    process.env.RECORDINGS_POST_PROCESSING_MODE = "always";
+
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.transcription_prompt).toBe("DALL-E, Hasna");
+    expect(config.transcriber_prompt).toBe("Clean up grammar");
+    expect(config.post_processing_mode).toBe("always");
+    expect(config.auto_enhance).toBe(true);
+  });
+
+  test("RECORDINGS_AUTO_ENHANCE false maps to post-processing off", () => {
+    process.env.RECORDINGS_AUTO_ENHANCE = "false";
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.post_processing_mode).toBe("off");
+    expect(config.auto_enhance).toBe(false);
+  });
+
+  test("RECORDINGS_POST_PROCESSING_MODE wins over legacy RECORDINGS_AUTO_ENHANCE", () => {
+    process.env.RECORDINGS_POST_PROCESSING_MODE = "always";
+    process.env.RECORDINGS_AUTO_ENHANCE = "false";
+
+    const config = loadConfig(join(tempDir, "nonexistent.json"));
+    expect(config.post_processing_mode).toBe("always");
+    expect(config.auto_enhance).toBe(true);
   });
 
   test("env var RECORDINGS_DB_PATH overrides db_path", () => {

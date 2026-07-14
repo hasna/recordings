@@ -169,3 +169,46 @@ describe("ApiStore.setAgentFocus error mapping", () => {
     });
   });
 });
+
+describe("ApiStore project registration", () => {
+  test("posts canonical project metadata and returns the Store id", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; body: unknown }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify({
+        project: {
+          id: "canonical-project-id",
+          name: "Desktop App",
+          path: "recordings-app://projects/legacy-id",
+          description: "Recordings macOS project",
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z",
+        },
+      }), { status: 201, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      const project = await store.registerProject(
+        "Desktop App",
+        "recordings-app://projects/legacy-id",
+        "Recordings macOS project",
+      );
+      expect(project.id).toBe("canonical-project-id");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual({
+        url: "https://recordings.hasna.xyz/v1/projects",
+        body: {
+          name: "Desktop App",
+          path: "recordings-app://projects/legacy-id",
+          description: "Recordings macOS project",
+        },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
