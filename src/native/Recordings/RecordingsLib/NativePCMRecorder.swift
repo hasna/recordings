@@ -40,6 +40,7 @@ final class NativePCMRecorder: @unchecked Sendable {
     private let deliveryQueueKey = DispatchSpecificKey<UInt8>()
     private let stopWorkQueue = DispatchQueue(label: "com.hasna.recordings.native-pcm-stop")
     private let stopCaptureForTesting: (@Sendable () -> Void)?
+    private let startCaptureForTesting: (@Sendable () throws -> Void)?
     private let onCallbackAdmittedForTesting: (@Sendable () -> Void)?
     private let finalizeConverter: @Sendable (AVAudioConverter, AVAudioFormat) -> [Data]
     private var converter: AVAudioConverter?
@@ -52,6 +53,7 @@ final class NativePCMRecorder: @unchecked Sendable {
     init(onPCM: @escaping @Sendable (Data) -> Void) {
         self.onPCM = onPCM
         self.stopCaptureForTesting = nil
+        self.startCaptureForTesting = nil
         self.onCallbackAdmittedForTesting = nil
         self.finalizeConverter = Self.finalizeConverterTail
         deliveryQueue.setSpecific(key: deliveryQueueKey, value: 1)
@@ -62,6 +64,7 @@ final class NativePCMRecorder: @unchecked Sendable {
         outputFormat: AVAudioFormat,
         converter: AVAudioConverter,
         stopCapture: @escaping @Sendable () -> Void,
+        startCapture: (@Sendable () throws -> Void)? = nil,
         onCallbackAdmitted: @escaping @Sendable () -> Void,
         finalizeConverter: @escaping @Sendable (AVAudioConverter, AVAudioFormat) -> [Data],
         startsRunning: Bool = true,
@@ -69,6 +72,7 @@ final class NativePCMRecorder: @unchecked Sendable {
     ) {
         self.onPCM = onPCM
         self.stopCaptureForTesting = stopCapture
+        self.startCaptureForTesting = startCapture
         self.onCallbackAdmittedForTesting = onCallbackAdmitted
         self.finalizeConverter = finalizeConverter
         self.converter = converter
@@ -81,6 +85,17 @@ final class NativePCMRecorder: @unchecked Sendable {
 
     func start() throws {
         try reserveStart()
+
+        if let startCaptureForTesting {
+            do {
+                try startCaptureForTesting()
+                finishStart()
+            } catch {
+                resetAfterStartFailure()
+                throw NativePCMRecorderError.failedToStart(error.localizedDescription)
+            }
+            return
+        }
 
         let inputNode = engine.inputNode
         let inputFormat = inputNode.inputFormat(forBus: 0)
@@ -114,21 +129,10 @@ final class NativePCMRecorder: @unchecked Sendable {
         do {
             engine.prepare()
             try engine.start()
-            lifecycle.lock()
-            acceptingCallbacks = true
-            state = .running
-            lifecycle.broadcast()
-            lifecycle.unlock()
+            finishStart()
         } catch {
             inputNode.removeTap(onBus: 0)
-            lifecycle.lock()
-            self.converter = nil
-            self.inputFormat = nil
-            self.outputFormat = nil
-            state = .idle
-            acceptingCallbacks = false
-            lifecycle.broadcast()
-            lifecycle.unlock()
+            resetAfterStartFailure()
             throw NativePCMRecorderError.failedToStart(error.localizedDescription)
         }
     }
@@ -140,6 +144,25 @@ final class NativePCMRecorder: @unchecked Sendable {
             throw NativePCMRecorderError.alreadyActive
         }
         state = .starting
+        lifecycle.unlock()
+    }
+
+    private func finishStart() {
+        lifecycle.lock()
+        acceptingCallbacks = true
+        state = .running
+        lifecycle.broadcast()
+        lifecycle.unlock()
+    }
+
+    private func resetAfterStartFailure() {
+        lifecycle.lock()
+        converter = nil
+        inputFormat = nil
+        outputFormat = nil
+        state = .idle
+        acceptingCallbacks = false
+        lifecycle.broadcast()
         lifecycle.unlock()
     }
 
@@ -227,14 +250,6 @@ final class NativePCMRecorder: @unchecked Sendable {
 
         defer { finishCallback() }
         deliverPCM(data)
-    }
-
-    func reserveStartForTesting() throws {
-        try reserveStart()
-    }
-
-    func abandonStartForTesting() {
-        abandonStart()
     }
 
     var isIdleForTesting: Bool {

@@ -124,7 +124,7 @@ struct NativePCMRecorderTests {
         #expect(probe.emittedByteCount > bytesBeforeStop)
     }
 
-    @Test("start reports busy while recorder is running or another start is failing")
+    @Test("start reports busy while recorder is running or another public start is failing")
     func concurrentStartNeverReportsFalseSuccess() throws {
         let inputFormat = try #require(AVAudioFormat(
             standardFormatWithSampleRate: 48_000,
@@ -145,20 +145,40 @@ struct NativePCMRecorderTests {
         expectBusyStart(runningRecorder)
         runningRecorder.stop()
 
+        let probe = NativeRecorderLifecycleProbe()
         let startingRecorder = NativePCMRecorder(
             testingInputFormat: inputFormat,
             outputFormat: outputFormat,
             converter: converter,
             stopCapture: {},
+            startCapture: {
+                probe.startCaptureEntered.signal()
+                probe.releaseStartCapture.wait()
+                throw NativeRecorderTestError.syntheticStartFailure
+            },
             onCallbackAdmitted: {},
             finalizeConverter: { _, _ in [] },
             startsRunning: false,
             onPCM: { _ in }
         )
-        try startingRecorder.reserveStartForTesting()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try startingRecorder.start()
+                probe.recordStartResult("success")
+            } catch NativePCMRecorderError.failedToStart(_) {
+                probe.recordStartResult("failed")
+            } catch {
+                probe.recordStartResult("wrong-error")
+            }
+            probe.startReturned.signal()
+        }
+        #expect(probe.startCaptureEntered.wait(timeout: .now() + 1) == .success)
 
         expectBusyStart(startingRecorder)
-        startingRecorder.abandonStartForTesting()
+        probe.releaseStartCapture.signal()
+        #expect(probe.startReturned.wait(timeout: .now() + 1) == .success)
+        #expect(probe.startResult == "failed")
         #expect(startingRecorder.isIdleForTesting)
     }
 
@@ -290,6 +310,10 @@ private final class NativeRecorderReferenceBox: @unchecked Sendable {
     var recorder: NativePCMRecorder?
 }
 
+private enum NativeRecorderTestError: Error {
+    case syntheticStartFailure
+}
+
 private final class NativeRecorderLifecycleProbe: @unchecked Sendable {
     let firstCallbackEntered = DispatchSemaphore(value: 0)
     let releaseFirstCallback = DispatchSemaphore(value: 0)
@@ -298,12 +322,16 @@ private final class NativeRecorderLifecycleProbe: @unchecked Sendable {
     let stopReturned = DispatchSemaphore(value: 0)
     let releaseCaptureStop = DispatchSemaphore(value: 0)
     let reentrantStopReturned = DispatchSemaphore(value: 0)
+    let startCaptureEntered = DispatchSemaphore(value: 0)
+    let releaseStartCapture = DispatchSemaphore(value: 0)
+    let startReturned = DispatchSemaphore(value: 0)
 
     private let lock = NSLock()
     private var admissions = 0
     private var finalizations = 0
     private var emitted: [Data] = []
     private var didClaimReentrantStop = false
+    private var storedStartResult: String?
 
     var admissionCount: Int {
         lock.lock()
@@ -327,6 +355,12 @@ private final class NativeRecorderLifecycleProbe: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return emitted.reduce(0) { $0 + $1.count }
+    }
+
+    var startResult: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedStartResult
     }
 
     func callbackAdmitted() {
@@ -358,5 +392,11 @@ private final class NativeRecorderLifecycleProbe: @unchecked Sendable {
         guard !didClaimReentrantStop else { return false }
         didClaimReentrantStop = true
         return true
+    }
+
+    func recordStartResult(_ result: String) {
+        lock.lock()
+        storedStartResult = result
+        lock.unlock()
     }
 }

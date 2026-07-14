@@ -153,6 +153,15 @@ struct CLIRunnerTests {
         #expect(structured?.contains("password-synthetic-secret") == false)
         #expect(structured?.contains("json-synthetic-secret") == false)
         #expect(structured?.contains("private-synthetic-secret") == false)
+
+        let quoted = CLIRunner.parseError(
+            "ERROR: payload={\"password\":\"correct horse battery staple\","
+                + "\"secret\":\"bare secret phrase\",\"private\":\"private phrase\"}"
+        )
+        #expect(quoted?.contains("correct horse battery staple") == false)
+        #expect(quoted?.contains("bare secret phrase") == false)
+        #expect(quoted?.contains("private phrase") == false)
+        #expect(quoted?.contains("horse battery staple") == false)
     }
 
     @Test("parseError preserves ordinary generic failures")

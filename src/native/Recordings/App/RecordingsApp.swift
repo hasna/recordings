@@ -9,8 +9,18 @@ import RecordingsLib
 /// window is in the background. (The former menu-bar-only surface has been removed.)
 /// Keeps the app (and therefore the RecordingEngine + global shortcuts) alive after the
 /// last window is closed, so background dictation/command shortcuts keep working.
+@MainActor
 final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
+    weak var state: RecordingsAppState?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            state?.showMainWindow()
+        }
+        return true
+    }
 }
 
 @MainActor
@@ -24,7 +34,7 @@ final class RecordingsAppState: ObservableObject {
             self.store = store
             if plan.declaresMainWindow {
                 Task { @MainActor [weak self] in
-                    self?.showMainWindow(for: store)
+                    self?.showMainWindow()
                 }
             }
         } else {
@@ -32,7 +42,8 @@ final class RecordingsAppState: ObservableObject {
         }
     }
 
-    private func showMainWindow(for store: RecordingsStore) {
+    func showMainWindow() {
+        guard let store else { return }
         if let mainWindow {
             mainWindow.makeKeyAndOrderFront(nil)
             return
@@ -62,7 +73,9 @@ struct RecordingsApp: App {
 
     init() {
         let plan = PermissionRequestLaunchPlan(arguments: CommandLine.arguments)
-        _state = StateObject(wrappedValue: RecordingsAppState(plan: plan))
+        let state = RecordingsAppState(plan: plan)
+        _state = StateObject(wrappedValue: state)
+        appDelegate.state = state
         if plan.isHelper {
             Self.handlePermissionRequest(plan)
         } else {
