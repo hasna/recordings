@@ -164,6 +164,7 @@ public final class RecordingEngine: ObservableObject {
     private var nativeRecorder: NativePCMRecorder?
     private var recordingTimer: Timer?
     private var activeTrigger: RecordingTrigger?
+    private var microphonePermissionRequestID: UUID?
     private var keyboardShortcutIsDown = false
     private var fnKeyIsDown = false
     private var targetAppBundleIdentifier: String?
@@ -216,7 +217,11 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fnKeyIsDown = true
-                guard self.useFnKey, Self.canBeginRecording(isRecording: self.isRecording, isTranscribing: self.isTranscribing) else { return }
+                guard self.useFnKey, Self.canBeginRecording(
+                    isRecording: self.isRecording,
+                    isTranscribing: self.isTranscribing,
+                    isAwaitingMicrophonePermission: self.microphonePermissionRequestID != nil
+                ) else { return }
                 self.startRecording(trigger: .fnKey)
             }
         }
@@ -240,7 +245,11 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, !self.keyboardShortcutIsDown else { return }
                 self.keyboardShortcutIsDown = true
-                guard Self.canBeginRecording(isRecording: self.isRecording, isTranscribing: self.isTranscribing) else { return }
+                guard Self.canBeginRecording(
+                    isRecording: self.isRecording,
+                    isTranscribing: self.isTranscribing,
+                    isAwaitingMicrophonePermission: self.microphonePermissionRequestID != nil
+                ) else { return }
                 self.startRecording(trigger: .keyboardShortcut)
             }
         }
@@ -354,7 +363,11 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Start Recording (Streaming)
 
     public func startRecording(trigger: RecordingTrigger = .manual) {
-        guard Self.canBeginRecording(isRecording: isRecording, isTranscribing: isTranscribing) else {
+        guard Self.canBeginRecording(
+            isRecording: isRecording,
+            isTranscribing: isTranscribing,
+            isAwaitingMicrophonePermission: microphonePermissionRequestID != nil
+        ) else {
             if isTranscribing {
                 statusMessage = "Finish transcribing before recording again"
             }
@@ -394,11 +407,21 @@ public final class RecordingEngine: ObservableObject {
         case .authorized:
             startNativeRecording()
         case .notDetermined:
+            let requestID = UUID()
+            microphonePermissionRequestID = requestID
             statusMessage = "Allow microphone access to record"
             log("requesting microphone access before recording")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    guard Self.isCurrentMicrophonePermissionRequest(
+                        activeRequestID: self.microphonePermissionRequestID,
+                        responseRequestID: requestID
+                    ) else {
+                        self.log("ignoring stale microphone permission response")
+                        return
+                    }
+                    self.microphonePermissionRequestID = nil
                     self.log("microphone access response granted=\(granted)")
                     if granted {
                         guard self.shouldContinueStarting(trigger: trigger) else {
@@ -424,8 +447,19 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
-    nonisolated static func canBeginRecording(isRecording: Bool, isTranscribing: Bool) -> Bool {
-        !isRecording && !isTranscribing
+    nonisolated static func canBeginRecording(
+        isRecording: Bool,
+        isTranscribing: Bool,
+        isAwaitingMicrophonePermission: Bool = false
+    ) -> Bool {
+        !isRecording && !isTranscribing && !isAwaitingMicrophonePermission
+    }
+
+    nonisolated static func isCurrentMicrophonePermissionRequest(
+        activeRequestID: UUID?,
+        responseRequestID: UUID
+    ) -> Bool {
+        activeRequestID == responseRequestID
     }
 
     nonisolated static func shouldContinueStartingAfterPermission(
@@ -1233,6 +1267,7 @@ public final class RecordingEngine: ObservableObject {
 
     private func resetRecordingIntent() {
         activeTrigger = nil
+        microphonePermissionRequestID = nil
         keyboardShortcutIsDown = false
         fnKeyIsDown = false
         targetAppBundleIdentifier = nil

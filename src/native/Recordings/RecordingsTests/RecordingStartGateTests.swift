@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import RecordingsLib
 
@@ -32,6 +33,30 @@ struct RecordingStartGateTests {
         #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false) == true)
         #expect(RecordingEngine.canBeginRecording(isRecording: true, isTranscribing: false) == false)
         #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: true) == false)
+        #expect(RecordingEngine.canBeginRecording(
+            isRecording: false,
+            isTranscribing: false,
+            isAwaitingMicrophonePermission: true
+        ) == false)
+    }
+
+    @Test("only the current microphone permission request may continue starting")
+    func stalePermissionContinuationIsRejected() {
+        let staleRequestID = UUID()
+        let currentRequestID = UUID()
+
+        #expect(!RecordingEngine.isCurrentMicrophonePermissionRequest(
+            activeRequestID: currentRequestID,
+            responseRequestID: staleRequestID
+        ))
+        #expect(RecordingEngine.isCurrentMicrophonePermissionRequest(
+            activeRequestID: currentRequestID,
+            responseRequestID: currentRequestID
+        ))
+        #expect(!RecordingEngine.isCurrentMicrophonePermissionRequest(
+            activeRequestID: nil,
+            responseRequestID: currentRequestID
+        ))
     }
 
     @Test("manual recording can continue after permission grant")
