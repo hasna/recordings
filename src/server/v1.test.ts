@@ -30,6 +30,7 @@ const PROJECT_ROW = {
 };
 
 const runCalls: Array<{ sql: string; params: unknown[] }> = [];
+const queryCalls: Array<{ method: "get" | "all"; sql: string; params: unknown[] }> = [];
 
 const fakePg = {
   async run(sql: string, ...params: unknown[]) {
@@ -37,6 +38,8 @@ const fakePg = {
     return { changes: 1 };
   },
   async get(sql: string, ...params: unknown[]) {
+    queryCalls.push({ method: "get", sql, params });
+    if (/select\s+count\(\*\)\s+as\s+c\s+from\s+recordings/i.test(sql)) return { c: 7 };
     // Any agent lookup resolves to our canned row.
     if (/from\s+agents/i.test(sql)) return { ...AGENT_ROW };
     // Project resolution mirrors repo.getProject: exact id/path/name or the
@@ -52,7 +55,8 @@ const fakePg = {
     }
     return null;
   },
-  async all() {
+  async all(sql: string, ...params: unknown[]) {
+    queryCalls.push({ method: "all", sql, params });
     return [];
   },
   async exec() {},
@@ -76,9 +80,33 @@ function post(path: string, body?: unknown): Request {
   });
 }
 
+function get(path: string): Request {
+  return new Request(`https://recordings.hasna.xyz${path}`, {
+    method: "GET",
+    headers: { Authorization: "Bearer test" },
+  });
+}
+
 describe("v1 handler: previously-failing cloud routes", () => {
   beforeEach(() => {
     runCalls.length = 0;
+    queryCalls.length = 0;
+  });
+
+  test("GET /v1/recordings propagates exploded tags/date filters and returns filtered total", async () => {
+    const req = get(
+      "/v1/recordings?tags=work&tags=urgent&since=2026-01-01&until=2026-01-31&limit=2&offset=4",
+    );
+    const res = await handleV1Request(req, new URL(req.url));
+    expect(res!.status).toBe(200);
+    expect(await res!.json()).toEqual({ recordings: [], count: 7 });
+
+    const listCall = queryCalls.find((call) => call.method === "all" && /from recordings/i.test(call.sql));
+    const countCall = queryCalls.find((call) => call.method === "get" && /count\(\*\).*from recordings/i.test(call.sql));
+    expect(listCall?.params).toEqual(["work", "urgent", "2026-01-01", "2026-01-31", 2, 4]);
+    expect(countCall?.params).toEqual(["work", "urgent", "2026-01-01", "2026-01-31"]);
+    expect(listCall?.sql.match(/recording_tags/g)).toHaveLength(2);
+    expect(countCall?.sql.match(/recording_tags/g)).toHaveLength(2);
   });
 
   test("POST /v1/feedback -> 201 (resource exists, not 404)", async () => {

@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, existsSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { loadConfig, getDataDir, ensureDataDir, DEFAULT_CONFIG } from "../lib/config.js";
 import { getStore } from "../store.js";
 
@@ -394,9 +394,71 @@ describe("getDataDir", () => {
     writeFileSync(join(homeLegacyDir, "config.json"), JSON.stringify({ language: "de" }));
 
     withHomeAndCwd(home, project, () => {
-      expect(getDataDir()).toBe(projectDir);
+      expect(realpathSync(getDataDir())).toBe(realpathSync(projectDir));
       expect(loadConfig().language).toBe("ja");
       expect(existsSync(join(home, ".hasna", "recordings", "config.json"))).toBe(false);
+    });
+  });
+
+  test("does not search above a repository root when HOME points elsewhere", () => {
+    const actualHome = join(tempDir, "actual-home");
+    const fakeHome = join(tempDir, "fake-home");
+    const project = join(actualHome, "workspace", "project");
+    const inheritedDir = join(actualHome, ".recordings");
+    mkdirSync(project, { recursive: true });
+    mkdirSync(inheritedDir, { recursive: true });
+    writeFileSync(join(project, ".git"), "gitdir: /tmp/example\n");
+    writeFileSync(join(inheritedDir, "config.json"), JSON.stringify({ language: "de" }));
+
+    withHomeAndCwd(fakeHome, project, () => {
+      expect(getDataDir()).toBe(join(fakeHome, ".hasna", "recordings"));
+      expect(loadConfig().language).toBe(DEFAULT_CONFIG.language);
+    });
+  });
+
+  test("does not inherit an ancestor store outside HOME when no repository root exists", () => {
+    const actualHome = join(tempDir, "no-git-actual-home");
+    const fakeHome = join(tempDir, "no-git-fake-home");
+    const workingDir = join(actualHome, "workspace", "nested");
+    const inheritedDir = join(actualHome, ".recordings");
+    mkdirSync(workingDir, { recursive: true });
+    mkdirSync(inheritedDir, { recursive: true });
+    writeFileSync(join(inheritedDir, "config.json"), JSON.stringify({ language: "de" }));
+
+    withHomeAndCwd(fakeHome, workingDir, () => {
+      expect(getDataDir()).toBe(join(fakeHome, ".hasna", "recordings"));
+      expect(loadConfig().language).toBe(DEFAULT_CONFIG.language);
+    });
+  });
+
+  test("does not cross HOME to use an enclosing repository store", () => {
+    const outerRepo = join(tempDir, "outer-repo");
+    const fakeHome = join(outerRepo, "fake-home");
+    const workingDir = join(fakeHome, "workspace");
+    mkdirSync(join(outerRepo, ".recordings"), { recursive: true });
+    mkdirSync(workingDir, { recursive: true });
+    writeFileSync(join(outerRepo, ".git"), "gitdir: /tmp/outer\n");
+    writeFileSync(
+      join(outerRepo, ".recordings", "config.json"),
+      JSON.stringify({ language: "outside-home" }),
+    );
+
+    withHomeAndCwd(fakeHome, workingDir, () => {
+      expect(getDataDir()).toBe(join(fakeHome, ".hasna", "recordings"));
+      expect(loadConfig().language).toBe(DEFAULT_CONFIG.language);
+    });
+  });
+
+  test("treats HOME as global storage even when HOME is a repository root", () => {
+    const home = join(tempDir, "home-repository");
+    const legacyDir = join(home, ".recordings");
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(join(home, ".git"), "gitdir: /tmp/home\n");
+    writeFileSync(join(legacyDir, "config.json"), JSON.stringify({ language: "de" }));
+
+    withHomeAndCwd(home, home, () => {
+      expect(getDataDir()).toBe(join(home, ".hasna", "recordings"));
+      expect(loadConfig().language).toBe("de");
     });
   });
 });

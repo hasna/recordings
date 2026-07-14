@@ -2,7 +2,7 @@
 // Regenerate: bun run scripts/generate-sdk.ts
 
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
-// Source: Recordings V1 API 0.1.37
+// Source: Recordings V1 API 0.2.10
 
 export interface Recording { "id"?: string; "audio_path"?: string | null; "raw_text"?: string; "processed_text"?: string | null; "processing_mode"?: "raw" | "enhanced"; "model_used"?: string; "enhancement_model"?: string | null; "duration_ms"?: number; "language"?: string | null; "tags"?: Array<string>; "agent_id"?: string | null; "project_id"?: string | null; "session_id"?: string | null; "goal"?: string | null; "role"?: string | null; "task_list_id"?: string | null; "machine_id"?: string | null; "metadata"?: Record<string, unknown>; "created_at"?: string }
 
@@ -52,7 +52,11 @@ export class RecordingsV1Client {
     const url = new URL(this.baseUrl + path);
     if (opts.query) {
       for (const [key, value] of Object.entries(opts.query)) {
-        if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+        if (Array.isArray(value)) {
+          for (const item of value) url.searchParams.append(key, String(item));
+        } else if (value !== undefined && value !== null) {
+          url.searchParams.set(key, String(value));
+        }
       }
     }
     const headers: Record<string, string> = { Accept: "application/json", ...this.baseHeaders, ...(opts.init?.headers as Record<string, string> | undefined) };
@@ -126,7 +130,7 @@ export class RecordingsV1Client {
     }
 
     /** List recordings */
-    async listRecordings(query?: { "agent_id"?: string; "project_id"?: string; "session_id"?: string; "processing_mode"?: "raw" | "enhanced"; "search"?: string; "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "recordings"?: Array<Recording>; "count"?: number }> {
+    async listRecordings(query?: { "agent_id"?: string; "project_id"?: string; "session_id"?: string; "processing_mode"?: "raw" | "enhanced"; "tags"?: Array<string>; "search"?: string; "since"?: string; "until"?: string; "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "recordings"?: Array<Recording>; "count"?: number }> {
       return this.request("GET", `/v1/recordings`, {
         body: undefined,
         query,

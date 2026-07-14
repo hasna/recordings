@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolveStorageClient, createStorageClient, createHttpTransport, resolveTransport } from "./client.js";
-import { getStore } from "../store.js";
+import { countStoreRecordings, getStore, type Store } from "../store.js";
 
 const APP = "recordings";
 
@@ -210,5 +210,164 @@ describe("ApiStore project registration", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("ApiStore recording counts", () => {
+  test("uses the API total rather than the paginated item count", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({
+        recordings: [{ id: "one" }],
+        count: 42,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      expect(await countStoreRecordings(store, { search: "needle", offset: 20, limit: 20 })).toBe(42);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain("search=needle");
+      expect(calls[0]).toContain("limit=500");
+      expect(calls[0]).toContain("offset=0");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("pages legacy API responses whose count is only the page length", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    const recordings = Array.from({ length: 503 }, (_, index) => ({ id: `recording-${index}` }));
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = new URL(String(url));
+      calls.push(requestUrl.toString());
+      const limit = Number(requestUrl.searchParams.get("limit"));
+      const offset = Number(requestUrl.searchParams.get("offset"));
+      const page = recordings.slice(offset, offset + limit);
+      return new Response(JSON.stringify({ recordings: page, count: page.length }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      expect(await countStoreRecordings(store)).toBe(503);
+      expect(calls).toHaveLength(3);
+      expect(calls[0]).toContain("offset=0");
+      expect(calls[1]).toContain("offset=500");
+      expect(calls[2]).toContain("offset=503");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("continues legacy counting when the server clamps below the requested page size", async () => {
+    const originalFetch = globalThis.fetch;
+    const offsets: number[] = [];
+    const recordings = Array.from({ length: 123 }, (_, index) => ({ id: `clamped-${index}` }));
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = new URL(String(url));
+      const offset = Number(requestUrl.searchParams.get("offset"));
+      offsets.push(offset);
+      const page = recordings.slice(offset, offset + 50);
+      return new Response(JSON.stringify({ recordings: page, count: page.length }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      expect(await countStoreRecordings(store)).toBe(123);
+      expect(offsets).toEqual([0, 50, 100, 123]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("rejects an offset-ignoring legacy API that alternates full pages", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      const prefix = calls % 2 === 0 ? "page-b" : "page-a";
+      const recordings = Array.from({ length: 500 }, (_, index) => ({ id: `${prefix}-${index}` }));
+      return new Response(JSON.stringify({ recordings, count: recordings.length }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      await expect(countStoreRecordings(store)).rejects.toThrow("ignored pagination");
+      expect(calls).toBe(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("rejects an offset-ignoring legacy API that reorders the same page", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    const recordings = Array.from({ length: 500 }, (_, index) => ({ id: `recording-${index}` }));
+    globalThis.fetch = (async () => {
+      calls += 1;
+      const page = calls % 2 === 0 ? [...recordings].reverse() : recordings;
+      return new Response(JSON.stringify({ recordings: page, count: page.length }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      await expect(countStoreRecordings(store)).rejects.toThrow("ignored pagination");
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("legacy Store count compatibility", () => {
+  test("accepts and counts a structural Store without countRecordings", async () => {
+    const { countRecordings: _countRecordings, ...legacyBase } = getStore({});
+    const rows = Array.from({ length: 23 }, (_, index) => ({ id: `legacy-${index}` }));
+    const offsets: number[] = [];
+    const legacyStore = {
+      ...legacyBase,
+      async listRecordings(filter) {
+        const offset = filter?.offset ?? 0;
+        offsets.push(offset);
+        return rows.slice(offset, offset + 7) as Awaited<ReturnType<Store["listRecordings"]>>;
+      },
+    } satisfies Store;
+
+    expect(await countStoreRecordings(legacyStore, {
+      search: "needle",
+      limit: 1,
+      offset: 10,
+    })).toBe(23);
+    expect(offsets).toEqual([0, 7, 14, 21, 23]);
   });
 });
