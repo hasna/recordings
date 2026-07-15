@@ -138,7 +138,7 @@ struct RecordWorkspaceView: View {
         VStack(spacing: 14) {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.large)
-                Text("Transcribing…").font(.system(.title2, design: .rounded)).foregroundStyle(.secondary)
+                Text(engine.statusMessage).font(.system(.title2, design: .rounded)).foregroundStyle(.secondary)
             }
             modeTag
             liveText(placeholder: "Finishing up…")

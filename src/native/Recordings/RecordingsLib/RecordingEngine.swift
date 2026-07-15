@@ -60,9 +60,23 @@ public struct TranscriptionResult: Identifiable, Sendable {
     }
 }
 
-private struct RealtimeFastPathSaveResult: Sendable {
+struct RealtimeFastPathSaveResult: Sendable {
     let text: String?
     let error: String?
+}
+
+private struct RecordingPipelineTrace: Sendable {
+    let id = UUID().uuidString
+    let startedUptimeMilliseconds = UInt64(ProcessInfo.processInfo.systemUptime * 1_000)
+
+    func message(stage: String, detail: String = "") -> String {
+        let nowMilliseconds = UInt64(ProcessInfo.processInfo.systemUptime * 1_000)
+        let elapsedMilliseconds = nowMilliseconds >= startedUptimeMilliseconds
+            ? nowMilliseconds - startedUptimeMilliseconds
+            : 0
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        return "pipeline_timing pipeline_id=\(id) stage=\(stage) elapsed_ms=\(elapsedMilliseconds)\(suffix)"
+    }
 }
 
 public enum RecordingTrigger: Equatable, Sendable {
@@ -625,7 +639,8 @@ public final class RecordingEngine: ObservableObject {
 
     public func stopAndTranscribe() {
         guard isRecording else { return }
-        log("stopAndTranscribe")
+        let pipelineTrace = RecordingPipelineTrace()
+        log(pipelineTrace.message(stage: "release"))
 
         recordingTimer?.invalidate()
         recordingTimer = nil
@@ -646,6 +661,11 @@ public final class RecordingEngine: ObservableObject {
         let audioPath = activeAudioPath
         let pcmStreamPipe = pcmStreamPipe
         let client = realtimeClient
+        let postProcessingMode = projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+        statusMessage = Self.shouldLabelRewriting(
+            recordingMode: curMode,
+            postProcessingMode: postProcessingMode
+        ) ? "Rewriting..." : "Transcribing..."
         resetRecordingIntent()
         self.pcmStreamPipe = nil
 
@@ -653,10 +673,21 @@ public final class RecordingEngine: ObservableObject {
             if let pcmStreamPipe {
                 self.recordedPCM = await pcmStreamPipe.finish()
             }
-            self.log("captured pcm bytes=\(self.recordedPCM.count)")
+            self.log(pipelineTrace.message(
+                stage: "pcm_drain_complete",
+                detail: "pcm_bytes=\(self.recordedPCM.count)"
+            ))
 
-            let streamingResult = await client?.finish(timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds)
+            let streamingResult = await client?.finish(
+                timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds,
+                pipelineID: pipelineTrace.id,
+                pipelineStartedUptimeMilliseconds: pipelineTrace.startedUptimeMilliseconds
+            )
                 ?? RealtimeFinishResult(text: "", settled: false, error: nil)
+            self.log(pipelineTrace.message(
+                stage: "realtime_finish_complete",
+                detail: "settled=\(streamingResult.settled) chars=\(streamingResult.text.count)"
+            ))
 
             self.realtimeClient = nil
             self.streamingTask?.cancel()
@@ -667,33 +698,83 @@ public final class RecordingEngine: ObservableObject {
             }
 
             let realtimeText = Self.normalizedRealtimeTranscript(streamingResult.text)
-            let safeRealtimeFallbackText = Self.safeRealtimeFallbackTranscript(
-                realtimeText: streamingResult.text,
-                language: self.transcriptionLanguage
-            )
-            let realtimeFastPathText = streamingResult.settled && streamingResult.error == nil ? Self.realtimeFastPathTranscript(
-                realtimeText: streamingResult.text,
+            let safeRealtimeFallbackText = Self.settledRealtimeFallbackTranscript(
+                finishResult: streamingResult,
                 pcmByteCount: self.recordedPCM.count,
                 language: self.transcriptionLanguage
-            ) : nil
+            )
+            let realtimeFastPathText = Self.settledRealtimeFastPathTranscript(
+                finishResult: streamingResult,
+                pcmByteCount: self.recordedPCM.count,
+                language: self.transcriptionLanguage
+            )
 
             self.liveTranscriptionText = ""
 
             if let realtimeFastPathText {
                 let pcmData = self.recordedPCM
                 let durationMs = Int(self.recordingDuration * 1_000)
-                self.log("using realtime fast path chars=\(realtimeFastPathText.count) pcmBytes=\(pcmData.count)")
-                let saveResult = await Self.saveRealtimeTranscript(
-                    text: realtimeFastPathText,
-                    audioPath: audioPath,
-                    pcmData: pcmData,
-                    durationMs: durationMs,
-                    activeProjectId: canonicalProjectId,
-                    transcriberPrompt: self.projectStore?.effectiveSystemPrompt ?? "",
-                    postProcessingMode: self.projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue,
-                    language: OpenAIAPIKeyStore.apiLanguageHint(for: self.transcriptionLanguage),
-                    homePath: self.home
-                )
+                let transcriberPrompt = self.projectStore?.effectiveSystemPrompt ?? ""
+                let language = OpenAIAPIKeyStore.apiLanguageHint(for: self.transcriptionLanguage)
+                let homePath = self.home
+                self.log(pipelineTrace.message(
+                    stage: "realtime_fast_path_ready",
+                    detail: "chars=\(realtimeFastPathText.count) pcm_bytes=\(pcmData.count)"
+                ))
+                let persist: @Sendable () async -> RealtimeFastPathSaveResult = {
+                    await Self.saveRealtimeTranscript(
+                        text: realtimeFastPathText,
+                        audioPath: audioPath,
+                        pcmData: pcmData,
+                        durationMs: durationMs,
+                        activeProjectId: canonicalProjectId,
+                        transcriberPrompt: transcriberPrompt,
+                        postProcessingMode: postProcessingMode,
+                        language: language,
+                        homePath: homePath,
+                        pipelineTrace: pipelineTrace
+                    )
+                }
+
+                if Self.shouldPasteBeforePersistence(
+                    recordingMode: curMode,
+                    postProcessingMode: postProcessingMode
+                ) {
+                    self.isTranscribing = false
+                    _ = Self.deliverRealtimeBeforePersistence(
+                        text: realtimeFastPathText,
+                        persist: persist,
+                        deliver: { text in
+                            await withCheckedContinuation { continuation in
+                                self.finishWithText(
+                                    text,
+                                    curMode: curMode,
+                                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                                    targetAppPid: targetAppPid,
+                                    activeProjectId: activeProjectId,
+                                    activeProjectName: activeProjectName,
+                                    pipelineTrace: pipelineTrace,
+                                    deliveryCompleted: { continuation.resume() }
+                                )
+                            }
+                        },
+                        persistenceCompleted: { result in
+                            if let error = result.error {
+                                self.log(pipelineTrace.message(
+                                    stage: "async_persistence_failed",
+                                    detail: "error=\(NativeErrorSanitizer.sanitize(error))"
+                                ))
+                            } else {
+                                self.log(pipelineTrace.message(stage: "async_persistence_complete"))
+                            }
+                        }
+                    )
+                    self.activeAudioPath = nil
+                    self.recordedPCM.removeAll(keepingCapacity: true)
+                    return
+                }
+
+                let saveResult = await persist()
                 guard let savedText = saveResult.text else {
                     self.log("realtime fast-path save failed error=\(saveResult.error ?? "unknown")")
                     if let audioPath, FileManager.default.fileExists(atPath: audioPath) || self.writeCapturedWAV(to: audioPath) {
@@ -705,7 +786,8 @@ public final class RecordingEngine: ObservableObject {
                             canonicalProjectId: canonicalProjectId,
                             displayProjectId: activeProjectId,
                             activeProjectName: activeProjectName,
-                            realtimeText: safeRealtimeFallbackText
+                            realtimeText: safeRealtimeFallbackText,
+                            pipelineTrace: pipelineTrace
                         )
                     } else {
                         self.finish(saveResult.error ?? "Failed to save transcription")
@@ -721,9 +803,11 @@ public final class RecordingEngine: ObservableObject {
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
                     activeProjectId: activeProjectId,
-                    activeProjectName: activeProjectName
+                    activeProjectName: activeProjectName,
+                    pipelineTrace: pipelineTrace
                 )
             } else if let audioPath, self.writeCapturedWAV(to: audioPath) {
+                self.log(pipelineTrace.message(stage: "wav_write_complete", detail: "path=\(audioPath)"))
                 if realtimeText != nil, !streamingResult.settled {
                     self.log("realtime fast path skipped because final transcript did not settle")
                 }
@@ -736,7 +820,8 @@ public final class RecordingEngine: ObservableObject {
                     canonicalProjectId: canonicalProjectId,
                     displayProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
-                    realtimeText: safeRealtimeFallbackText
+                    realtimeText: safeRealtimeFallbackText,
+                    pipelineTrace: pipelineTrace
                 )
             } else {
                 let resolved = Self.resolveFinalTranscript(
@@ -753,7 +838,8 @@ public final class RecordingEngine: ObservableObject {
                         targetAppBundleIdentifier: targetAppBundleIdentifier,
                         targetAppPid: targetAppPid,
                         activeProjectId: activeProjectId,
-                        activeProjectName: activeProjectName
+                        activeProjectName: activeProjectName,
+                        pipelineTrace: pipelineTrace
                     )
                 } else {
                     self.log("no audio captured")
@@ -777,6 +863,60 @@ public final class RecordingEngine: ObservableObject {
         guard let text else { return nil }
         let trimmed = cleanRealtimeArtifactText(text).trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public nonisolated static func settledRealtimeFastPathTranscript(
+        finishResult: RealtimeFinishResult,
+        pcmByteCount: Int,
+        language: String
+    ) -> String? {
+        guard let text = settledRealtimeFallbackTranscript(
+            finishResult: finishResult,
+            pcmByteCount: pcmByteCount,
+            language: language
+        ) else { return nil }
+        return text
+    }
+
+    public nonisolated static func settledRealtimeFallbackTranscript(
+        finishResult: RealtimeFinishResult,
+        pcmByteCount: Int,
+        language: String
+    ) -> String? {
+        guard finishResult.settled, finishResult.error == nil else { return nil }
+        guard let text = safeRealtimeFallbackTranscript(
+            realtimeText: finishResult.text,
+            language: language
+        ) else { return nil }
+        return shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount) ? nil : text
+    }
+
+    nonisolated static func shouldPasteBeforePersistence(
+        recordingMode: RecordingMode,
+        postProcessingMode: String
+    ) -> Bool {
+        recordingMode != .command && PostProcessingMode(rawValue: postProcessingMode) == .off
+    }
+
+    nonisolated static func shouldLabelRewriting(
+        recordingMode: RecordingMode,
+        postProcessingMode: String
+    ) -> Bool {
+        recordingMode == .command || PostProcessingMode(rawValue: postProcessingMode) != .off
+    }
+
+    @MainActor
+    static func deliverRealtimeBeforePersistence(
+        text: String,
+        persist: @escaping @Sendable () async -> RealtimeFastPathSaveResult,
+        deliver: @escaping @MainActor @Sendable (String) async -> Void,
+        persistenceCompleted: @escaping @MainActor @Sendable (RealtimeFastPathSaveResult) -> Void
+    ) -> Task<Void, Never> {
+        return Task {
+            await deliver(text)
+            let result = await persist()
+            persistenceCompleted(result)
+        }
     }
 
     public nonisolated static func shouldUseRealtimeFastPath(
@@ -998,16 +1138,33 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
-    private func finishWithText(_ text: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?) {
+    private func finishWithText(
+        _ text: String,
+        curMode: RecordingMode,
+        targetAppBundleIdentifier: String?,
+        targetAppPid: pid_t?,
+        activeProjectId: String?,
+        activeProjectName: String?,
+        pipelineTrace: RecordingPipelineTrace? = nil,
+        deliveryCompleted: (@MainActor @Sendable () -> Void)? = nil
+    ) {
         log("finishWithText mode=\(curMode.rawValue) chars=\(text.count)")
         if curMode == .command {
             runCommandMode(instruction: text, targetAppBundleIdentifier: targetAppBundleIdentifier, targetAppPid: targetAppPid)
+            deliveryCompleted?()
             return
         }
 
         let shortcutText = voiceShortcuts?.match(text)
         let output = shortcutText ?? text
-        pasteIntoFrontApp(output, targetAppBundleIdentifier: targetAppBundleIdentifier, targetAppPid: targetAppPid, restoreClipboard: true)
+        pasteIntoFrontApp(
+            output,
+            targetAppBundleIdentifier: targetAppBundleIdentifier,
+            targetAppPid: targetAppPid,
+            restoreClipboard: true,
+            pipelineTrace: pipelineTrace,
+            deliveryCompleted: deliveryCompleted
+        )
         recentTranscriptions.insert(
             TranscriptionResult(
                 rawText: text,
@@ -1049,12 +1206,17 @@ public final class RecordingEngine: ObservableObject {
         transcriberPrompt: String,
         postProcessingMode: String,
         language: String,
-        homePath: String
+        homePath: String,
+        pipelineTrace: RecordingPipelineTrace
     ) async -> RealtimeFastPathSaveResult {
         await Task.detached(priority: .utility) {
             do {
                 var savedAudioPath: String?
                 if let audioPath, !pcmData.isEmpty {
+                    NativeAppLog.write(
+                        pipelineTrace.message(stage: "wav_write_started", detail: "pcm_bytes=\(pcmData.count)"),
+                        homePath: homePath
+                    )
                     try Self.writeWAV(
                         pcmData: pcmData,
                         sampleRate: 24_000,
@@ -1063,7 +1225,10 @@ public final class RecordingEngine: ObservableObject {
                         to: URL(fileURLWithPath: audioPath)
                     )
                     savedAudioPath = audioPath
-                    NativeAppLog.write("wrote wav path=\(audioPath) pcmBytes=\(pcmData.count)", homePath: homePath)
+                    NativeAppLog.write(
+                        pipelineTrace.message(stage: "wav_write_complete", detail: "path=\(audioPath) pcm_bytes=\(pcmData.count)"),
+                        homePath: homePath
+                    )
                 }
 
                 let textFile = try Self.writeTemporaryTranscript(text: text, homePath: homePath)
@@ -1080,14 +1245,29 @@ public final class RecordingEngine: ObservableObject {
                     source: "realtime_fast_path",
                     modelUsed: RealtimeTranscriptionClient.transcriptionModelID
                 )
+                NativeAppLog.write(
+                    pipelineTrace.message(stage: "helper_started", detail: "operation=save_text"),
+                    homePath: homePath
+                )
                 let output = CLIRunner.run(args, home: homePath)
                 if let error = CLIRunner.parseError(output) {
+                    NativeAppLog.write(
+                        pipelineTrace.message(stage: "helper_processing_store_failed", detail: "error=\(NativeErrorSanitizer.sanitize(error))"),
+                        homePath: homePath
+                    )
                     return RealtimeFastPathSaveResult(text: nil, error: error)
                 }
 
-                NativeAppLog.write("realtime fast-path save completed", homePath: homePath)
+                NativeAppLog.write(
+                    pipelineTrace.message(stage: "helper_processing_store_complete"),
+                    homePath: homePath
+                )
                 return RealtimeFastPathSaveResult(text: CLIRunner.parseJSON(output) ?? text, error: nil)
             } catch {
+                NativeAppLog.write(
+                    pipelineTrace.message(stage: "persistence_failed", detail: "error=\(NativeErrorSanitizer.sanitize(error.localizedDescription))"),
+                    homePath: homePath
+                )
                 return RealtimeFastPathSaveResult(text: nil, error: error.localizedDescription)
             }
         }.value
@@ -1161,12 +1341,16 @@ public final class RecordingEngine: ObservableObject {
         canonicalProjectId: String?,
         displayProjectId: String?,
         activeProjectName: String?,
-        realtimeText: String? = nil
+        realtimeText: String? = nil,
+        pipelineTrace: RecordingPipelineTrace? = nil
     ) {
         let homePath = home
 
         isTranscribing = true
-        statusMessage = "Transcribing..."
+        statusMessage = Self.shouldLabelRewriting(
+            recordingMode: curMode,
+            postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+        ) ? "Rewriting..." : "Transcribing..."
 
         // Only a proven canonical Store id may be persisted. The local display id remains
         // available to recent-transcript UI even when synchronization is degraded.
@@ -1178,11 +1362,22 @@ public final class RecordingEngine: ObservableObject {
         )
 
         Task.detached {
+            if let pipelineTrace {
+                NativeAppLog.write(
+                    pipelineTrace.message(stage: "helper_started", detail: "operation=batch_transcribe"),
+                    homePath: homePath
+                )
+            }
             let output = CLIRunner.run(transcribeArgs, home: homePath)
             let cliError = CLIRunner.parseError(output)
             let cliText = cliError == nil ? CLIRunner.parseJSON(output) : nil
 
             await MainActor.run {
+                if let pipelineTrace {
+                    self.log(pipelineTrace.message(
+                        stage: cliError == nil ? "helper_processing_store_complete" : "helper_processing_store_failed"
+                    ))
+                }
                 if let cliError {
                     self.log("cli transcription failed error=\(cliError)")
                 } else if cliText == nil {
@@ -1207,7 +1402,8 @@ public final class RecordingEngine: ObservableObject {
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
                     activeProjectId: displayProjectId,
-                    activeProjectName: activeProjectName
+                    activeProjectName: activeProjectName,
+                    pipelineTrace: pipelineTrace
                 )
             }
         }
@@ -1377,7 +1573,31 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
-    public func pasteIntoFrontApp(_ text: String, targetAppBundleIdentifier: String? = nil, targetAppPid: pid_t? = nil, restoreClipboard: Bool = false) {
+    public func pasteIntoFrontApp(
+        _ text: String,
+        targetAppBundleIdentifier: String? = nil,
+        targetAppPid: pid_t? = nil,
+        restoreClipboard: Bool = false
+    ) {
+        pasteIntoFrontApp(
+            text,
+            targetAppBundleIdentifier: targetAppBundleIdentifier,
+            targetAppPid: targetAppPid,
+            restoreClipboard: restoreClipboard,
+            pipelineTrace: nil,
+            deliveryCompleted: nil
+        )
+    }
+
+    private func pasteIntoFrontApp(
+        _ text: String,
+        targetAppBundleIdentifier: String? = nil,
+        targetAppPid: pid_t? = nil,
+        restoreClipboard: Bool = false,
+        pipelineTrace: RecordingPipelineTrace?,
+        deliveryCompleted: (@MainActor @Sendable () -> Void)?
+    ) {
+        if let pipelineTrace { log(pipelineTrace.message(stage: "paste_requested", detail: "chars=\(text.count)")) }
         log("paste requested chars=\(text.count) target=\(targetAppBundleIdentifier ?? "nil") pid=\(targetAppPid.map(String.init) ?? "nil") accessibility=\(AXIsProcessTrusted())")
         let pb = NSPasteboard.general
         let previousClipboard = restoreClipboard ? ClipboardSnapshot(pasteboard: pb) : nil
@@ -1390,6 +1610,7 @@ public final class RecordingEngine: ObservableObject {
             self.statusMessage = prompted
                 ? "Copied — approve Accessibility for this Recordings app"
                 : "Copied — waiting for Accessibility approval"
+            deliveryCompleted?()
             return
         }
 
@@ -1403,6 +1624,7 @@ public final class RecordingEngine: ObservableObject {
         guard let app = targetApp else {
             log("paste target app not found")
             self.statusMessage = "Copied — no target app found"
+            deliveryCompleted?()
             return
         }
 
@@ -1423,6 +1645,10 @@ public final class RecordingEngine: ObservableObject {
                 up.post(tap: .cgSessionEventTap)
             }
             self.log("paste event posted target=\(app.bundleIdentifier ?? "?") alreadyFrontmost=\(alreadyFrontmost)")
+            if let pipelineTrace {
+                self.log(pipelineTrace.message(stage: "paste_posted", detail: "chars=\(text.count)"))
+            }
+            deliveryCompleted?()
             self.statusMessage = "Pasted (\(text.count) chars)"
 
             if let previousClipboard {

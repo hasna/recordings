@@ -7,15 +7,21 @@ struct MenuBarPresentation: Equatable {
     let accessibilityLabel: String
     let statusText: String
 
-    init(isRecording: Bool, isTranscribing: Bool, idleStatus: String = "Ready") {
+    init(
+        isRecording: Bool,
+        isTranscribing: Bool,
+        idleStatus: String = "Ready",
+        busyStatus: String = "Transcribing"
+    ) {
         if isRecording {
             iconName = "waveform"
             accessibilityLabel = "Recordings, recording"
             statusText = "Recording"
         } else if isTranscribing {
             iconName = "ellipsis.circle"
-            accessibilityLabel = "Recordings, transcribing"
-            statusText = "Transcribing"
+            let normalizedBusyStatus = busyStatus.trimmingCharacters(in: .punctuationCharacters)
+            accessibilityLabel = "Recordings, \(normalizedBusyStatus.lowercased())"
+            statusText = normalizedBusyStatus
         } else {
             iconName = "mic.fill"
             accessibilityLabel = "Recordings"
@@ -36,7 +42,8 @@ struct MenuBarStatusLabel: View {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
             isTranscribing: store.engine.isTranscribing,
-            idleStatus: store.engine.statusMessage
+            idleStatus: store.engine.statusMessage,
+            busyStatus: store.engine.statusMessage
         )
     }
 }
@@ -110,7 +117,8 @@ struct MenuBarStatusView: View {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
             isTranscribing: store.engine.isTranscribing,
-            idleStatus: store.engine.statusMessage
+            idleStatus: store.engine.statusMessage,
+            busyStatus: store.engine.statusMessage
         )
     }
 

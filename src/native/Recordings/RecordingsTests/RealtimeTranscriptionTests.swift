@@ -2,6 +2,84 @@ import Testing
 import Foundation
 @testable import RecordingsLib
 
+@MainActor
+private final class FakeRealtimeClock {
+    var nowMilliseconds: UInt64 = 0
+
+    func advance(by milliseconds: UInt64) {
+        nowMilliseconds += milliseconds
+    }
+}
+
+@MainActor
+private final class RealtimeDeliveryProbe {
+    var deliveredText: String?
+    var persistedResult: RealtimeFastPathSaveResult?
+}
+
+private actor BlockingRealtimePersistence {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func run() async -> RealtimeFastPathSaveResult {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return RealtimeFastPathSaveResult(text: "stored text", error: nil)
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private actor BlockingRealtimeDelivery {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func run() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
 // MARK: - RealtimeTranscriptionClient Event Parsing Tests
 
 struct RealtimeTranscriptionTests {
@@ -159,52 +237,184 @@ struct RealtimeTranscriptionTests {
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 5_760) == true)
     }
 
-    @Test("Realtime finish only settles after completed transcription events")
-    func finishSettledDecision() {
-        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
-            didManualCommit: true,
-            completedCountBeforeCommit: 0,
-            completedEventCount: 0,
-            expectedCommitCount: 1,
-            hasIncompleteCommittedItems: true,
-            uncommittedAudioBytes: 0,
-            secondsSinceLastEvent: 0.5
-        ) == false)
-        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
-            didManualCommit: true,
-            completedCountBeforeCommit: 0,
-            completedEventCount: 1,
-            expectedCommitCount: 1,
-            hasIncompleteCommittedItems: false,
-            uncommittedAudioBytes: 0,
-            secondsSinceLastEvent: 0.5
+    @Test("Realtime finish waits for the exact final item and every prior item")
+    func exactFinalItemSettlementHandlesOutOfOrderCompletion() {
+        var tracker = RealtimeCommitSettlementTracker()
+        tracker.queueCommit(isFinal: false)
+        tracker.queueCommit(isFinal: true)
+        tracker.complete(itemID: "item-final")
+        tracker.acknowledge(itemID: "item-prior")
+        tracker.acknowledge(itemID: "item-final")
+        #expect(tracker.resolution(uncommittedRealAudioBytes: 0) == .waiting)
+
+        tracker.complete(itemID: "item-prior")
+        #expect(tracker.finalItemID == "item-final")
+        #expect(tracker.resolution(uncommittedRealAudioBytes: 1) == .waiting)
+        #expect(tracker.resolution(uncommittedRealAudioBytes: 0) == .settled)
+    }
+
+    @Test("Commit settlement handles duplicate acknowledgements, prior failure, and periodic reuse")
+    func commitSettlementEdgeCases() {
+        var tracker = RealtimeCommitSettlementTracker()
+        let priorSequence = tracker.queueCommit(isFinal: false)
+        let finalSequence = tracker.queueCommit(isFinal: false)
+        #expect(tracker.acknowledge(itemID: "item-prior")?.sequence == priorSequence)
+        #expect(tracker.acknowledge(itemID: "item-prior")?.sequence == priorSequence)
+        #expect(tracker.acknowledge(itemID: "item-final")?.sequence == finalSequence)
+        let didMarkLatestCommitFinal = tracker.markLatestCommitFinal()
+        #expect(didMarkLatestCommitFinal)
+        #expect(tracker.finalItemID == "item-final")
+
+        tracker.complete(itemID: "item-final")
+        tracker.fail(itemID: "item-prior")
+        #expect(tracker.resolution(uncommittedRealAudioBytes: 0) == .failed)
+    }
+
+    @Test("A final completion at 690 ms settles without a batch fallback")
+    @MainActor
+    func finalCompletionNearDeadlineUsesFastPath() async {
+        var tracker = RealtimeCommitSettlementTracker()
+        tracker.queueCommit(isFinal: true)
+        let clock = FakeRealtimeClock()
+
+        let waitResult = await RealtimeTranscriptionClient.waitForSettlementTestHelper(
+            timeoutMilliseconds: 700,
+            resolution: {
+                tracker.resolution(uncommittedRealAudioBytes: 0)
+            },
+            nowMilliseconds: {
+                clock.nowMilliseconds
+            },
+            sleepMilliseconds: { milliseconds in
+                clock.advance(by: milliseconds)
+                if clock.nowMilliseconds == 10 {
+                    tracker.acknowledge(itemID: "item-final")
+                }
+                if clock.nowMilliseconds >= 690 {
+                    tracker.complete(itemID: "item-final")
+                }
+            }
+        )
+
+        #expect(waitResult.resolution == .settled)
+        #expect(waitResult.elapsedMilliseconds == 690)
+        let finishResult = RealtimeFinishResult(text: "final words", settled: true, error: nil)
+        #expect(RecordingEngine.settledRealtimeFastPathTranscript(
+            finishResult: finishResult,
+            pcmByteCount: 12_000,
+            language: "en"
+        ) == "final words")
+    }
+
+    @Test("A sub-threshold final PCM tail is retained and padded only for realtime commit")
+    func subThresholdFinalTailIsPadded() {
+        let storedPCM = Data((0..<1_280).map { UInt8($0 % 251) })
+        let storedCopy = storedPCM
+        let plan = RealtimeTranscriptionClient.finalCommitPlanTestHelper(
+            realAudioByteCount: storedPCM.count
+        )
+
+        #expect(plan.realAudioByteCount == 1_280)
+        #expect(plan.paddingByteCount == 4_480)
+        #expect(plan.committedAudioByteCount == 5_760)
+        #expect(plan.realtimePadding.count == 4_480)
+        #expect(plan.realtimePadding.allSatisfy { $0 == 0 })
+        #expect(storedPCM == storedCopy)
+        #expect(RealtimeTranscriptionClient.finalCommitPlanTestHelper(
+            realAudioByteCount: 5_759
+        ).paddingByteCount == 1)
+        #expect(RealtimeTranscriptionClient.finalCommitPlanTestHelper(
+            realAudioByteCount: 5_760
+        ).paddingByteCount == 0)
+        #expect(RealtimeTranscriptionClient.finalCommitPlanTestHelper(
+            realAudioByteCount: 0
+        ).committedAudioByteCount == 0)
+    }
+
+    @Test("Failed and unacknowledged final items require batch fallback without partial paste")
+    func incompleteFinalItemsRejectFastPath() {
+        var failedTracker = RealtimeCommitSettlementTracker()
+        failedTracker.queueCommit(isFinal: true)
+        failedTracker.acknowledge(itemID: "item-final")
+        failedTracker.fail(itemID: "item-final")
+        failedTracker.complete(itemID: "item-final")
+        #expect(failedTracker.resolution(uncommittedRealAudioBytes: 0) == .failed)
+
+        var unacknowledgedTracker = RealtimeCommitSettlementTracker()
+        unacknowledgedTracker.queueCommit(isFinal: true)
+        unacknowledgedTracker.complete(itemID: "unbound-completion")
+        #expect(unacknowledgedTracker.resolution(uncommittedRealAudioBytes: 0) == .waiting)
+
+        let partialResult = RealtimeFinishResult(text: "optimistic partial", settled: false, error: nil)
+        #expect(RecordingEngine.settledRealtimeFastPathTranscript(
+            finishResult: partialResult,
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
+        #expect(RecordingEngine.settledRealtimeFallbackTranscript(
+            finishResult: partialResult,
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
+
+        let settledPartialResult = RealtimeFinishResult(text: "Hi", settled: true, error: nil)
+        #expect(RecordingEngine.settledRealtimeFallbackTranscript(
+            finishResult: settledPartialResult,
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
+    }
+
+    @Test("Disabled transformation pastes before blocked persistence completes")
+    @MainActor
+    func blockedPersistenceDoesNotDelayPaste() async {
+        let delivery = BlockingRealtimeDelivery()
+        let persistence = BlockingRealtimePersistence()
+        let probe = RealtimeDeliveryProbe()
+
+        let persistenceTask = RecordingEngine.deliverRealtimeBeforePersistence(
+            text: "settled realtime text",
+            persist: { await persistence.run() },
+            deliver: {
+                probe.deliveredText = $0
+                await delivery.run()
+            },
+            persistenceCompleted: { probe.persistedResult = $0 }
+        )
+
+        #expect(probe.persistedResult?.text == nil)
+        await delivery.waitUntilStarted()
+        #expect(await persistence.hasStarted() == false)
+        await delivery.release()
+        await persistence.waitUntilStarted()
+        #expect(probe.deliveredText == "settled realtime text")
+
+        await persistence.release()
+        await persistenceTask.value
+        #expect(probe.persistedResult?.text == "stored text")
+        #expect(RecordingEngine.shouldPasteBeforePersistence(
+            recordingMode: .pushToTalk,
+            postProcessingMode: PostProcessingMode.off.rawValue
         ))
-        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
-            didManualCommit: true,
-            completedCountBeforeCommit: 0,
-            completedEventCount: 1,
-            expectedCommitCount: 1,
-            hasIncompleteCommittedItems: false,
-            uncommittedAudioBytes: 0,
-            secondsSinceLastEvent: 0.1
+        #expect(RecordingEngine.shouldPasteBeforePersistence(
+            recordingMode: .command,
+            postProcessingMode: PostProcessingMode.off.rawValue
         ) == false)
-        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
-            didManualCommit: false,
-            completedCountBeforeCommit: 1,
-            completedEventCount: 1,
-            expectedCommitCount: 1,
-            hasIncompleteCommittedItems: false,
-            uncommittedAudioBytes: 1,
-            secondsSinceLastEvent: 0.5
+        #expect(RecordingEngine.shouldPasteBeforePersistence(
+            recordingMode: .pushToTalk,
+            postProcessingMode: PostProcessingMode.always.rawValue
         ) == false)
-        #expect(RealtimeTranscriptionClient.isFinishSettledTestHelper(
-            didManualCommit: false,
-            completedCountBeforeCommit: 1,
-            completedEventCount: 1,
-            expectedCommitCount: 1,
-            hasIncompleteCommittedItems: false,
-            uncommittedAudioBytes: 5_759,
-            secondsSinceLastEvent: 0.5
+        #expect(RecordingEngine.shouldLabelRewriting(
+            recordingMode: .pushToTalk,
+            postProcessingMode: PostProcessingMode.always.rawValue
+        ))
+        #expect(RecordingEngine.shouldLabelRewriting(
+            recordingMode: .pushToTalk,
+            postProcessingMode: PostProcessingMode.auto.rawValue
+        ))
+        #expect(RecordingEngine.shouldLabelRewriting(
+            recordingMode: .pushToTalk,
+            postProcessingMode: PostProcessingMode.off.rawValue
         ) == false)
     }
 
