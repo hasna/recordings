@@ -48,8 +48,8 @@ function createInstallerFixture() {
   const bin = join(root, "bin");
   const markers = join(root, "markers");
   const candidate = join(root, "candidate", "Recordings.app");
-  const artifact = join(root, "Recordings-0.2.11-macos.zip");
-  const manifest = join(root, "Recordings-0.2.11-macos.manifest.json");
+  const artifact = join(root, "Recordings-0.2.12-macos.zip");
+  const manifest = join(root, "Recordings-0.2.12-macos.manifest.json");
   const installer = join(root, "scripts", "install_macos_app.sh");
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
@@ -387,7 +387,7 @@ set -euo pipefail
 case "\${HASNA_RECORDINGS_DB_PATH:-}" in "$HOME"/*) ;; *) exit 71 ;; esac
 [ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 71
 case "\${1:-}" in
-  --version) printf '0.2.11\n' ;;
+  --version) printf '0.2.12\n' ;;
   --json)
     if [ "\${2:-}" = project ] && [ "\${3:-}" = register ]; then
       [ "\${4:-}" = --name ] && [ "\${5:-}" = "Signed Helper Contract" ] || exit 64
@@ -409,7 +409,7 @@ if [ "\${BREAK_SIGNED_HELPER:-0}" = 1 ]; then
 elif [ "\${MALFORMED_SIGNED_HELPER_OUTPUT:-0}" = 1 ]; then
   cat > "$1" <<'EOF'
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then printf '0.2.11\n'; else printf 'Signed Helper Contract Signed helper contract\n'; fi
+if [ "\${1:-}" = --version ]; then printf '0.2.12\n'; else printf 'Signed Helper Contract Signed helper contract\n'; fi
 EOF
 fi
 chmod +x "$1"
@@ -462,7 +462,7 @@ exit 0
     );
     writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
     writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
-    writeExecutable(join(bin, "plistbuddy"), "#!/usr/bin/env bash\nprintf '0.2.11\\n'\n");
+    writeExecutable(join(bin, "plistbuddy"), "#!/usr/bin/env bash\nprintf '0.2.12\\n'\n");
     writeExecutable(
       join(bin, "plutil"),
       `#!/usr/bin/env bash
@@ -550,7 +550,7 @@ fi
     expect(readFileSync(join(fixture.markers, "ui-smoke.log"), "utf8")).toContain("Recordings.app");
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app", "Contents", "Helpers", "recordings"))).toBeTrue();
-    expect(existsSync(join(fixture.native, ".build", "debug", "Recordings-0.2.11-macos.zip"))).toBeFalse();
+    expect(existsSync(join(fixture.native, ".build", "debug", "Recordings-0.2.12-macos.zip"))).toBeFalse();
   });
 
   test("release builds reject missing signer and notary configuration", async () => {
@@ -642,7 +642,7 @@ fi
     expect(helperSigning).toBeGreaterThan(-1);
     expect(provenance).toBeGreaterThan(helperSigning);
     expect(appSigning).toBeGreaterThan(provenance);
-    expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.11-macos.zip"))).toBeTrue();
-    expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.11-macos.manifest.json"))).toBeTrue();
+    expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos.zip"))).toBeTrue();
+    expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos.manifest.json"))).toBeTrue();
   });
 });

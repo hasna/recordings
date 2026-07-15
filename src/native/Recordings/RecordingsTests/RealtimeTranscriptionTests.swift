@@ -418,6 +418,54 @@ struct RealtimeTranscriptionTests {
         ) == false)
     }
 
+    @Test("Async realtime delivery prompts once before persistence and normal launch never prompts")
+    @MainActor
+    func asyncRealtimeDeliveryUsesProcessPromptGate() async {
+        let normalLaunch = PermissionRequestLaunchPlan(arguments: ["Recordings"])
+        let gate = AccessibilityPromptGate()
+        let persistence = BlockingRealtimePersistence()
+        let probe = RealtimeDeliveryProbe()
+        var promptCalls = 0
+
+        #expect(!normalLaunch.requestsAccessibilityPrompt)
+        #expect(gate.promptRequestCount == 0)
+
+        let persistenceTask = RecordingEngine.deliverRealtimeBeforePersistence(
+            text: "settled realtime text",
+            persist: { await persistence.run() },
+            deliver: { text in
+                let first = gate.trustForProtectedOperation(
+                    isTrusted: { false },
+                    requestPrompt: {
+                        promptCalls += 1
+                        return false
+                    }
+                )
+                let repeatedCheck = gate.trustForProtectedOperation(
+                    isTrusted: { false },
+                    requestPrompt: {
+                        promptCalls += 1
+                        return false
+                    }
+                )
+                #expect(first.didPrompt)
+                #expect(!repeatedCheck.didPrompt)
+                probe.deliveredText = text
+            },
+            persistenceCompleted: { probe.persistedResult = $0 }
+        )
+
+        await persistence.waitUntilStarted()
+        #expect(probe.deliveredText == "settled realtime text")
+        #expect(promptCalls == 1)
+        #expect(gate.promptRequestCount == 1)
+        #expect(probe.persistedResult == nil)
+
+        await persistence.release()
+        await persistenceTask.value
+        #expect(probe.persistedResult?.text == "stored text")
+    }
+
     @Test("Partial realtime text falls back for longer recordings")
     func partialRealtimeFallback() {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 96_000) == true)
