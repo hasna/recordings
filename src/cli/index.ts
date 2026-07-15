@@ -21,6 +21,7 @@ import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
+import { runMacOSPermissionRequest } from "./macos-permissions.js";
 import { currentMachineId } from "../lib/machine.js";
 
 const program = new Command();
@@ -845,18 +846,11 @@ appCommand
       resetMacOSPermissions();
     }
 
-    const result = spawnSync("open", [
-      "-n",
-      status.installed_app_path,
-      "--args",
-      "--request-permissions",
-      "--open-permission-settings",
-    ], { stdio: "inherit" });
-    if (result.error) {
-      console.error(chalk.red(result.error.message));
-      process.exit(1);
+    const result = runMacOSPermissionRequest(status.installed_app_path);
+    if (result.errorMessage) {
+      console.error(chalk.red(result.errorMessage));
     }
-    process.exit(result.status ?? 1);
+    process.exit(result.exitCode);
   });
 
 appCommand

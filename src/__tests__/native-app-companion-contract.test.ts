@@ -110,7 +110,32 @@ describe("native app companion contract", () => {
     );
     expect(app).not.toContain("if state.declaresMenuBar");
     expect(app).toContain("if plan.isRuntimeSmoke");
-    expect(app).toContain("else if plan.isHelper");
+    expect(app).toContain("else if plan.requestsAccessibilityPrompt");
+    const launchInitialization = app.slice(
+      app.indexOf("init() {"),
+      app.indexOf("@SceneBuilder var body"),
+    );
+    expect(launchInitialization).not.toContain("AXIsProcessTrustedWithOptions");
+  });
+
+  test("Accessibility prompting is process-gated and runtime smoke reports prompt calls", () => {
+    const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+    const gate = readFileSync(
+      "src/native/Recordings/RecordingsLib/AccessibilityPromptGate.swift",
+      "utf8",
+    );
+    expect(app).toContain("AccessibilityPromptGate.processShared.requestExplicitly");
+    expect(app).toContain("AccessibilityPromptGate.processShared.promptRequestCount");
+    expect(app).not.toContain("AXIsProcessTrustedWithOptions");
+    expect(engine).toContain("AccessibilityPromptGate.processShared");
+    expect(engine).not.toContain("AXIsProcessTrustedWithOptions");
+    expect(engine).not.toContain("lastAccessibilityPromptAt");
+    expect(engine).not.toContain("timeIntervalSince(lastAccessibilityPromptAt)");
+    expect(gate.match(/AXIsProcessTrustedWithOptions/g)).toHaveLength(1);
   });
 
   test("recording capture is not gated on project synchronization readiness", () => {

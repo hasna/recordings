@@ -91,11 +91,6 @@ struct RuntimeSmokeResult: Codable {
     let mainWindowIsKey: Bool
 }
 
-@MainActor
-enum PermissionRequestRuntimeEvidence {
-    static var invocationCount = 0
-}
-
 enum RuntimeSmokeAccessibilityObservationStatus: String {
     case available
     case absent
