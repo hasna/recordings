@@ -711,6 +711,10 @@ appCommand
     launch?: boolean;
     launchTimeout: string;
   }) => {
+    if (process.platform !== "darwin") {
+      console.error(chalk.red("Recordings.app installation is only supported on macOS"));
+      process.exit(1);
+    }
     const status = getMacOSAppStatus();
     if (!status.installer_available) {
       console.error(chalk.red(`App installer missing from package: ${status.installer_path}`));

@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
+const bunExecutable = process.execPath;
 const temporaryPaths: string[] = [];
 
 afterEach(() => {
@@ -182,6 +183,18 @@ async function runInstaller(
 }
 
 describe("macOS finalized artifact installer", () => {
+  test("rejects non-macOS invocation before inspecting artifact paths", async () => {
+    const fixture = createInstallerFixture();
+    writeExecutable(join(fixture.bin, "uname"), "#!/usr/bin/env bash\nprintf 'Linux\\n'\n");
+    rmSync(fixture.artifact);
+    rmSync(fixture.manifest);
+
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("only supported on macOS");
+    expect(result.stderr).not.toContain("does not exist");
+  });
+
   test("has no package postinstall or target-build fallback", () => {
     const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as {
       scripts?: Record<string, string>;
@@ -356,9 +369,49 @@ describe("macOS signed artifact build", () => {
     chmodSync(join(native, "build.sh"), 0o755);
     writeFileSync(join(native, "RecordingsLib", "Info.plist"), "<plist><dict/></plist>\n");
     writeFileSync(join(native, "RecordingsLib", "Recordings.entitlements"), "<plist><dict/></plist>\n");
+    cpSync(
+      join(repositoryRoot, "src", "native", "Recordings", "RecordingsLib", "RecordingsCLI.entitlements"),
+      join(native, "RecordingsLib", "RecordingsCLI.entitlements"),
+    );
     writeExecutable(
       join(root, "scripts", "build_companion_cli.sh"),
-      "#!/usr/bin/env bash\nmkdir -p \"$(dirname \"$1\")\"\nprintf companion > \"$1\"\nchmod +x \"$1\"\n",
+      `#!/usr/bin/env bash
+mkdir -p "$(dirname "$1")"
+cat > "$1" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ -z "\${HASNA_RECORDINGS_API_URL:-}" ] || exit 71
+[ -z "\${HASNA_RECORDINGS_API_KEY:-}" ] || exit 71
+[ "\${HASNA_RECORDINGS_STORAGE_MODE:-}" = local ] || exit 71
+[ "\${RECORDINGS_STORAGE_MODE:-}" = local ] || exit 71
+case "\${HASNA_RECORDINGS_DB_PATH:-}" in "$HOME"/*) ;; *) exit 71 ;; esac
+[ "$PWD" = "$HOME" ] || exit 71
+case "\${1:-}" in
+  --version) printf '0.2.11\n' ;;
+  --json)
+    case "\${2:-} \${3:-}" in
+      "project register") printf '{"id":"smoke-project","name":"Signed Helper Contract","path":"recordings-app://build/signed-helper-contract"}\n' ;;
+      "save-text Signed helper contract") printf '{"id":"smoke-recording","raw_text":"Signed helper contract"}\n' ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+EOF
+if [ "\${BREAK_SIGNED_HELPER:-0}" = 1 ]; then
+  printf '#!/usr/bin/env bash\nexit 70\n' > "$1"
+elif [ "\${MALFORMED_SIGNED_HELPER_OUTPUT:-0}" = 1 ]; then
+  cat > "$1" <<'EOF'
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf '0.2.11\n'; else printf 'Signed Helper Contract Signed helper contract\n'; fi
+EOF
+fi
+chmod +x "$1"
+`,
+    );
+    writeExecutable(
+      join(root, "scripts", "smoke_macos_app.sh"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/ui-smoke.log\"\n",
     );
     writeFileSync(join(root, "scripts", "macos_artifact.ts"), "fixture");
     writeExecutable(
@@ -382,7 +435,13 @@ exit 0
       join(bin, "codesign"),
       `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MARKER_DIRECTORY/codesign.log"
-if [[ "$*" == *"--verbose=4"* ]]; then
+if [[ "$*" == *"--entitlements :-"* ]]; then
+  if [ "\${EXTRA_HELPER_ENTITLEMENT:-0}" = 1 ]; then
+    printf '<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/><key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>\n'
+  else
+    cat "$EXPECTED_HELPER_ENTITLEMENTS"
+  fi
+elif [[ "$*" == *"--verbose=4"* ]]; then
   printf 'Authority=%s\nTeamIdentifier=%s\nCodeDirectory flags=%s\n' "\${SIGNING_AUTHORITY:-Developer ID Application: Example Corp (EXAMPLE123)}" "\${SIGNING_TEAM:-EXAMPLE123}" "\${SIGNING_FLAGS:-0x10000(runtime)}" >&2
   [ "\${MISSING_TIMESTAMP:-0}" = 1 ] || printf 'Timestamp=Jul 15, 2026 at 12:00:00\n' >&2
 fi
@@ -397,6 +456,20 @@ exit 0
     writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
     writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
     writeExecutable(join(bin, "plistbuddy"), "#!/usr/bin/env bash\nprintf '0.2.11\\n'\n");
+    writeExecutable(
+      join(bin, "plutil"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+input="\${@: -1}"
+if [ "\${REVERSE_ENTITLEMENT_ORDER:-0}" = 1 ]; then
+  printf '{"com.apple.security.cs.allow-unsigned-executable-memory":true,"com.apple.security.cs.allow-jit":true}\n'
+elif grep -q 'disable-library-validation' "$input"; then
+  printf '{"com.apple.security.cs.allow-jit":true,"com.apple.security.cs.allow-unsigned-executable-memory":true,"com.apple.security.cs.disable-library-validation":true}\n'
+else
+  printf '{"com.apple.security.cs.allow-jit":true,"com.apple.security.cs.allow-unsigned-executable-memory":true}\n'
+fi
+`,
+    );
     return { root, native, bin, markers };
   }
 
@@ -408,6 +481,9 @@ exit 0
         PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
         MARKER_DIRECTORY: fixture.markers,
         PLIST_BUDDY: join(fixture.bin, "plistbuddy"),
+        PLUTIL: join(fixture.bin, "plutil"),
+        BUN_EXECUTABLE: bunExecutable,
+        EXPECTED_HELPER_ENTITLEMENTS: join(fixture.native, "RecordingsLib", "RecordingsCLI.entitlements"),
         RECORDINGS_CODESIGN_IDENTITY: "Developer ID Application: Example Corp (EXAMPLE123)",
         RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "EXAMPLE123",
         RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "recordings-notary",
@@ -432,6 +508,9 @@ exit 0
         PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
         MARKER_DIRECTORY: fixture.markers,
         PLIST_BUDDY: join(fixture.bin, "plistbuddy"),
+        PLUTIL: join(fixture.bin, "plutil"),
+        BUN_EXECUTABLE: bunExecutable,
+        EXPECTED_HELPER_ENTITLEMENTS: join(fixture.native, "RecordingsLib", "RecordingsCLI.entitlements"),
         RECORDINGS_CODESIGN_IDENTITY: "",
         RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
         RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "",
@@ -455,7 +534,10 @@ exit 0
     expect(result.stdout).toContain("Built non-distributable debug app");
     const codesignLog = readFileSync(join(fixture.markers, "codesign.log"), "utf8");
     expect(codesignLog).toContain("--force --sign -");
+    expect(codesignLog).toContain("--options runtime");
+    expect(codesignLog).toContain("--entitlements RecordingsLib/RecordingsCLI.entitlements");
     expect(codesignLog).not.toContain("--timestamp");
+    expect(readFileSync(join(fixture.markers, "ui-smoke.log"), "utf8")).toContain("Recordings.app");
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app", "Contents", "Helpers", "recordings"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings-0.2.11-macos.zip"))).toBeFalse();
@@ -500,12 +582,40 @@ exit 0
     expect(missingRuntime.stderr).toContain("hardened runtime");
   });
 
+  test("rejects extra helper entitlements and a signed helper that cannot execute", async () => {
+    const fixture = createBuildFixture();
+    const extraEntitlement = await runBuild(fixture, { EXTRA_HELPER_ENTITLEMENT: "1" });
+    expect(extraEntitlement.exitCode).not.toBe(0);
+    expect(extraEntitlement.stderr).toContain("unexpected hardened-runtime entitlements");
+
+    const brokenHelper = await runBuild(fixture, { BREAK_SIGNED_HELPER: "1" });
+    expect(brokenHelper.exitCode).not.toBe(0);
+    expect(brokenHelper.stderr).toContain("signed companion CLI contract failed");
+
+    const malformedHelper = await runBuild(fixture, { MALFORMED_SIGNED_HELPER_OUTPUT: "1" });
+    expect(malformedHelper.exitCode).not.toBe(0);
+    expect(malformedHelper.stderr).toContain("invalid JSON");
+  });
+
+  test("signed helper contract ignores hostile storage env and entitlement key order", async () => {
+    const fixture = createBuildFixture();
+    const result = await runBuild(fixture, {
+      HASNA_RECORDINGS_API_URL: "https://example.invalid",
+      HASNA_RECORDINGS_API_KEY: "fixture-not-a-secret",
+      HASNA_RECORDINGS_STORAGE_MODE: "cloud",
+      HASNA_RECORDINGS_DB_PATH: "/should/not/be/used.sqlite",
+      REVERSE_ENTITLEMENT_ORDER: "1",
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+  });
+
   test("signs helper and app then emits finalized ZIP and manifest", async () => {
     const fixture = createBuildFixture();
     const result = await runBuild(fixture);
     expect(result.exitCode).toBe(0);
     const codesignLog = readFileSync(join(fixture.markers, "codesign.log"), "utf8");
     expect(codesignLog).toContain("--options runtime --timestamp");
+    expect(codesignLog).toContain("--entitlements RecordingsLib/RecordingsCLI.entitlements");
     expect(codesignLog).toContain("Contents/Helpers/recordings");
     const bunLog = readFileSync(join(fixture.markers, "bun.log"), "utf8");
     expect(bunLog).toContain("provenance");
@@ -515,7 +625,7 @@ exit 0
       "utf8",
     );
     const helperSigning = buildScript.indexOf(
-      'codesign "${SIGN_ARGUMENTS[@]}" "$HELPERS/recordings"',
+      'codesign "${HELPER_SIGN_ARGUMENTS[@]}"',
     );
     const provenance = buildScript.indexOf('macos_artifact.ts" provenance');
     const appSigning = buildScript.indexOf("--entitlements", provenance);

@@ -2,24 +2,42 @@
 import SwiftUI
 import RecordingsLib
 
+struct MenuBarPresentation: Equatable {
+    let iconName: String
+    let accessibilityLabel: String
+    let statusText: String
+
+    init(isRecording: Bool, isTranscribing: Bool, idleStatus: String = "Ready") {
+        if isRecording {
+            iconName = "waveform"
+            accessibilityLabel = "Recordings, recording"
+            statusText = "Recording"
+        } else if isTranscribing {
+            iconName = "ellipsis.circle"
+            accessibilityLabel = "Recordings, transcribing"
+            statusText = "Transcribing"
+        } else {
+            iconName = "mic.fill"
+            accessibilityLabel = "Recordings"
+            statusText = idleStatus
+        }
+    }
+}
+
 struct MenuBarStatusLabel: View {
     @ObservedObject var store: RecordingsStore
 
     var body: some View {
-        Image(systemName: iconName)
-            .accessibilityLabel(statusLabel)
+        Image(systemName: presentation.iconName)
+            .accessibilityLabel(presentation.accessibilityLabel)
     }
 
-    private var iconName: String {
-        if store.engine.isRecording { return "waveform" }
-        if store.engine.isTranscribing { return "ellipsis.circle" }
-        return "mic.fill"
-    }
-
-    private var statusLabel: String {
-        if store.engine.isRecording { return "Recordings, recording" }
-        if store.engine.isTranscribing { return "Recordings, transcribing" }
-        return "Recordings"
+    private var presentation: MenuBarPresentation {
+        MenuBarPresentation(
+            isRecording: store.engine.isRecording,
+            isTranscribing: store.engine.isTranscribing,
+            idleStatus: store.engine.statusMessage
+        )
     }
 }
 
@@ -77,9 +95,7 @@ struct MenuBarStatusView: View {
     }
 
     private var statusIcon: String {
-        if store.engine.isRecording { return "waveform" }
-        if store.engine.isTranscribing { return "ellipsis.circle" }
-        return "mic.fill"
+        presentation.iconName
     }
 
     private var statusColor: Color {
@@ -87,9 +103,15 @@ struct MenuBarStatusView: View {
     }
 
     private var statusText: String {
-        if store.engine.isRecording { return "Recording" }
-        if store.engine.isTranscribing { return "Transcribing" }
-        return store.engine.statusMessage
+        presentation.statusText
+    }
+
+    private var presentation: MenuBarPresentation {
+        MenuBarPresentation(
+            isRecording: store.engine.isRecording,
+            isTranscribing: store.engine.isTranscribing,
+            idleStatus: store.engine.statusMessage
+        )
     }
 
     private var recordButtonTitle: String {

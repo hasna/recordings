@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -78,8 +78,16 @@ describe("native app companion contract", () => {
           "recordings-app://projects/native-contract",
         ],
         {
+          cwd: directory,
           encoding: "utf8",
-          env: { ...process.env, HOME: join(directory, "home") },
+          env: {
+            HOME: join(directory, "home"),
+            PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+            HASNA_RECORDINGS_STORAGE_MODE: "local",
+            RECORDINGS_STORAGE_MODE: "local",
+            HASNA_RECORDINGS_DB_PATH: join(directory, "recordings.db"),
+            RECORDINGS_AUDIO_DIR: join(directory, "audio"),
+          },
         },
       );
       expect(registration.status, registration.stderr).toBe(0);
@@ -87,6 +95,7 @@ describe("native app companion contract", () => {
         name: "Native Contract",
         path: "recordings-app://projects/native-contract",
       });
+      expect(existsSync(join(directory, "recordings.db"))).toBeTrue();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -96,8 +105,12 @@ describe("native app companion contract", () => {
     const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
 
     expect(app).toContain("MenuBarExtra(isInserted: menuBarInsertion)");
-    expect(app).toContain("get: { state.declaresMenuBar && state.store != nil }");
+    expect(app).toContain(
+      "get: { state.declaresMenuBar && (state.store != nil || state.runtimeSmokeProbe != nil) }",
+    );
     expect(app).not.toContain("if state.declaresMenuBar");
+    expect(app).toContain("if plan.isRuntimeSmoke");
+    expect(app).toContain("else if plan.isHelper");
   });
 
   test("recording capture is not gated on project synchronization readiness", () => {

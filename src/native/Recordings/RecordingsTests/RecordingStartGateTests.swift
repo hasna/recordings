@@ -30,6 +30,26 @@ struct RecordingStartGateTests {
         #expect(!plan.terminatesAfterHandling)
     }
 
+    @Test("runtime smoke plans install no handlers and never request permissions")
+    func runtimeSmokeLaunchPlans() {
+        let normal = PermissionRequestLaunchPlan(arguments: [
+            "Recordings", "--runtime-smoke", "normal", "--runtime-smoke-output", "/tmp/result.json",
+        ])
+        #expect(normal.isRuntimeSmoke)
+        #expect(!normal.installsGlobalHandlers)
+        #expect(normal.declaresMenuBar)
+        #expect(normal.runtimeSmokeOutputPath == "/tmp/result.json")
+
+        let helper = PermissionRequestLaunchPlan(arguments: [
+            "Recordings", "--request-permissions", "--runtime-smoke", "permission-helper",
+            "--runtime-smoke-output", "/tmp/result.json",
+        ])
+        #expect(helper.isRuntimeSmoke)
+        #expect(!helper.installsGlobalHandlers)
+        #expect(!helper.declaresMenuBar)
+        #expect(helper.isHelper)
+    }
+
     @Test("recording cannot begin while already recording or transcribing")
     func cannotBeginWhenBusy() {
         #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false) == true)

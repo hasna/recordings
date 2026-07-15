@@ -1,0 +1,136 @@
+@preconcurrency import Cocoa
+import SwiftUI
+
+@MainActor
+final class RuntimeSmokeProbe: ObservableObject {
+    enum Phase: Int, CaseIterable {
+        case idle
+        case recording
+        case transcribing
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    private(set) var surfaceAppearances = 0
+    private(set) var renderedLabels: [String] = []
+    private var completionScheduled = false
+    var completed: (() -> Void)? {
+        didSet { finishIfReady() }
+    }
+
+    var presentation: MenuBarPresentation {
+        MenuBarPresentation(
+            isRecording: phase == .recording,
+            isTranscribing: phase == .transcribing
+        )
+    }
+
+    func surfaceAppeared() {
+        surfaceAppearances += 1
+        observeCurrentPresentation()
+    }
+
+    func presentationChanged() {
+        observeCurrentPresentation()
+    }
+
+    private func observeCurrentPresentation() {
+        let label = presentation.accessibilityLabel
+        if renderedLabels.last != label {
+            renderedLabels.append(label)
+        }
+        switch phase {
+        case .idle:
+            DispatchQueue.main.async { self.phase = .recording }
+        case .recording:
+            DispatchQueue.main.async { self.phase = .transcribing }
+        case .transcribing:
+            finishIfReady()
+        }
+    }
+
+    private func finishIfReady() {
+        guard phase == .transcribing,
+              renderedLabels.count == Phase.allCases.count,
+              !completionScheduled,
+              completed != nil else { return }
+        completionScheduled = true
+        DispatchQueue.main.async { self.completed?() }
+    }
+}
+
+struct RuntimeSmokeMenuBarLabel: View {
+    @ObservedObject var probe: RuntimeSmokeProbe
+
+    var body: some View {
+        Image(systemName: probe.presentation.iconName)
+            .accessibilityLabel(probe.presentation.accessibilityLabel)
+            .onAppear { probe.surfaceAppeared() }
+            .onChange(of: probe.phase) { _, _ in
+                probe.presentationChanged()
+            }
+    }
+}
+
+struct RuntimeSmokeResult: Codable {
+    let mode: String
+    let menuBarSurfaceCount: Int
+    let renderedStatusLabels: [String]
+    let accessibilityMenuBarItemCount: Int
+    let accessibilityMenuBarLabels: [String]
+    let globalHandlersInstalled: Bool
+    let permissionRequestsStarted: Int
+    let windowCreationCount: Int
+    let windowActivationCount: Int
+    let retainedWindowReused: Bool
+    let applicationIsActive: Bool
+    let mainWindowIsVisible: Bool
+    let mainWindowIsKey: Bool
+}
+
+@MainActor
+enum PermissionRequestRuntimeEvidence {
+    static var invocationCount = 0
+}
+
+struct RuntimeSmokeAccessibilitySnapshot {
+    let itemCount: Int
+    let labels: [String]
+
+    static func currentProcessMenuBarExtras() -> Self {
+        let application = AXUIElementCreateApplication(getpid())
+        var menuBarValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXExtrasMenuBarAttribute as CFString,
+            &menuBarValue
+        ) == .success,
+        let menuBarValue,
+        CFGetTypeID(menuBarValue) == AXUIElementGetTypeID() else {
+            return Self(itemCount: -1, labels: [])
+        }
+
+        let menuBar = menuBarValue as! AXUIElement
+        var childrenValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            menuBar,
+            kAXChildrenAttribute as CFString,
+            &childrenValue
+        ) == .success,
+        let children = childrenValue as? [AXUIElement] else {
+            return Self(itemCount: -1, labels: [])
+        }
+
+        let labels = children.compactMap { child -> String? in
+            for attribute in [kAXDescriptionAttribute, kAXTitleAttribute, kAXHelpAttribute] {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(child, attribute as CFString, &value) == .success,
+                   let label = value as? String,
+                   !label.isEmpty {
+                    return label
+                }
+            }
+            return nil
+        }
+        return Self(itemCount: children.count, labels: labels)
+    }
+}

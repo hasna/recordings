@@ -4,6 +4,23 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 const tempDirs: string[] = [];
+const cliEntry = join(process.cwd(), "src", "cli", "index.ts");
+
+function isolatedCliEnv(home: string, overrides: Record<string, string> = {}) {
+  return {
+    HOME: home,
+    PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+    HASNA_RECORDINGS_STORAGE_MODE: "local",
+    RECORDINGS_STORAGE_MODE: "local",
+    HASNA_RECORDINGS_API_URL: "",
+    HASNA_RECORDINGS_API_KEY: "",
+    RECORDINGS_API_URL: "",
+    RECORDINGS_API_KEY: "",
+    HASNA_RECORDINGS_DB_PATH: join(home, "recordings.db"),
+    RECORDINGS_AUDIO_DIR: join(home, "audio"),
+    ...overrides,
+  };
+}
 
 afterEach(() => {
   while (tempDirs.length > 0) {
@@ -78,19 +95,13 @@ describe("recordings CLI", () => {
   test("agents lists via the local store (no DSN) as JSON", async () => {
     const home = join(tmpdir(), `open-recordings-cli-agents-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
 
     const proc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "--json", "agents"],
+      [process.execPath, cliEntry, "--json", "agents"],
       {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          HOME: home,
-          HASNA_RECORDINGS_API_URL: "",
-          HASNA_RECORDINGS_API_KEY: "",
-          HASNA_RECORDINGS_STORAGE_MODE: "",
-          RECORDINGS_STORAGE_MODE: "",
-        },
+        cwd: home,
+        env: isolatedCliEnv(home),
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -111,10 +122,11 @@ describe("recordings CLI", () => {
   test("project register returns a canonical local Store id", async () => {
     const home = join(tmpdir(), `open-recordings-cli-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
     const proc = Bun.spawn(
       [
         process.execPath,
-        "src/cli/index.ts",
+        cliEntry,
         "--json",
         "project",
         "register",
@@ -124,14 +136,8 @@ describe("recordings CLI", () => {
         "recordings-app://projects/desktop",
       ],
       {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          HOME: home,
-          HASNA_RECORDINGS_API_URL: "",
-          HASNA_RECORDINGS_API_KEY: "",
-          HASNA_RECORDINGS_STORAGE_MODE: "",
-        },
+        cwd: home,
+        env: isolatedCliEnv(home),
         stdout: "pipe",
         stderr: "pipe",
       },
@@ -228,6 +234,33 @@ describe("recordings CLI", () => {
     expect(stdout).toContain("--launch");
     expect(stdout).not.toContain("--app-source");
     expect(stdout).not.toContain("--mode");
+  });
+
+  test("app install rejects non-macOS before inspecting artifact paths", async () => {
+    if (process.platform === "darwin") return;
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli/index.ts",
+        "app",
+        "install",
+        "--artifact",
+        "/definitely/missing/Recordings.zip",
+        "--manifest",
+        "/definitely/missing/Recordings.manifest.json",
+        "--expected-team-id",
+        "EXAMPLE123",
+      ],
+      { cwd: process.cwd(), env: process.env, stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stderr).text(),
+    ]);
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("only supported on macOS");
+    expect(stderr).not.toContain("missing from package");
   });
 
   test("app status inspects the canonical app and reports legacy duplicates", async () => {
@@ -443,17 +476,14 @@ describe("recordings CLI", () => {
 
     try {
       const proc = Bun.spawn(
-        [process.execPath, "src/cli/index.ts", "--json", "transcribe", audioPath, "--no-enhance"],
+        [process.execPath, cliEntry, "--json", "transcribe", audioPath, "--no-enhance"],
         {
-          cwd: process.cwd(),
-          env: {
-            ...process.env,
-            HOME: home,
+          cwd: home,
+          env: isolatedCliEnv(home, {
             OPENAI_API_KEY: "sk-test-key",
-            RECORDINGS_API_KEY: "",
             RECORDINGS_ENHANCEMENT_KEY: "",
             OPENAI_BASE_URL: `http://127.0.0.1:${apiServer.port}`,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -512,7 +542,7 @@ describe("recordings CLI", () => {
       const proc = Bun.spawn(
         [
           process.execPath,
-          "src/cli/index.ts",
+          cliEntry,
           "--json",
           "transcribe",
           audioPath,
@@ -524,15 +554,12 @@ describe("recordings CLI", () => {
           "always",
         ],
         {
-          cwd: process.cwd(),
-          env: {
-            ...process.env,
-            HOME: home,
+          cwd: home,
+          env: isolatedCliEnv(home, {
             OPENAI_API_KEY: "sk-test-key",
-            RECORDINGS_API_KEY: "",
             RECORDINGS_ENHANCEMENT_KEY: "",
             OPENAI_BASE_URL: `http://127.0.0.1:${apiServer.port}`,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -587,7 +614,7 @@ describe("recordings CLI", () => {
     const proc = Bun.spawn(
       [
         process.execPath,
-        "src/cli/index.ts",
+        cliEntry,
         "--json",
         "save-text",
         "--text-file",
@@ -606,15 +633,12 @@ describe("recordings CLI", () => {
         "1200",
       ],
       {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          HOME: home,
+        cwd: home,
+        env: isolatedCliEnv(home, {
           OPENAI_API_KEY: "",
-          RECORDINGS_API_KEY: "",
           RECORDINGS_ENHANCEMENT_KEY: "",
           HASNA_MACHINE_ID: "station-test",
-        },
+        }),
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -665,19 +689,15 @@ describe("recordings CLI", () => {
     mkdirSync(home, { recursive: true });
     const longText = `First compact transcript ${"middle words ".repeat(30)}hidden-tail-token`;
     const hostileModel = `model\nInjected\u001b[31mred\u001b]0;esc-title\u0007\u009b32mgreen\u009d0;c1-title\u009c${"😀".repeat(100)}${"x".repeat(120)}`;
-    const env = {
-      ...process.env,
-      HOME: home,
+    const env = isolatedCliEnv(home, {
       OPENAI_API_KEY: "",
-      RECORDINGS_API_KEY: "",
       RECORDINGS_ENHANCEMENT_KEY: "",
-      HASNA_RECORDINGS_STORAGE_MODE: "local",
-    };
+    });
 
     const saveProc = Bun.spawn(
       [
         process.execPath,
-        "src/cli/index.ts",
+        cliEntry,
         "--json",
         "save-text",
         longText,
@@ -688,7 +708,7 @@ describe("recordings CLI", () => {
         "--tags",
         "safe\nInjected\u001b[31m,second,third,fourth,fifth",
       ],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [saveStdout, saveStderr, saveExit] = await Promise.all([
       new Response(saveProc.stdout).text(),
@@ -701,8 +721,8 @@ describe("recordings CLI", () => {
     expect(saved.raw_text).toBe(longText);
 
     const listProc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "list", "-n", "1"],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      [process.execPath, cliEntry, "list", "-n", "1"],
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [listStdout, listStderr, listExit] = await Promise.all([
       new Response(listProc.stdout).text(),
@@ -721,8 +741,8 @@ describe("recordings CLI", () => {
     expect(listStdout).not.toContain("hidden-tail-token");
 
     const verboseProc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "list", "-n", "1", "--verbose"],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      [process.execPath, cliEntry, "list", "-n", "1", "--verbose"],
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [verboseStdout, verboseStderr, verboseExit] = await Promise.all([
       new Response(verboseProc.stdout).text(),
@@ -742,8 +762,8 @@ describe("recordings CLI", () => {
     expect(verboseStdout).not.toContain("x".repeat(80));
 
     const statsProc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "stats"],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      [process.execPath, cliEntry, "stats"],
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [statsStdout, statsStderr, statsExit] = await Promise.all([
       new Response(statsProc.stdout).text(),
@@ -761,8 +781,8 @@ describe("recordings CLI", () => {
     expect(statsStdout).not.toContain("x".repeat(80));
 
     const jsonProc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "--json", "list", "-n", "1"],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      [process.execPath, cliEntry, "--json", "list", "-n", "1"],
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [jsonStdout, jsonStderr, jsonExit] = await Promise.all([
       new Response(jsonProc.stdout).text(),
@@ -775,8 +795,8 @@ describe("recordings CLI", () => {
     expect(listed[0]!.raw_text).toBe(longText);
 
     const inspectProc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "inspect", saved.id.slice(0, 8)],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      [process.execPath, cliEntry, "inspect", saved.id.slice(0, 8)],
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [inspectStdout, inspectStderr, inspectExit] = await Promise.all([
       new Response(inspectProc.stdout).text(),
@@ -792,26 +812,22 @@ describe("recordings CLI", () => {
     const home = join(tmpdir(), `open-recordings-cli-cursor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);
     mkdirSync(home, { recursive: true });
-    const env = {
-      ...process.env,
-      HOME: home,
+    const env = isolatedCliEnv(home, {
       OPENAI_API_KEY: "",
-      RECORDINGS_API_KEY: "",
       RECORDINGS_ENHANCEMENT_KEY: "",
-      HASNA_RECORDINGS_STORAGE_MODE: "local",
-    };
+    });
 
     for (const text of ["one", "two"]) {
       const proc = Bun.spawn(
-        [process.execPath, "src/cli/index.ts", "save-text", text, "--post-processing", "off"],
-        { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+        [process.execPath, cliEntry, "save-text", text, "--post-processing", "off"],
+        { cwd: home, env, stdout: "pipe", stderr: "pipe" }
       );
       expect(await proc.exited).toBe(0);
     }
 
     const proc = Bun.spawn(
-      [process.execPath, "src/cli/index.ts", "list", "-n", "100"],
-      { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" }
+      [process.execPath, cliEntry, "list", "-n", "100"],
+      { cwd: home, env, stdout: "pipe", stderr: "pipe" }
     );
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),

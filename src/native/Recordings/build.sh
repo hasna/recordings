@@ -21,6 +21,8 @@ CODESIGN_IDENTITY="${RECORDINGS_CODESIGN_IDENTITY:-}"
 EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
 NOTARY_PROFILE="${RECORDINGS_NOTARY_KEYCHAIN_PROFILE:-}"
 PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
+PLUTIL="${PLUTIL:-/usr/bin/plutil}"
+BUN_EXECUTABLE="${BUN_EXECUTABLE:-$(command -v bun)}"
 
 if [ "$MODE" = "release" ]; then
     if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
@@ -56,6 +58,7 @@ mkdir -p "$MACOS" "$RESOURCES" "$HELPERS"
 cp "$BUILD_DIR/App" "$MACOS/Recordings"
 "$PACKAGE_ROOT/scripts/build_companion_cli.sh" "$HELPERS/recordings"
 cp RecordingsLib/Info.plist "$CONTENTS/Info.plist"
+VERSION="$("$PLIST_BUDDY" -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
 
 for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.resources .build/*/"$MODE"/*.bundle; do
     [ -e "$bundle" ] || continue
@@ -63,16 +66,111 @@ for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.
     ditto "$bundle" "$RESOURCES/$(basename "$bundle")"
 done
 
-SIGN_ARGUMENTS=(--force --sign "$CODESIGN_IDENTITY")
+APP_SIGN_ARGUMENTS=(--force --sign "$CODESIGN_IDENTITY")
+HELPER_SIGN_ARGUMENTS=(--force --sign "$CODESIGN_IDENTITY" --options runtime)
 if [ "$MODE" = "release" ]; then
-    SIGN_ARGUMENTS+=(--options runtime --timestamp)
+    APP_SIGN_ARGUMENTS+=(--options runtime --timestamp)
+    HELPER_SIGN_ARGUMENTS+=(--timestamp)
 fi
-codesign "${SIGN_ARGUMENTS[@]}" "$HELPERS/recordings"
+codesign "${HELPER_SIGN_ARGUMENTS[@]}" \
+    --entitlements RecordingsLib/RecordingsCLI.entitlements \
+    "$HELPERS/recordings"
+
+verify_helper_entitlements() {
+    local helper="$1"
+    local entitlement_plist
+    local entitlement_json
+    entitlement_plist="$(mktemp)"
+    if ! codesign -d --entitlements :- "$helper" >"$entitlement_plist" 2>/dev/null; then
+        rm -f "$entitlement_plist"
+        echo "Companion CLI signed entitlements could not be read back." >&2
+        return 1
+    fi
+    entitlement_json="$("$PLUTIL" -convert json -o - "$entitlement_plist" | tr -d '[:space:]')"
+    rm -f "$entitlement_plist"
+    if ! ENTITLEMENT_JSON="$entitlement_json" "$BUN_EXECUTABLE" -e '
+        const actual = JSON.parse(process.env.ENTITLEMENT_JSON ?? "null");
+        const expected = [
+          "com.apple.security.cs.allow-jit",
+          "com.apple.security.cs.allow-unsigned-executable-memory",
+        ];
+        if (!actual || Array.isArray(actual)) process.exit(1);
+        const keys = Object.keys(actual).sort();
+        if (JSON.stringify(keys) !== JSON.stringify(expected)) process.exit(1);
+        if (!keys.every((key) => actual[key] === true)) process.exit(1);
+    '; then
+        echo "Companion CLI has unexpected hardened-runtime entitlements: ${entitlement_json:-missing}." >&2
+        return 1
+    fi
+}
+
+verify_hardened_helper() {
+    local details
+    codesign --verify --strict --verbose=2 "$HELPERS/recordings"
+    details="$(codesign -d --verbose=4 "$HELPERS/recordings" 2>&1)"
+    if [[ "$details" != *"(runtime)"* ]]; then
+        echo "Companion CLI is missing hardened runtime signing." >&2
+        exit 1
+    fi
+    verify_helper_entitlements "$HELPERS/recordings"
+}
+
+run_signed_helper_contract() {
+    local contract_home
+    local version
+    local project_output
+    local recording_output
+    local helper_executable
+    contract_home="$(mktemp -d)"
+    helper_executable="$SCRIPT_DIR/$HELPERS/recordings"
+    local -a contract_environment=(
+        env -i
+        HOME="$contract_home"
+        PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+        HASNA_RECORDINGS_STORAGE_MODE="local"
+        RECORDINGS_STORAGE_MODE="local"
+        HASNA_RECORDINGS_DB_PATH="$contract_home/recordings.db"
+        RECORDINGS_AUDIO_DIR="$contract_home/audio"
+    )
+    contract_run() {
+        (cd "$contract_home" && "${contract_environment[@]}" "$@")
+    }
+    if ! version="$(contract_run "$helper_executable" --version)" || \
+       [ "$version" != "$VERSION" ] || \
+       ! project_output="$(contract_run "$helper_executable" --json project register \
+           --name "Signed Helper Contract" \
+           --path "recordings-app://build/signed-helper-contract")" || \
+       [[ "$project_output" != *"Signed Helper Contract"* ]] || \
+       ! recording_output="$(contract_run "$helper_executable" --json save-text \
+           "Signed helper contract" \
+           --source "native_build_contract" \
+           --post-processing off)" || \
+       [[ "$recording_output" != *"Signed helper contract"* ]]; then
+        rm -rf "$contract_home"
+        echo "Post-sign signed companion CLI contract failed." >&2
+        exit 1
+    fi
+    if ! PROJECT_JSON="$project_output" RECORDING_JSON="$recording_output" "$BUN_EXECUTABLE" -e '
+        const project = JSON.parse(process.env.PROJECT_JSON ?? "null");
+        const recording = JSON.parse(process.env.RECORDING_JSON ?? "null");
+        if (project?.name !== "Signed Helper Contract") process.exit(1);
+        if (project?.path !== "recordings-app://build/signed-helper-contract") process.exit(1);
+        if (recording?.raw_text !== "Signed helper contract") process.exit(1);
+    '; then
+        rm -rf "$contract_home"
+        echo "Post-sign signed companion CLI contract returned invalid JSON." >&2
+        exit 1
+    fi
+    rm -rf "$contract_home"
+}
+
+verify_hardened_helper
+run_signed_helper_contract
 bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" provenance \
     --app "$APP_DIR" \
     --team-id "$EXPECTED_TEAM_ID" \
     --package-root "$PACKAGE_ROOT"
-codesign "${SIGN_ARGUMENTS[@]}" \
+codesign "${APP_SIGN_ARGUMENTS[@]}" \
     --entitlements RecordingsLib/Recordings.entitlements \
     "$APP_DIR"
 
@@ -109,8 +207,8 @@ verify_signed_code() {
 }
 
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+"$PACKAGE_ROOT/scripts/smoke_macos_app.sh" "$APP_DIR"
 
-VERSION="$("$PLIST_BUDDY" -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
 if [ "$MODE" = "debug" ]; then
     echo "Built non-distributable debug app: $APP_DIR"
     exit 0

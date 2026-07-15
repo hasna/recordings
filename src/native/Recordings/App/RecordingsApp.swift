@@ -15,6 +15,10 @@ final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        state?.startRuntimeSmokeIfNeeded()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             state?.showMainWindow()
@@ -27,10 +31,18 @@ final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
 final class RecordingsAppState: ObservableObject {
     let store: RecordingsStore?
     let declaresMenuBar: Bool
+    let runtimeSmokeProbe: RuntimeSmokeProbe?
+    private let runtimeSmokeMode: String?
+    private let runtimeSmokeOutputPath: String?
     private var mainWindow: NSWindow?
+    private(set) var windowCreationCount = 0
+    private(set) var windowActivationCount = 0
 
     init(plan: PermissionRequestLaunchPlan) {
         declaresMenuBar = plan.declaresMenuBar
+        runtimeSmokeMode = plan.runtimeSmokeMode
+        runtimeSmokeOutputPath = plan.runtimeSmokeOutputPath
+        runtimeSmokeProbe = plan.runtimeSmokeMode == "normal" ? RuntimeSmokeProbe() : nil
         if plan.installsGlobalHandlers {
             let store = RecordingsStore()
             self.store = store
@@ -46,6 +58,15 @@ final class RecordingsAppState: ObservableObject {
 
     func showMainWindow() {
         guard let store else { return }
+        showWindow(contentView: NSHostingView(rootView: ContentView(store: store)))
+    }
+
+    private func showRuntimeSmokeWindow() {
+        showWindow(contentView: NSHostingView(rootView: Text("Recordings runtime smoke")))
+    }
+
+    private func showWindow(contentView: NSView) {
+        windowActivationCount += 1
         NSApplication.shared.activate()
         if let mainWindow {
             mainWindow.makeKeyAndOrderFront(nil)
@@ -62,10 +83,81 @@ final class RecordingsAppState: ObservableObject {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: ContentView(store: store))
+        window.contentView = contentView
         window.center()
         window.makeKeyAndOrderFront(nil)
         mainWindow = window
+        windowCreationCount += 1
+    }
+
+    func startRuntimeSmokeIfNeeded() {
+        guard let mode = runtimeSmokeMode, runtimeSmokeOutputPath != nil else { return }
+        if mode == "permission-helper" {
+            NSApplication.shared.setActivationPolicy(.accessory)
+            let accessibility = RuntimeSmokeAccessibilitySnapshot.currentProcessMenuBarExtras()
+            finishRuntimeSmoke(
+                mode: mode,
+                surfaceCount: 0,
+                labels: [],
+                accessibility: accessibility
+            )
+            return
+        }
+        guard mode == "normal", let runtimeSmokeProbe else {
+            finishRuntimeSmoke(
+                mode: mode,
+                surfaceCount: 0,
+                labels: [],
+                accessibility: RuntimeSmokeAccessibilitySnapshot.currentProcessMenuBarExtras()
+            )
+            return
+        }
+        runtimeSmokeProbe.completed = { [weak self, weak runtimeSmokeProbe] in
+            guard let self, let runtimeSmokeProbe else { return }
+            let accessibility = RuntimeSmokeAccessibilitySnapshot.currentProcessMenuBarExtras()
+            self.showRuntimeSmokeWindow()
+            let firstWindow = self.mainWindow
+            self.showRuntimeSmokeWindow()
+            self.finishRuntimeSmoke(
+                mode: mode,
+                surfaceCount: runtimeSmokeProbe.surfaceAppearances,
+                labels: runtimeSmokeProbe.renderedLabels,
+                accessibility: accessibility,
+                retainedWindowReused: firstWindow === self.mainWindow
+            )
+        }
+    }
+
+    private func finishRuntimeSmoke(
+        mode: String,
+        surfaceCount: Int,
+        labels: [String],
+        accessibility: RuntimeSmokeAccessibilitySnapshot,
+        retainedWindowReused: Bool = false
+    ) {
+        guard let runtimeSmokeOutputPath else { return }
+        let result = RuntimeSmokeResult(
+            mode: mode,
+            menuBarSurfaceCount: surfaceCount,
+            renderedStatusLabels: labels,
+            accessibilityMenuBarItemCount: accessibility.itemCount,
+            accessibilityMenuBarLabels: accessibility.labels,
+            globalHandlersInstalled: store != nil,
+            permissionRequestsStarted: PermissionRequestRuntimeEvidence.invocationCount,
+            windowCreationCount: windowCreationCount,
+            windowActivationCount: windowActivationCount,
+            retainedWindowReused: retainedWindowReused,
+            applicationIsActive: NSApplication.shared.isActive,
+            mainWindowIsVisible: mainWindow?.isVisible ?? false,
+            mainWindowIsKey: mainWindow?.isKeyWindow ?? false
+        )
+        do {
+            let data = try JSONEncoder().encode(result)
+            try data.write(to: URL(fileURLWithPath: runtimeSmokeOutputPath), options: .atomic)
+        } catch {
+            fputs("Runtime smoke result failed: \(error)\n", stderr)
+        }
+        NSApplication.shared.terminate(nil)
     }
 }
 
@@ -79,7 +171,9 @@ struct RecordingsApp: App {
         let state = RecordingsAppState(plan: plan)
         _state = StateObject(wrappedValue: state)
         appDelegate.state = state
-        if plan.isHelper {
+        if plan.isRuntimeSmoke {
+            // Runtime smoke retains the real launch classification but never invokes TCC APIs.
+        } else if plan.isHelper {
             Self.handlePermissionRequest(plan)
         } else {
             AXIsProcessTrustedWithOptions(
@@ -92,10 +186,14 @@ struct RecordingsApp: App {
         MenuBarExtra(isInserted: menuBarInsertion) {
             if let store = state.store {
                 MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
+            } else if state.runtimeSmokeProbe != nil {
+                EmptyView()
             }
         } label: {
             if let store = state.store {
                 MenuBarStatusLabel(store: store)
+            } else if let probe = state.runtimeSmokeProbe {
+                RuntimeSmokeMenuBarLabel(probe: probe)
             } else {
                 Image(systemName: "mic.fill")
                     .accessibilityLabel("Recordings")
@@ -129,12 +227,13 @@ struct RecordingsApp: App {
 
     private var menuBarInsertion: Binding<Bool> {
         Binding(
-            get: { state.declaresMenuBar && state.store != nil },
+            get: { state.declaresMenuBar && (state.store != nil || state.runtimeSmokeProbe != nil) },
             set: { _ in }
         )
     }
 
     private static func handlePermissionRequest(_ plan: PermissionRequestLaunchPlan) {
+        PermissionRequestRuntimeEvidence.invocationCount += 1
         NSApplication.shared.setActivationPolicy(.accessory)
         NativeAppLog.write("request-permissions argument received")
         let work = DispatchGroup()

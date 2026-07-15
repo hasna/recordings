@@ -42,7 +42,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  exit 0
+  echo "Recordings.app installation is only supported on macOS." >&2
+  exit 1
 fi
 
 if [ -z "$ARTIFACT_PATH" ] || [ -z "$MANIFEST_PATH" ]; then

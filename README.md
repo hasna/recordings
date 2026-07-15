@@ -53,6 +53,8 @@ recordings app status         # show install state
 
 # All distributable builds require a pinned Developer ID team and notarytool profile:
 cd src/native/Recordings
+# Fresh source checkouts must install the locked JavaScript dependencies first:
+(cd ../../.. && bun install --frozen-lockfile)
 RECORDINGS_CODESIGN_IDENTITY="Developer ID Application: ..." \
 RECORDINGS_EXPECTED_TEAM_IDENTIFIER="TEAMID1234" \
 RECORDINGS_NOTARY_KEYCHAIN_PROFILE="recordings-notary" ./build.sh release
