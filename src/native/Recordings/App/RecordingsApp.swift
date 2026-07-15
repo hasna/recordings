@@ -21,7 +21,7 @@ final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            state?.showMainWindow()
+            state?.openRecordings()
         }
         return true
     }
@@ -48,7 +48,7 @@ final class RecordingsAppState: ObservableObject {
             self.store = store
             if plan.declaresMainWindow {
                 Task { @MainActor [weak self] in
-                    self?.showMainWindow()
+                    self?.openRecordings()
                 }
             }
         } else {
@@ -56,20 +56,20 @@ final class RecordingsAppState: ObservableObject {
         }
     }
 
-    func showMainWindow() {
-        guard let store else { return }
-        showWindow(contentView: NSHostingView(rootView: ContentView(store: store)))
-    }
-
-    private func showRuntimeSmokeWindow() {
-        showWindow(contentView: NSHostingView(rootView: Text("Recordings runtime smoke")))
+    func openRecordings() {
+        if let store {
+            showWindow(contentView: NSHostingView(rootView: ContentView(store: store)))
+        } else if runtimeSmokeMode == "normal" {
+            showWindow(contentView: NSHostingView(rootView: Text("Recordings runtime smoke")))
+        }
     }
 
     private func showWindow(contentView: NSView) {
         windowActivationCount += 1
         NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate()
         if let mainWindow {
+            NSApplication.shared.activate()
+            NSRunningApplication.current.activate(options: [.activateAllWindows])
             mainWindow.makeKeyAndOrderFront(nil)
             return
         }
@@ -86,22 +86,27 @@ final class RecordingsAppState: ObservableObject {
         window.isReleasedWhenClosed = false
         window.contentView = contentView
         window.center()
-        window.makeKeyAndOrderFront(nil)
         mainWindow = window
         windowCreationCount += 1
+        NSApplication.shared.activate()
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        window.makeKeyAndOrderFront(nil)
     }
 
     func startRuntimeSmokeIfNeeded() {
         guard let mode = runtimeSmokeMode, runtimeSmokeOutputPath != nil else { return }
         if mode == "permission-helper" {
             NSApplication.shared.setActivationPolicy(.accessory)
-            let accessibility = RuntimeSmokeAccessibilitySnapshot.currentProcessMenuBarExtras()
-            finishRuntimeSmoke(
-                mode: mode,
-                surfaceCount: 0,
-                labels: [],
-                accessibility: accessibility
-            )
+            DispatchQueue.main.async { [weak self] in
+                DispatchQueue.main.async {
+                    self?.finishRuntimeSmoke(
+                        mode: mode,
+                        surfaceCount: 0,
+                        labels: [],
+                        accessibility: RuntimeSmokeAccessibilitySnapshot.processMenuBarExtras()
+                    )
+                }
+            }
             return
         }
         guard mode == "normal", let runtimeSmokeProbe else {
@@ -109,16 +114,16 @@ final class RecordingsAppState: ObservableObject {
                 mode: mode,
                 surfaceCount: 0,
                 labels: [],
-                accessibility: RuntimeSmokeAccessibilitySnapshot.currentProcessMenuBarExtras()
+                accessibility: RuntimeSmokeAccessibilitySnapshot.processMenuBarExtras()
             )
             return
         }
         runtimeSmokeProbe.completed = { [weak self, weak runtimeSmokeProbe] in
             guard let self, let runtimeSmokeProbe else { return }
-            let accessibility = RuntimeSmokeAccessibilitySnapshot.currentProcessMenuBarExtras()
-            self.showRuntimeSmokeWindow()
+            let accessibility = RuntimeSmokeAccessibilitySnapshot.processMenuBarExtras()
+            self.openRecordings()
             let firstWindow = self.mainWindow
-            self.showRuntimeSmokeWindow()
+            self.openRecordings()
             self.finishRuntimeSmokeWhenWindowSettles(
                 mode: mode,
                 surfaceCount: runtimeSmokeProbe.surfaceAppearances,
@@ -170,8 +175,10 @@ final class RecordingsAppState: ObservableObject {
         guard let runtimeSmokeOutputPath else { return }
         let result = RuntimeSmokeResult(
             mode: mode,
+            processIdentifier: getpid(),
             menuBarSurfaceCount: surfaceCount,
             renderedStatusLabels: labels,
+            accessibilityObservationStatus: accessibility.status.rawValue,
             accessibilityMenuBarItemCount: accessibility.itemCount,
             accessibilityMenuBarLabels: accessibility.labels,
             globalHandlersInstalled: store != nil,
@@ -219,7 +226,7 @@ struct RecordingsApp: App {
     @SceneBuilder var body: some Scene {
         MenuBarExtra(isInserted: menuBarInsertion) {
             if let store = state.store {
-                MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
+                MenuBarStatusView(store: store, openRecordings: state.openRecordings)
             } else if state.runtimeSmokeProbe != nil {
                 EmptyView()
             }

@@ -73,8 +73,10 @@ struct RuntimeSmokeMenuBarLabel: View {
 
 struct RuntimeSmokeResult: Codable {
     let mode: String
+    let processIdentifier: Int32
     let menuBarSurfaceCount: Int
     let renderedStatusLabels: [String]
+    let accessibilityObservationStatus: String
     let accessibilityMenuBarItemCount: Int
     let accessibilityMenuBarLabels: [String]
     let globalHandlersInstalled: Bool
@@ -94,32 +96,47 @@ enum PermissionRequestRuntimeEvidence {
     static var invocationCount = 0
 }
 
+enum RuntimeSmokeAccessibilityObservationStatus: String {
+    case available
+    case absent
+    case unavailable
+}
+
 struct RuntimeSmokeAccessibilitySnapshot {
+    let status: RuntimeSmokeAccessibilityObservationStatus
     let itemCount: Int
     let labels: [String]
 
-    static func currentProcessMenuBarExtras() -> Self {
-        let application = AXUIElementCreateApplication(getpid())
+    static func processMenuBarExtras(processIdentifier: pid_t = getpid()) -> Self {
+        let application = AXUIElementCreateApplication(processIdentifier)
         var menuBarValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        let menuBarError = AXUIElementCopyAttributeValue(
             application,
             kAXExtrasMenuBarAttribute as CFString,
             &menuBarValue
-        ) == .success,
-        let menuBarValue,
-        CFGetTypeID(menuBarValue) == AXUIElementGetTypeID() else {
-            return Self(itemCount: -1, labels: [])
+        )
+        if menuBarError == .noValue || menuBarError == .attributeUnsupported {
+            return Self(status: .absent, itemCount: 0, labels: [])
+        }
+        guard menuBarError == .success,
+              let menuBarValue,
+              CFGetTypeID(menuBarValue) == AXUIElementGetTypeID() else {
+            return Self(status: .unavailable, itemCount: -1, labels: [])
         }
 
         let menuBar = menuBarValue as! AXUIElement
         var childrenValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        let childrenError = AXUIElementCopyAttributeValue(
             menuBar,
             kAXChildrenAttribute as CFString,
             &childrenValue
-        ) == .success,
-        let children = childrenValue as? [AXUIElement] else {
-            return Self(itemCount: -1, labels: [])
+        )
+        if childrenError == .noValue || childrenError == .attributeUnsupported {
+            return Self(status: .unavailable, itemCount: -1, labels: [])
+        }
+        guard childrenError == .success,
+              let children = childrenValue as? [AXUIElement] else {
+            return Self(status: .unavailable, itemCount: -1, labels: [])
         }
 
         let labels = children.compactMap { child -> String? in
@@ -133,6 +150,10 @@ struct RuntimeSmokeAccessibilitySnapshot {
             }
             return nil
         }
-        return Self(itemCount: children.count, labels: labels)
+        return Self(
+            status: children.isEmpty ? .absent : .available,
+            itemCount: children.count,
+            labels: labels
+        )
     }
 }

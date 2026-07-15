@@ -134,20 +134,36 @@ describe("native app companion contract", () => {
 
   test("showing either a new or retained main window activates the app", () => {
     const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
-    const showMainWindow = app.slice(
-      app.indexOf("func showMainWindow()"),
-      app.indexOf("\n    }\n}\n\n@main", app.indexOf("func showMainWindow()")),
+    const menu = readFileSync("src/native/Recordings/App/MenuBarStatusView.swift", "utf8");
+    const openRecordings = app.slice(
+      app.indexOf("func openRecordings()"),
+      app.indexOf("\n    }\n}\n\n@main", app.indexOf("func openRecordings()")),
     );
 
-    expect(showMainWindow.indexOf("NSApplication.shared.activate()"))
-      .toBeLessThan(showMainWindow.indexOf("if let mainWindow"));
-    expect(showMainWindow.indexOf("NSApplication.shared.setActivationPolicy(.regular)"))
-      .toBeLessThan(showMainWindow.indexOf("NSApplication.shared.activate()"));
+    expect(openRecordings).toContain("NSApplication.shared.setActivationPolicy(.regular)");
+    expect(openRecordings).toContain("NSRunningApplication.current.activate");
+    expect(menu).toContain("Button(action: openRecordings)");
+    expect(app.match(/self\.openRecordings\(\)/g)?.length).toBeGreaterThanOrEqual(2);
 
     const smoke = readFileSync("scripts/smoke_macos_app.sh", "utf8");
+    expect(smoke).toContain('open -n -g -W "$APP_PATH"');
     expect(smoke).toContain("applicationActivationPolicy !== 0");
     expect(smoke).toContain("mainWindowCanBecomeKey");
-    expect(smoke).toContain("result.applicationIsActive && !result.mainWindowIsKey");
-    expect(smoke).toContain("result.accessibilityMenuBarItemCount > 0");
+    expect(smoke).toContain("!result.applicationIsActive || !result.mainWindowIsKey");
+    expect(smoke).toContain('result.accessibilityObservationStatus !== "absent"');
+    expect(smoke).not.toContain("accessibilityMenuBarItemCount > 0");
+    expect(smoke).toContain('SMOKE_APP_PID="$(find_smoke_app_pid "$output")"');
+    expect(smoke).toContain('SMOKE_APP_PID" != "$result_pid"');
+  });
+
+  test("AX smoke distinguishes authoritative absence from unavailable children", () => {
+    const runtimeSmoke = readFileSync("src/native/Recordings/App/RuntimeSmoke.swift", "utf8");
+    const childLookup = runtimeSmoke.slice(runtimeSmoke.indexOf("let childrenError"));
+
+    expect(childLookup).toContain(
+      "childrenError == .noValue || childrenError == .attributeUnsupported",
+    );
+    expect(childLookup).toContain("status: .unavailable, itemCount: -1");
+    expect(childLookup).toContain("status: children.isEmpty ? .absent : .available");
   });
 });

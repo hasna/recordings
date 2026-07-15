@@ -43,7 +43,7 @@ struct MenuBarStatusLabel: View {
 
 struct MenuBarStatusView: View {
     @ObservedObject var store: RecordingsStore
-    let showMainWindow: () -> Void
+    let openRecordings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -70,7 +70,7 @@ struct MenuBarStatusView: View {
 
             Divider()
 
-            Button(action: showMainWindow) {
+            Button(action: openRecordings) {
                 Label("Open Recordings", systemImage: "macwindow")
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

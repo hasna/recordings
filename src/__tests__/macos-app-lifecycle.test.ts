@@ -385,15 +385,21 @@ set -euo pipefail
 [ "\${HASNA_RECORDINGS_STORAGE_MODE:-}" = local ] || exit 71
 [ "\${RECORDINGS_STORAGE_MODE:-}" = local ] || exit 71
 case "\${HASNA_RECORDINGS_DB_PATH:-}" in "$HOME"/*) ;; *) exit 71 ;; esac
-[ "$PWD" = "$HOME" ] || exit 71
+[ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 71
 case "\${1:-}" in
   --version) printf '0.2.11\n' ;;
   --json)
-    case "\${2:-} \${3:-}" in
-      "project register") printf '{"id":"smoke-project","name":"Signed Helper Contract","path":"recordings-app://build/signed-helper-contract"}\n' ;;
-      "save-text Signed helper contract") printf '{"id":"smoke-recording","raw_text":"Signed helper contract"}\n' ;;
-      *) exit 64 ;;
-    esac
+    if [ "\${2:-}" = project ] && [ "\${3:-}" = register ]; then
+      [ "\${4:-}" = --name ] && [ "\${5:-}" = "Signed Helper Contract" ] || exit 64
+      [ "\${6:-}" = --path ] && [ "\${7:-}" = "recordings-app://build/signed-helper-contract" ] || exit 64
+      printf '{"id":"smoke-project","name":"Signed Helper Contract","path":"recordings-app://build/signed-helper-contract"}\n'
+    elif [ "\${2:-}" = save-text ] && [ "\${3:-}" = "Signed helper contract" ]; then
+      [ "\${4:-}" = --source ] && [ "\${5:-}" = native_build_contract ] || exit 64
+      [ "\${6:-}" = --post-processing ] && [ "\${7:-}" = off ] || exit 64
+      printf '{"id":"smoke-recording","raw_text":"Signed helper contract"}\n'
+    else
+      exit 64
+    fi
     ;;
   *) exit 64 ;;
 esac
@@ -413,23 +419,24 @@ chmod +x "$1"
       join(root, "scripts", "smoke_macos_app.sh"),
       "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/ui-smoke.log\"\n",
     );
-    writeFileSync(join(root, "scripts", "macos_artifact.ts"), "fixture");
+    writeFileSync(
+      join(root, "scripts", "macos_artifact.ts"),
+      `import { appendFileSync, writeFileSync } from "node:fs";
+const args = Bun.argv.slice(2);
+appendFileSync(Bun.env.MARKER_DIRECTORY + "/bun.log", args.join(" ") + "\\n");
+if (args[0] === "provenance") process.exit(0);
+if (args[0] === "finalize") {
+  const manifestIndex = args.indexOf("--manifest");
+  if (manifestIndex < 0 || !args[manifestIndex + 1]) process.exit(64);
+  writeFileSync(args[manifestIndex + 1], "{}\\n");
+  process.exit(0);
+}
+process.exit(64);
+`,
+    );
     writeExecutable(
       join(bin, "swift"),
       "#!/usr/bin/env bash\nmkdir -p .build/$3\nprintf app > .build/$3/App\nchmod +x .build/$3/App\n",
-    );
-    writeExecutable(
-      join(bin, "bun"),
-      `#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$MARKER_DIRECTORY/bun.log"
-if [[ "$*" == *" finalize "* ]]; then
-  while [ "$#" -gt 0 ]; do
-    if [ "$1" = --manifest ]; then printf '{}\n' > "$2"; exit 0; fi
-    shift
-  done
-fi
-exit 0
-`,
     );
     writeExecutable(
       join(bin, "codesign"),

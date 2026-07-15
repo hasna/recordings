@@ -10,7 +10,8 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
     public var installsGlobalHandlers: Bool { !isHelper && !isRuntimeSmoke }
     public var declaresMainWindow: Bool { !isHelper && !isRuntimeSmoke }
     public var declaresMenuBar: Bool {
-        !isHelper && runtimeSmokeMode != "permission-helper"
+        if isRuntimeSmoke { return runtimeSmokeMode == "normal" }
+        return !isHelper
     }
     public var terminatesAfterHandling: Bool { isHelper }
 
