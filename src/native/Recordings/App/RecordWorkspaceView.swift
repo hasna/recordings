@@ -28,6 +28,10 @@ struct RecordWorkspaceView: View {
 
                 activeProjectRow
 
+                if let synchronizationError = store.projectStore.synchronizationError {
+                    projectSynchronizationWarning(synchronizationError)
+                }
+
                 if !engine.recentTranscriptions.isEmpty {
                     recentStrip
                 }
@@ -215,6 +219,23 @@ struct RecordWorkspaceView: View {
         } catch {
             store.operationError = store.projectStore.persistenceError ?? error.localizedDescription
         }
+    }
+
+    private func projectSynchronizationWarning(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer()
+            Button("Retry") { store.reconcileProjects() }
+                .buttonStyle(.borderless)
+                .disabled(store.projectStore.isSynchronizingProjects)
+        }
+        .frame(maxWidth: 560)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Recent strip

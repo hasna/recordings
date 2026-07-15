@@ -107,6 +107,76 @@ struct ProjectStoreTests {
         #expect(store.settings.activeProjectId == "canonical-id")
     }
 
+    @Test("failed canonical registration preserves recording metadata and can be retried")
+    @MainActor
+    func failedRegistrationDoesNotDisableCaptureForAppLifetime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent(".bun/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        let failureScript = """
+        #!/bin/sh
+        echo 'ERROR: synthetic registration failure' >&2
+        exit 1
+        """
+        try failureScript.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let store = ProjectStore(filePath: root.appendingPathComponent("projects.json").path)
+        store.settings.projects = [
+            RecProject(id: "local-id", name: "Active Local", systemPrompt: "Keep this context")
+        ]
+        store.settings.activeProjectId = "local-id"
+        try store.save()
+
+        await #expect(throws: (any Error).self) {
+            try await store.reconcileWithCanonicalStore(home: root.path)
+        }
+        #expect(!store.isReadyForRecording)
+        #expect(store.synchronizationError?.contains("synthetic registration failure") == true)
+        #expect(store.persistenceError?.contains("synthetic registration failure") == true)
+        #expect(store.activeProject?.id == "local-id")
+        #expect(store.activeCanonicalProjectIdForRecording == nil)
+        #expect(store.effectiveSystemPrompt == "Keep this context")
+        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false))
+
+        let successScript = """
+        #!/bin/sh
+        printf '%s' '{"id":"canonical-id","name":"Active Local","path":"recordings-app://projects/local-id"}'
+        """
+        try successScript.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        try await store.reconcileWithCanonicalStore(home: root.path)
+        #expect(store.isReadyForRecording)
+        #expect(store.synchronizationError == nil)
+        #expect(store.persistenceError == nil)
+        #expect(store.activeProject?.id == "canonical-id")
+        #expect(store.activeCanonicalProjectIdForRecording == "canonical-id")
+        #expect(store.effectiveSystemPrompt == "Keep this context")
+    }
+
+    @Test("persisted canonical project remains safe during startup reconciliation")
+    @MainActor
+    func canonicalProjectIdSurvivesStartupDegradedState() throws {
+        var settings = ProjectSettings()
+        settings.projects = [
+            RecProject(
+                id: "canonical-id",
+                name: "Canonical",
+                canonicalPath: "recordings-app://projects/local-id",
+                canonicalStoreId: "canonical-id"
+            )
+        ]
+        settings.activeProjectId = "canonical-id"
+        let data = try JSONEncoder().encode(settings)
+        let store = ProjectStore(filePath: "/tmp/projects.json") { _ in data }
+
+        #expect(!store.isReadyForRecording)
+        #expect(store.activeCanonicalProjectIdForRecording == "canonical-id")
+    }
+
     @Test("adding a project preserves color in canonical local metadata")
     @MainActor
     func addProjectPreservesColor() async throws {

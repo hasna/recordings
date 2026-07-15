@@ -13,10 +13,11 @@ npm install -g @hasna/recordings
 
 ## macOS App
 
-Recordings ships a **full native macOS app** (SwiftUI, macOS 26 / Liquid Glass) — not a
-menu-bar utility. It opens to a **Recordings workspace**: a narrow violet Liquid-Glass
-sidebar (Workspace · Library · Projects · Modes · Machines) beside one continuous canvas
-with the record hero, transcript library, and detail view.
+Recordings ships a **full native macOS app** (SwiftUI, macOS 26 / Liquid Glass) with a
+companion menu-bar control. It opens to a **Recordings workspace**: a narrow violet
+Liquid-Glass sidebar (Workspace · Library · Projects · Modes · Machines) beside one
+continuous canvas with the record hero, transcript library, and detail view. The menu bar
+provides recording controls and access to the main window while it is in the background.
 
 - **Record** — large push-to-talk / dictation / command hero with live transcription,
   duration, the active project, and a "just now" strip. Global shortcut (default F5, or
@@ -29,22 +30,50 @@ with the record hero, transcript library, and detail view.
 - **Settings** (⌘,) — OpenAI key, language, recording shortcut, permissions, projects,
   and voice shortcuts.
 
-The app reuses the `recordings` CLI as its data layer, so the CLI, MCP, and app all share
-one store.
+The app embeds a same-version `recordings` CLI as its data layer, so the CLI, MCP, and app
+share one store without depending on a possibly stale global CLI installation.
 
 ```bash
-# Build + install Recordings.app from the installed package (macOS 26, Swift toolchain):
-recordings app install        # builds and installs to ~/.hasna/recordings/Recordings.app
+# Install the finalized ZIP and matching provenance manifest without changing the app:
+recordings app install \
+  --artifact /path/to/Recordings-0.2.11-macos.zip \
+  --manifest /path/to/Recordings-0.2.11-macos.manifest.json \
+  --expected-team-id TEAMID1234 \
+  --launch
+
+# The first migration from an ad-hoc or different signing identity is explicit:
+recordings app install \
+  --artifact /path/to/Recordings-0.2.11-macos.zip \
+  --manifest /path/to/Recordings-0.2.11-macos.manifest.json \
+  --expected-team-id TEAMID1234 \
+  --allow-signing-identity-migration --launch
+
 recordings app open           # launch it
 recordings app status         # show install state
 
-# From a source checkout:
-cd src/native/Recordings && ./build.sh release && open .build/release/Recordings.app
+# All distributable builds require a pinned Developer ID team and notarytool profile:
+cd src/native/Recordings
+# Fresh source checkouts must install the locked JavaScript dependencies first:
+(cd ../../.. && bun install --frozen-lockfile)
+RECORDINGS_CODESIGN_IDENTITY="Developer ID Application: ..." \
+RECORDINGS_EXPECTED_TEAM_IDENTIFIER="TEAMID1234" \
+RECORDINGS_NOTARY_KEYCHAIN_PROFILE="recordings-notary" ./build.sh release
 swift test                    # run the native test suite
 ```
 
-Requires macOS 26+ and a Swift toolchain (Xcode or Command Line Tools). Set the OpenAI API
-key in **Settings** or via `recordings` config; transcription/enhancement use it.
+The canonical install location is `~/Applications/Recordings.app`. Release installation
+accepts only a finalized ZIP plus its manifest. The manifest binds the bundle identifier, version,
+source commit, architectures, pinned Team ID, designated-requirement digest, companion version and
+hash, app executable hash, archive hash, and trusted signing timestamps. Installation verifies the
+signed embedded provenance, notarization, Gatekeeper, and bidirectional signing compatibility with
+every discovered app copy before mutation. Migrating once from an ad-hoc build to the stable
+release identity requires approving Microphone and Accessibility again; compatible signed updates
+do not reset those permissions. The installer never calls `tccutil reset`, clears quarantine,
+re-signs an artifact, or builds on the target machine.
+
+Requires macOS 26+; source builds also require a Swift toolchain (Xcode or Command Line Tools).
+Set the OpenAI API key in **Settings** or via `recordings` config;
+transcription/enhancement use it.
 
 The app's **Transcription Cleanup** setting controls the same post-processing pipeline as
 the CLI and MCP server. Use **Raw** to keep verbatim text only, **Auto** to clean up only

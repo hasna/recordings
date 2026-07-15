@@ -16,7 +16,7 @@ let package = Package(
             name: "RecordingsLib",
             dependencies: ["KeyboardShortcuts"],
             path: "RecordingsLib",
-            exclude: ["Info.plist", "Recordings.entitlements"],
+            exclude: ["Info.plist", "Recordings.entitlements", "RecordingsCLI.entitlements"],
             resources: [.process("Resources")]
         ),
         .executableTarget(
