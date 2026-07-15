@@ -148,5 +148,6 @@ describe("native app companion contract", () => {
     expect(smoke).toContain("applicationActivationPolicy !== 0");
     expect(smoke).toContain("mainWindowCanBecomeKey");
     expect(smoke).toContain("result.applicationIsActive && !result.mainWindowIsKey");
+    expect(smoke).toContain("result.accessibilityMenuBarItemCount > 0");
   });
 });

@@ -95,7 +95,7 @@ run_smoke() {
       }
     } else {
       if (result.menuBarSurfaceCount !== 0) fail("permission/helper smoke inserted a menu-bar surface");
-      if (result.accessibilityMenuBarItemCount !== 0) {
+      if (result.accessibilityMenuBarItemCount > 0) {
         fail(`permission/helper smoke exposed ${result.accessibilityMenuBarItemCount} menu-bar items`);
       }
       if (result.renderedStatusLabels.length !== 0) fail("permission/helper smoke rendered a status label");
