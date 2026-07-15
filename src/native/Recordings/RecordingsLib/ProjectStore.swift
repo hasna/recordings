@@ -36,6 +36,7 @@ public struct RecProject: Codable, Identifiable, Sendable {
     var systemPrompt: String?
     var appBundleIds: [String]?
     var canonicalPath: String?
+    var canonicalStoreId: String?
     var color: String?
 
     public init(
@@ -45,6 +46,7 @@ public struct RecProject: Codable, Identifiable, Sendable {
         systemPrompt: String? = nil,
         appBundleIds: [String]? = nil,
         canonicalPath: String? = nil,
+        canonicalStoreId: String? = nil,
         color: String? = nil
     ) {
         self.id = id
@@ -53,6 +55,7 @@ public struct RecProject: Codable, Identifiable, Sendable {
         self.systemPrompt = systemPrompt
         self.appBundleIds = appBundleIds
         self.canonicalPath = canonicalPath
+        self.canonicalStoreId = canonicalStoreId
         self.color = color
     }
 
@@ -101,6 +104,7 @@ public final class ProjectStore: ObservableObject {
     @Published public var settings = ProjectSettings()
     @Published public private(set) var isReadyForRecording = false
     @Published public private(set) var isSynchronizingProjects = false
+    @Published public private(set) var synchronizationError: String?
     @Published public private(set) var persistenceError: String?
 
     private let filePath: String
@@ -115,6 +119,16 @@ public final class ProjectStore: ObservableObject {
 
     public var activeProject: RecProject? {
         settings.projects.first { $0.id == settings.activeProjectId }
+    }
+
+    /// Only canonical Store ids are safe to pass to the CLI's `--project` option.
+    /// Legacy local ids remain available for display and prompting while synchronization
+    /// is degraded, but omitting them here prevents a recordings foreign-key failure.
+    public var activeCanonicalProjectIdForRecording: String? {
+        guard let activeProject else { return nil }
+        let canonicalStoreId = activeProject.canonicalStoreId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !canonicalStoreId.isEmpty { return canonicalStoreId }
+        return isReadyForRecording ? activeProject.id : nil
     }
 
     public var effectiveSystemPrompt: String {
@@ -268,6 +282,7 @@ public final class ProjectStore: ObservableObject {
         let original = settings
         guard !original.projects.isEmpty else {
             isReadyForRecording = true
+            synchronizationError = nil
             return
         }
         isReadyForRecording = false
@@ -284,7 +299,9 @@ public final class ProjectStore: ObservableObject {
                 }
             }.value
         } catch {
-            persistenceError = "Failed to register projects: \((error as? RecordingsCLI.Failure)?.message ?? error.localizedDescription)"
+            let message = "Failed to register projects: \((error as? RecordingsCLI.Failure)?.message ?? error.localizedDescription)"
+            synchronizationError = message
+            persistenceError = message
             throw error
         }
         var migrated = original
@@ -304,6 +321,7 @@ public final class ProjectStore: ObservableObject {
                 systemPrompt: project.systemPrompt,
                 appBundleIds: project.appBundleIds,
                 canonicalPath: canonical.path,
+                canonicalStoreId: canonical.id,
                 color: project.color
             )
         }
@@ -314,8 +332,10 @@ public final class ProjectStore: ObservableObject {
         do {
             try persistSettings()
             isReadyForRecording = true
+            synchronizationError = nil
         } catch {
             settings = original
+            synchronizationError = persistenceError ?? "Failed to persist synchronized projects"
             throw error
         }
     }
@@ -341,6 +361,7 @@ public final class ProjectStore: ObservableObject {
             systemPrompt: local.systemPrompt,
             appBundleIds: local.appBundleIds,
             canonicalPath: canonical.path,
+            canonicalStoreId: canonical.id,
             color: local.color
         )
         let original = settings

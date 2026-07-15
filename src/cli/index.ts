@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { registerEventsCommands } from "@hasna/events/commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
 import { dirname, join as pathJoin } from "path";
 import { fileURLToPath } from "url";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
@@ -729,6 +729,7 @@ appCommand
     console.log(`Executable: ${status.executable ? "available" : "missing"}`);
     console.log(`Installer: ${status.installer_available ? "available" : "missing"}`);
     console.log(`Native sources: ${status.native_sources_available ? "available" : "missing"}`);
+    console.log(`Legacy duplicates: ${status.legacy_install_paths.length}`);
     if (process.platform === "darwin") {
       console.log(`Microphone: ${status.microphone_permission}`);
       console.log(`Accessibility: ${status.accessibility_permission}`);
@@ -737,6 +738,12 @@ appCommand
       console.log(`Package: ${status.package_root}`);
       console.log(`Installed app: ${status.installed ? status.installed_app_path : "missing"}`);
       console.log(`Executable path: ${status.executable_path}`);
+      for (const legacyPath of status.legacy_install_paths) {
+        console.log(`Legacy app: ${legacyPath}`);
+      }
+      console.log(`Signing identifier: ${status.signing_identifier ?? "unavailable"}`);
+      console.log(`Team identifier: ${status.team_identifier ?? "unavailable"}`);
+      console.log(`Designated requirement: ${status.designated_requirement ?? "unavailable"}`);
       console.log(`Code hash: ${status.app_code_hash ?? "unavailable"}`);
       console.log(`Log: ${status.log_path}`);
     } else {
@@ -752,10 +759,15 @@ appCommand
     const permissions = {
       platform: status.platform,
       bundle_id: "com.hasna.recordings",
+      installed_app_path: status.installed_app_path,
+      legacy_install_paths: status.legacy_install_paths,
       microphone: status.microphone_permission,
       accessibility: status.accessibility_permission,
       app_code_hash: status.app_code_hash,
       ad_hoc_signed: status.ad_hoc_signed,
+      signing_identifier: status.signing_identifier,
+      team_identifier: status.team_identifier,
+      designated_requirement: status.designated_requirement,
       log_path: status.log_path,
     };
     if (program.opts().json) {
@@ -1744,11 +1756,16 @@ type MacOSAppStatus = {
   native_sources_path: string;
   native_sources_available: boolean;
   installed_app_path: string;
+  legacy_install_paths: string[];
   installed: boolean;
   executable_path: string;
   executable: boolean;
   app_code_hash: string | null;
   ad_hoc_signed: boolean;
+  signing_identifier: string | null;
+  team_identifier: string | null;
+  designated_requirement: string | null;
+  signature_authorities: string[];
   microphone_permission: string;
   accessibility_permission: string;
   log_path: string;
@@ -1757,13 +1774,16 @@ type MacOSAppStatus = {
 function getMacOSAppStatus(): MacOSAppStatus {
   const packageRoot = findPackageRoot();
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  const installedAppPath = pathJoin(home, ".hasna", "recordings", "Recordings.app");
+  const installedAppPath = pathJoin(home, "Applications", "Recordings.app");
   const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
   const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
   const installerPath = pathJoin(packageRoot, "scripts", "install_macos_app.sh");
   const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
   const signingInfo = getCodeSigningInfo(installedAppPath);
-  const permissionCodeHash = signingInfo.adHoc ? signingInfo.cdHash : null;
+  const legacyInstallPaths = findLegacyMacOSAppPaths(home, installedAppPath);
+  const permissionStatus = legacyInstallPaths.length > 0
+    ? "ambiguous_multiple_installations"
+    : null;
 
   return {
     platform: process.platform,
@@ -1773,15 +1793,38 @@ function getMacOSAppStatus(): MacOSAppStatus {
     native_sources_path: nativeSourcesPath,
     native_sources_available: existsSync(pathJoin(nativeSourcesPath, "Package.swift")),
     installed_app_path: installedAppPath,
+    legacy_install_paths: legacyInstallPaths,
     installed: existsSync(installedAppPath),
     executable_path: executablePath,
     executable: existsSync(executablePath),
     app_code_hash: signingInfo.cdHash,
     ad_hoc_signed: signingInfo.adHoc,
-    microphone_permission: getTccPermission("kTCCServiceMicrophone", home, permissionCodeHash),
-    accessibility_permission: getTccPermission("kTCCServiceAccessibility", home, permissionCodeHash),
+    signing_identifier: signingInfo.identifier,
+    team_identifier: signingInfo.teamIdentifier,
+    designated_requirement: signingInfo.designatedRequirement,
+    signature_authorities: signingInfo.authorities,
+    microphone_permission: permissionStatus ?? getTccPermission("kTCCServiceMicrophone", home),
+    accessibility_permission: permissionStatus ?? getTccPermission("kTCCServiceAccessibility", home),
     log_path: logPath,
   };
+}
+
+function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] {
+  const candidates = [
+    pathJoin(home, ".hasna", "recordings", "Recordings.app"),
+    pathJoin("/", "Applications", "Recordings.app"),
+  ];
+  const userApplications = pathJoin(home, "Applications");
+  if (existsSync(userApplications)) {
+    for (const entry of readdirSync(userApplications, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith("Recordings.app.")) {
+        candidates.push(pathJoin(userApplications, entry.name));
+      }
+    }
+  }
+  return [...new Set(candidates)]
+    .filter((candidate) => candidate !== canonicalPath && existsSync(candidate))
+    .sort();
 }
 
 function resetMacOSPermissions(): void {
@@ -1797,21 +1840,39 @@ function resetMacOSPermissions(): void {
   }
 }
 
-function getCodeSigningInfo(appPath: string): { cdHash: string | null; adHoc: boolean } {
+function getCodeSigningInfo(appPath: string): {
+  cdHash: string | null;
+  adHoc: boolean;
+  identifier: string | null;
+  teamIdentifier: string | null;
+  designatedRequirement: string | null;
+  authorities: string[];
+} {
   if (process.platform !== "darwin" || !existsSync(appPath)) {
-    return { cdHash: null, adHoc: false };
+    return {
+      cdHash: null,
+      adHoc: false,
+      identifier: null,
+      teamIdentifier: null,
+      designatedRequirement: null,
+      authorities: [],
+    };
   }
-  const result = spawnSync("codesign", ["-d", "--verbose=4", appPath], {
+  const result = spawnSync("codesign", ["-d", "-r-", "--verbose=4", appPath], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
   const output = `${result.stdout}\n${result.stderr}`;
   const cdHash = output.match(/^CDHash=([a-fA-F0-9]+)/m)?.[1]?.toLowerCase() ?? null;
   const adHoc = /Signature=adhoc/.test(output);
-  return { cdHash, adHoc };
+  const identifier = output.match(/^Identifier=(.+)$/m)?.[1]?.trim() ?? null;
+  const teamIdentifier = output.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim() ?? null;
+  const designatedRequirement = output.match(/^designated => (.+)$/m)?.[1]?.trim() ?? null;
+  const authorities = [...output.matchAll(/^Authority=(.+)$/gm)].map((match) => match[1]!.trim());
+  return { cdHash, adHoc, identifier, teamIdentifier, designatedRequirement, authorities };
 }
 
-function getTccPermission(service: string, home: string, currentCodeHash?: string | null): string {
+function getTccPermission(service: string, home: string): string {
   if (process.platform !== "darwin") return "unsupported";
 
   const dbPaths = [
@@ -1819,7 +1880,7 @@ function getTccPermission(service: string, home: string, currentCodeHash?: strin
     pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
   ];
   const sql =
-    "select auth_value || '|' || ifnull(hex(csreq), '') from access where service = '" +
+    "select auth_value from access where service = '" +
     service.replace(/'/g, "''") +
     "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
 
@@ -1831,17 +1892,7 @@ function getTccPermission(service: string, home: string, currentCodeHash?: strin
     });
     const value = result.stdout.trim();
     if (!value) continue;
-    const [authValue, csreqHex = ""] = value.split("|");
-    const label = tccAuthValueLabel(authValue ?? "");
-    if (
-      label === "allowed" &&
-      currentCodeHash &&
-      csreqHex &&
-      !csreqHex.toLowerCase().includes(currentCodeHash.toLowerCase())
-    ) {
-      return "stale_allowed_for_previous_app_build";
-    }
-    return label;
+    return `${tccAuthValueLabel(value)}_identity_unverified`;
   }
 
   return "not_determined";

@@ -150,11 +150,13 @@ describe("recordings CLI", () => {
   });
 
   test("--json app status reports package installer paths", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-app-status-${Date.now()}`);
+    tempDirs.push(home);
     const proc = Bun.spawn(
       [process.execPath, "src/cli/index.ts", "--json", "app", "status"],
       {
         cwd: process.cwd(),
-        env: process.env,
+        env: { ...process.env, HOME: home },
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -174,8 +176,13 @@ describe("recordings CLI", () => {
       installer_available: boolean;
       native_sources_available: boolean;
       installed_app_path: string;
+      legacy_install_paths: string[];
       app_code_hash: string | null;
       ad_hoc_signed: boolean;
+      signing_identifier: string | null;
+      team_identifier: string | null;
+      designated_requirement: string | null;
+      signature_authorities: string[];
       microphone_permission: string;
       accessibility_permission: string;
       log_path: string;
@@ -183,12 +190,74 @@ describe("recordings CLI", () => {
     expect(status.package_root).toBe(process.cwd());
     expect(status.installer_available).toBe(true);
     expect(status.native_sources_available).toBe(true);
-    expect(status.installed_app_path).toContain(".hasna/recordings/Recordings.app");
+    expect(status.installed_app_path).toBe(join(home, "Applications", "Recordings.app"));
+    expect(status.legacy_install_paths).toEqual([]);
     expect(typeof status.ad_hoc_signed).toBe("boolean");
     expect(status.app_code_hash === null || typeof status.app_code_hash === "string").toBe(true);
     expect(typeof status.microphone_permission).toBe("string");
     expect(typeof status.accessibility_permission).toBe("string");
     expect(status.log_path).toContain(".hasna/recordings/Recordings.log");
+    expect(status.signing_identifier).toBeNull();
+    expect(status.team_identifier).toBeNull();
+    expect(status.designated_requirement).toBeNull();
+    expect(status.signature_authorities).toEqual([]);
+  });
+
+  test("app status inspects the canonical app and reports legacy duplicates", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-app-layout-${Date.now()}`);
+    tempDirs.push(home);
+    const canonical = join(home, "Applications", "Recordings.app");
+    const hiddenLegacy = join(home, ".hasna", "recordings", "Recordings.app");
+    const rollbackLegacy = join(home, "Applications", "Recordings.app.rollback-pre-test");
+    mkdirSync(join(canonical, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(canonical, "Contents", "MacOS", "Recordings"), "fixture");
+    mkdirSync(hiddenLegacy, { recursive: true });
+    mkdirSync(rollbackLegacy, { recursive: true });
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "app", "status"],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const status = JSON.parse(stdout) as {
+      installed_app_path: string;
+      installed: boolean;
+      executable: boolean;
+      legacy_install_paths: string[];
+      microphone_permission: string;
+      accessibility_permission: string;
+    };
+    expect(status.installed_app_path).toBe(canonical);
+    expect(status.installed).toBe(true);
+    expect(status.executable).toBe(true);
+    expect(status.legacy_install_paths).toContain(hiddenLegacy);
+    expect(status.legacy_install_paths).toContain(rollbackLegacy);
+    expect(status.microphone_permission).toBe("ambiguous_multiple_installations");
+    expect(status.accessibility_permission).toBe("ambiguous_multiple_installations");
+  });
+
+  test("app status never treats a CDHash substring as permission identity proof", () => {
+    const cli = readFileSync("src/cli/index.ts", "utf8");
+    const permissionReader = cli.slice(
+      cli.indexOf("function getTccPermission"),
+      cli.indexOf("function tccAuthValueLabel"),
+    );
+
+    expect(permissionReader).not.toContain("currentCodeHash");
+    expect(permissionReader).not.toContain("csreqHex");
+    expect(permissionReader).toContain("_identity_unverified");
   });
 
   test("app status is compact by default and verbose on request", async () => {
@@ -479,7 +548,7 @@ describe("recordings CLI", () => {
     }
   });
 
-  test("--json save-text persists realtime fast-path text without audio transcription", async () => {
+  test("--json save-text persists degraded-sync text without an unsafe project id", async () => {
     const home = join(tmpdir(), `open-recordings-cli-save-text-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);
     mkdirSync(home, { recursive: true });

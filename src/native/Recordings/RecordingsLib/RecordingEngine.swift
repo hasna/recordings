@@ -408,22 +408,20 @@ public final class RecordingEngine: ObservableObject {
         targetAppPid = isOwnApp ? nil : frontmostApp?.processIdentifier
 
         if let store = projectStore {
-            guard store.isReadyForRecording else {
-                resetRecordingIntent()
-                statusMessage = store.persistenceError ?? "Preparing projects before recording"
-                return
-            }
             let windowTitle = Self.focusedWindowTitle(pid: frontmostApp?.processIdentifier)
             let projects = store.settings.projects
             let detected = ProjectStore.matchProject(windowTitle: windowTitle, bundleId: targetAppBundleIdentifier, projects: projects)
-            if let detected {
+            if let detected,
+               detected.id != store.settings.activeProjectId,
+               store.canMutateProjects {
                 do {
                     try store.setActive(detected.id)
                 } catch {
-                    resetRecordingIntent()
-                    statusMessage = store.persistenceError ?? "Failed to select project"
-                    return
+                    log("project auto-selection failed; continuing capture with the last active project: \(error.localizedDescription)")
                 }
+            }
+            if let warning = store.synchronizationError ?? store.persistenceError {
+                log("project synchronization degraded; continuing capture: \(warning)")
             }
         }
 
@@ -643,6 +641,7 @@ public final class RecordingEngine: ObservableObject {
         let targetAppBundleIdentifier = targetAppBundleIdentifier
         let targetAppPid = targetAppPid
         let activeProjectId = projectStore?.settings.activeProjectId
+        let canonicalProjectId = projectStore?.activeCanonicalProjectIdForRecording
         let activeProjectName = projectStore?.activeProject?.name
         let audioPath = activeAudioPath
         let pcmStreamPipe = pcmStreamPipe
@@ -689,7 +688,7 @@ public final class RecordingEngine: ObservableObject {
                     audioPath: audioPath,
                     pcmData: pcmData,
                     durationMs: durationMs,
-                    activeProjectId: activeProjectId,
+                    activeProjectId: canonicalProjectId,
                     transcriberPrompt: self.projectStore?.effectiveSystemPrompt ?? "",
                     postProcessingMode: self.projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue,
                     language: OpenAIAPIKeyStore.apiLanguageHint(for: self.transcriptionLanguage),
@@ -703,7 +702,8 @@ public final class RecordingEngine: ObservableObject {
                             curMode: curMode,
                             targetAppBundleIdentifier: targetAppBundleIdentifier,
                             targetAppPid: targetAppPid,
-                            activeProjectId: activeProjectId,
+                            canonicalProjectId: canonicalProjectId,
+                            displayProjectId: activeProjectId,
                             activeProjectName: activeProjectName,
                             realtimeText: safeRealtimeFallbackText
                         )
@@ -733,7 +733,8 @@ public final class RecordingEngine: ObservableObject {
                     curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
-                    activeProjectId: activeProjectId,
+                    canonicalProjectId: canonicalProjectId,
+                    displayProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
                     realtimeText: safeRealtimeFallbackText
                 )
@@ -1152,17 +1153,26 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Fallback Transcription
 
-    private func fallbackTranscribe(audioPath: String, curMode: RecordingMode, targetAppBundleIdentifier: String?, targetAppPid: pid_t?, activeProjectId: String?, activeProjectName: String?, realtimeText: String? = nil) {
+    private func fallbackTranscribe(
+        audioPath: String,
+        curMode: RecordingMode,
+        targetAppBundleIdentifier: String?,
+        targetAppPid: pid_t?,
+        canonicalProjectId: String?,
+        displayProjectId: String?,
+        activeProjectName: String?,
+        realtimeText: String? = nil
+    ) {
         let homePath = home
 
         isTranscribing = true
         statusMessage = "Transcribing..."
 
-        // Tag the persisted recording with the active project so the app's library/filters
-        // (which use the same local project id) line up. Global flags precede the subcommand.
+        // Only a proven canonical Store id may be persisted. The local display id remains
+        // available to recent-transcript UI even when synchronization is degraded.
         let transcribeArgs = Self.transcribeCLIArgs(
             audioPath: audioPath,
-            activeProjectId: activeProjectId,
+            activeProjectId: canonicalProjectId,
             transcriberPrompt: projectStore?.effectiveSystemPrompt ?? "",
             postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
         )
@@ -1196,7 +1206,7 @@ public final class RecordingEngine: ObservableObject {
                     curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
-                    activeProjectId: activeProjectId,
+                    activeProjectId: displayProjectId,
                     activeProjectName: activeProjectName
                 )
             }

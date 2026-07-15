@@ -141,6 +141,25 @@ struct CLIRunnerTests {
         ])
     }
 
+    @Test("saveTextCLIArgs omits an unsafe local project id")
+    func saveTextCLIArgsWithoutCanonicalProject() {
+        let args = RecordingEngine.saveTextCLIArgs(
+            textFile: "/tmp/transcript.txt",
+            audioPath: nil,
+            activeProjectId: nil,
+            transcriberPrompt: "Keep local prompt context",
+            postProcessingMode: "auto",
+            language: "en",
+            durationMs: 0,
+            source: "realtime_fast_path",
+            modelUsed: "gpt-realtime-whisper"
+        )
+
+        #expect(!args.contains("--project"))
+        #expect(args.contains("--transcriber-prompt"))
+        #expect(args.contains("Keep local prompt context"))
+    }
+
     @Test("parseError detects ERROR prefix")
     func parseError() {
         #expect(CLIRunner.parseError("ERROR: OpenAI API key not configured on this Mac") == "OpenAI API key not configured on this Mac")

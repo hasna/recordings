@@ -64,11 +64,16 @@ final class RecordingsStore: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        reconcileProjects()
+    }
+
+    func reconcileProjects() {
         let home = self.home
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await projectStore.reconcileWithCanonicalStore(home: home)
+                self.operationError = nil
             } catch {
                 self.operationError = projectStore.persistenceError
                     ?? (error as? RecordingsCLI.Failure)?.message

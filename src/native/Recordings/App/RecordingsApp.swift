@@ -46,6 +46,7 @@ final class RecordingsAppState: ObservableObject {
 
     func showMainWindow() {
         guard let store else { return }
+        NSApplication.shared.activate()
         if let mainWindow {
             mainWindow.makeKeyAndOrderFront(nil)
             return
@@ -64,7 +65,6 @@ final class RecordingsAppState: ObservableObject {
         window.contentView = NSHostingView(rootView: ContentView(store: store))
         window.center()
         window.makeKeyAndOrderFront(nil)
-        NSApplication.shared.activate()
         mainWindow = window
     }
 }
