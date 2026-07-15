@@ -82,6 +82,36 @@ describe("CLI enhancement options", () => {
     expect(cfg.transcriber_prompt).toBe("Use terse notes");
   });
 
+  test("frozen model and enhancement trigger options override mutable config", () => {
+    const cfg = config(true);
+
+    applyEnhancementOptions(cfg, {
+      transcriptionModel: "whisper-1",
+      transcriberModel: "gpt-snapshot",
+      enhancementModel: "gpt-fallback-snapshot",
+      enhanceTriggersJson: '["rewrite snapshot"]',
+      keywordTransformsJson: '{"code with":"Codewith"}',
+    });
+
+    expect(cfg.transcription_model).toBe("whisper-1");
+    expect(cfg.transcriber_model).toBe("gpt-snapshot");
+    expect(cfg.enhancement_model).toBe("gpt-fallback-snapshot");
+    expect(cfg.enhance_triggers).toEqual(["rewrite snapshot"]);
+    expect(cfg.keyword_transforms).toEqual({ "code with": "Codewith" });
+  });
+
+  test("invalid frozen enhancement triggers fail before processing", () => {
+    expect(() => applyEnhancementOptions(config(true), {
+      enhanceTriggersJson: '{"not":"an array"}',
+    })).toThrow("Invalid enhancement triggers snapshot");
+  });
+
+  test("frozen realtime-only model cannot bypass bounded transcription normalization", () => {
+    const cfg = config(true);
+    applyEnhancementOptions(cfg, { transcriptionModel: "gpt-realtime" });
+    expect(cfg.transcription_model).toBe("gpt-4o-transcribe");
+  });
+
   test("invalid post-processing mode throws", () => {
     const cfg = config(true);
 

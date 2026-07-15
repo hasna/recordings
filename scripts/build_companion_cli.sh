@@ -29,10 +29,17 @@ fi
 
 mkdir -p "$(dirname "$OUTPUT")"
 rm -f "$OUTPUT"
+COMPILE_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$COMPILE_DIR"
+}
+trap cleanup EXIT
+COMPILED_OUTPUT="$COMPILE_DIR/recordings"
 (
-  cd "$ROOT"
-  bun build --compile "$ENTRY" --outfile "$OUTPUT"
+  cd "$COMPILE_DIR"
+  bun build --compile "$ENTRY" --outfile "$COMPILED_OUTPUT"
 )
+mv "$COMPILED_OUTPUT" "$OUTPUT"
 
 EXPECTED_VERSION="$(
   cd "$ROOT"
@@ -78,13 +85,15 @@ for flag in -n --limit --offset; do
 done
 require_flag "search" "-n" search
 require_flag "search" "--limit" search
-for flag in --post-processing --transcriber-prompt; do
+for flag in --post-processing --prompt --transcriber-prompt --language --recording-id --transcription-model --transcriber-model --enhancement-model --enhance-triggers-json --keyword-transforms-json; do
   require_flag "transcribe" "$flag" transcribe
 done
-for flag in --text-file --source --model-used --post-processing --audio-path --duration-ms --language --transcriber-prompt; do
+for flag in --text-file --source --model-used --post-processing --audio-path --duration-ms --language --transcriber-prompt --recording-id --transcription-model --transcriber-model --enhancement-model --enhance-triggers-json --keyword-transforms-json; do
   require_flag "save-text" "$flag" save-text
 done
-require_flag "rewrite" "--instruction" rewrite
+for flag in --instruction --post-processing --language --prompt --transcriber-prompt --transcription-model --transcriber-model --enhancement-model --enhance-triggers-json --keyword-transforms-json; do
+  require_flag "rewrite" "$flag" rewrite
+done
 
 chmod 0755 "$OUTPUT"
 echo "Built Recordings companion CLI ${ACTUAL_VERSION}: ${OUTPUT}"

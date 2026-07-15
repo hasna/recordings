@@ -106,6 +106,192 @@ describe("cloud HTTP CRUD mapping + auth", () => {
     expect(calls[0].headers["Idempotency-Key"]).toBeTruthy();
   });
 
+  test("create retries a lost committed response with one caller-owned identity", async () => {
+    const calls: Array<Record<string, string>> = [];
+    const committedRows = new Set<string>();
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      calls.push(headers);
+      const body = JSON.parse(String(init?.body)) as { id: string; raw_text: string };
+      committedRows.add(body.id);
+      if (calls.length === 1) throw new Error("response lost after server commit");
+      return Response.json({ recording: body }, { status: 201 });
+    };
+    const client = createStorageClient(APP, createHttpTransport({
+      name: APP,
+      baseUrl: "https://recordings.hasna.xyz/v1",
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: async () => {},
+    }));
+
+    const result = await client.create<{ recording: { id: string } }>(
+      "recordings",
+      { id: "pipeline-a", raw_text: "settled realtime text" },
+      "pipeline-a",
+    );
+
+    expect(result.recording.id).toBe("pipeline-a");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]["Idempotency-Key"]).toBe("pipeline-a");
+    expect(calls[1]["Idempotency-Key"]).toBe("pipeline-a");
+    expect(committedRows.size).toBe(1);
+  });
+
+  test("ApiStore retries with a stable key without making it the global recording id", async () => {
+    const originalFetch = globalThis.fetch;
+    const committedRows = new Map<string, { id: string; raw_text: string }>();
+    let attempts = 0;
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      attempts += 1;
+      const body = JSON.parse(String(init?.body)) as { id?: string; raw_text: string };
+      const key = (init?.headers as Record<string, string>)["Idempotency-Key"]!;
+      expect(key).toBe("logical-save-a");
+      expect(body.id).toBeUndefined();
+      if (!committedRows.has(key)) {
+        committedRows.set(key, { id: "server-recording-a", raw_text: body.raw_text });
+      }
+      if (attempts === 1) throw new Error("response lost after server commit");
+      return Response.json({ recording: committedRows.get(key) }, { status: 201 });
+    };
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      const recovered = await store.createRecording(
+        { raw_text: "settled realtime text" },
+        "logical-save-a",
+      );
+
+      expect(recovered.id).toBe("server-recording-a");
+      expect(recovered.raw_text).toBe("settled realtime text");
+      expect(attempts).toBe(2);
+      expect(committedRows.size).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("ApiStore rejects a conflicting input id and idempotency key before HTTP", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return Response.json({}, { status: 201 });
+    };
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      await expect(store.createRecording(
+        { id: "recording-a", raw_text: "must not post" },
+        "logical-save-b",
+      )).rejects.toThrow("recording id conflicts with idempotency key");
+      expect(attempts).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("ApiStore rejects an idempotency key that HTTP would trim before HTTP", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return Response.json({}, { status: 201 });
+    };
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      await expect(store.createRecording(
+        { raw_text: "must not post" },
+        " logical-save-a ",
+      )).rejects.toThrow("idempotency key must not contain leading or trailing whitespace");
+      expect(attempts).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("ApiStore treats a null body id as absent when a nonempty key is supplied", async () => {
+    const originalFetch = globalThis.fetch;
+    let postedBody: unknown;
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      postedBody = JSON.parse(String(init?.body));
+      return Response.json({
+        recording: { ...(postedBody as object), id: "server-recording-null" },
+      }, { status: 201 });
+    };
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      const recording = await store.createRecording(
+        JSON.parse('{"id":null,"raw_text":"settled realtime text"}'),
+        "logical-save-null",
+      );
+      expect(recording.id).toBe("server-recording-null");
+      expect(postedBody).not.toHaveProperty("id");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("ApiStore rejects invalid runtime ids and keys before HTTP", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return Response.json({}, { status: 201 });
+    };
+
+    try {
+      const store = getStore({
+        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
+        HASNA_RECORDINGS_API_KEY: "test-key",
+      });
+      const invalidInputs = [
+        [JSON.parse('{"id":"","raw_text":"must not post"}'), "recording id must not be empty"],
+        [JSON.parse('{"id":17,"raw_text":"must not post"}'), "recording id must be a string"],
+        [JSON.parse('{"id":"bad\\u0000id","raw_text":"must not post"}'), "recording id must not contain control characters"],
+      ] as const;
+      for (const [input, message] of invalidInputs) {
+        await expect(Reflect.apply(store.createRecording, store, [input])).rejects.toThrow(message);
+      }
+      const invalidKeys: ReadonlyArray<readonly [unknown, string]> = [
+        ["", "idempotency key must not be empty"],
+        [null, "idempotency key must be a string"],
+        [17, "idempotency key must be a string"],
+        ["bad\u0000key", "idempotency key must not contain control characters"],
+        ["logical-save-\u00e9", "idempotency key must contain only printable ASCII characters"],
+        ["x".repeat(256), "idempotency key must not exceed 255 characters"],
+      ];
+      for (const [key, message] of invalidKeys) {
+        await expect(Reflect.apply(store.createRecording, store, [
+          { raw_text: "must not post" },
+          key,
+        ])).rejects.toThrow(message);
+      }
+      expect(attempts).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("list maps recordings envelope to items", async () => {
     const { fetchImpl, calls } = mockFetch(() => ({ status: 200, body: { recordings: [{ id: "1" }, { id: "2" }], count: 2 } }));
     const client = createStorageClient(APP, createHttpTransport({ name: APP, baseUrl: "https://recordings.hasna.xyz/v1", apiKey: "k", fetchImpl }));

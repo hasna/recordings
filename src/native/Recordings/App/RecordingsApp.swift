@@ -4,6 +4,24 @@ import SwiftUI
 import KeyboardShortcuts
 import RecordingsLib
 
+private final class PermissionRequestResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var microphoneGranted = false
+
+    func setMicrophoneGranted(_ granted: Bool) {
+        lock.withLock { microphoneGranted = granted }
+    }
+
+    func outcome(accessibilityTrusted: Bool) -> PermissionRequestOutcome {
+        lock.withLock {
+            PermissionRequestOutcome(
+                microphoneGranted: microphoneGranted,
+                accessibilityTrusted: accessibilityTrusted
+            )
+        }
+    }
+}
+
 /// Recordings — a full native macOS app. The main window is the Recordings workspace
 /// (record + library); the menu-bar surface, global shortcuts, and dictation/command modes
 /// keep working while the window is in the background.
@@ -182,7 +200,7 @@ final class RecordingsAppState: ObservableObject {
             accessibilityMenuBarItemCount: accessibility.itemCount,
             accessibilityMenuBarLabels: accessibility.labels,
             globalHandlersInstalled: store != nil,
-            permissionRequestsStarted: PermissionRequestRuntimeEvidence.invocationCount,
+            permissionRequestsStarted: AccessibilityPromptGate.processShared.promptRequestCount,
             windowCreationCount: windowCreationCount,
             windowActivationCount: windowActivationCount,
             retainedWindowReused: retainedWindowReused,
@@ -214,12 +232,8 @@ struct RecordingsApp: App {
         appDelegate.state = state
         if plan.isRuntimeSmoke {
             // Runtime smoke retains the real launch classification but never invokes TCC APIs.
-        } else if plan.isHelper {
+        } else if plan.requestsAccessibilityPrompt {
             Self.handlePermissionRequest(plan)
-        } else {
-            AXIsProcessTrustedWithOptions(
-                [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-            )
         }
     }
 
@@ -274,20 +288,19 @@ struct RecordingsApp: App {
     }
 
     private static func handlePermissionRequest(_ plan: PermissionRequestLaunchPlan) {
-        PermissionRequestRuntimeEvidence.invocationCount += 1
         NSApplication.shared.setActivationPolicy(.accessory)
         NativeAppLog.write("request-permissions argument received")
         let work = DispatchGroup()
+        let resultBox = PermissionRequestResultBox()
         work.enter()
         AVCaptureDevice.requestAccess(for: .audio) { granted in
+            resultBox.setMicrophoneGranted(granted)
             NativeAppLog.write("request-permissions microphone granted=\(granted)")
             work.leave()
         }
 
-        let trusted = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        )
-        NativeAppLog.write("request-permissions accessibility trusted=\(trusted)")
+        let accessibility = AccessibilityPromptGate.processShared.requestExplicitly()
+        NativeAppLog.write("request-permissions accessibility trusted=\(accessibility.trusted)")
 
         if plan.opensPermissionSettings {
             work.enter()
@@ -301,9 +314,13 @@ struct RecordingsApp: App {
                 work.leave()
             }
         }
-        work.notify(queue: .main) {
-            NativeAppLog.write("request-permissions helper completed")
-            NSApplication.shared.terminate(nil)
+        work.notify(queue: .global(qos: .userInitiated)) {
+            let completedAccessibility = AccessibilityPromptGate.processShared.waitForExplicitRequestCompletion(
+                accessibility
+            )
+            let outcome = resultBox.outcome(accessibilityTrusted: completedAccessibility.trusted)
+            NativeAppLog.write("request-permissions helper completed success=\(outcome.succeeded)")
+            exit(outcome.succeeded ? EXIT_SUCCESS : EXIT_FAILURE)
         }
     }
 }

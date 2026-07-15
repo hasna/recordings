@@ -17,6 +17,7 @@ struct RecordingStartGateTests {
         #expect(!plan.declaresMainWindow)
         #expect(!plan.declaresMenuBar)
         #expect(plan.terminatesAfterHandling)
+        #expect(plan.requestsAccessibilityPrompt)
     }
 
     @Test("regular launch retains global handlers and never self-terminates")
@@ -28,6 +29,7 @@ struct RecordingStartGateTests {
         #expect(plan.declaresMainWindow)
         #expect(plan.declaresMenuBar)
         #expect(!plan.terminatesAfterHandling)
+        #expect(!plan.requestsAccessibilityPrompt)
     }
 
     @Test("runtime smoke plans install no handlers and never request permissions")
@@ -39,6 +41,7 @@ struct RecordingStartGateTests {
         #expect(!normal.installsGlobalHandlers)
         #expect(normal.declaresMenuBar)
         #expect(normal.runtimeSmokeOutputPath == "/tmp/result.json")
+        #expect(!normal.requestsAccessibilityPrompt)
 
         let helper = PermissionRequestLaunchPlan(arguments: [
             "Recordings", "--request-permissions", "--runtime-smoke", "permission-helper",
@@ -48,6 +51,166 @@ struct RecordingStartGateTests {
         #expect(!helper.installsGlobalHandlers)
         #expect(!helper.declaresMenuBar)
         #expect(helper.isHelper)
+        #expect(!helper.requestsAccessibilityPrompt)
+    }
+
+    @Test("first untrusted protected operation prompts once per process")
+    func firstProtectedOperationPromptsOnce() {
+        let gate = AccessibilityPromptGate()
+        var trustChecks = 0
+        var prompts = 0
+
+        let first = gate.trustForProtectedOperation(
+            isTrusted: {
+                trustChecks += 1
+                return false
+            },
+            requestPrompt: {
+                prompts += 1
+                return false
+            }
+        )
+        let second = gate.trustForProtectedOperation(
+            isTrusted: {
+                trustChecks += 1
+                return false
+            },
+            requestPrompt: {
+                prompts += 1
+                return false
+            }
+        )
+
+        #expect(!first.trusted)
+        #expect(first.didPrompt)
+        #expect(!second.trusted)
+        #expect(!second.didPrompt)
+        #expect(trustChecks == 2)
+        #expect(prompts == 1)
+        #expect(gate.promptRequestCount == 1)
+    }
+
+    @Test("explicit Accessibility action may prompt after the automatic attempt")
+    func explicitAccessibilityActionMayPromptAgain() {
+        let gate = AccessibilityPromptGate()
+        var prompts = 0
+        var trusted = false
+
+        _ = gate.trustForProtectedOperation(
+            isTrusted: { false },
+            requestPrompt: {
+                prompts += 1
+                return false
+            }
+        )
+        let explicit = gate.requestExplicitly(
+            isTrusted: { trusted },
+            requestPrompt: {
+                prompts += 1
+                trusted = true
+                return false
+            }
+        )
+
+        #expect(explicit.trusted)
+        #expect(explicit.didPrompt)
+        #expect(prompts == 2)
+        #expect(gate.promptRequestCount == 2)
+    }
+
+    @Test("permission helper rechecks Accessibility at completion after a delayed grant")
+    func permissionHelperRechecksDelayedAccessibilityGrant() {
+        let gate = AccessibilityPromptGate()
+        var checks = 0
+        let promptResult = AccessibilityTrustResult(trusted: false, didPrompt: true)
+
+        let completion = gate.waitForExplicitRequestCompletion(
+            promptResult,
+            attempts: 3,
+            waitBetweenAttempts: {},
+            isTrusted: {
+                checks += 1
+                return checks == 3
+            }
+        )
+
+        #expect(completion.trusted)
+        #expect(completion.didPrompt)
+        #expect(checks == 3)
+    }
+
+    @Test("permission helper remains denied when Accessibility is still untrusted")
+    func permissionHelperReportsStillDenied() {
+        let gate = AccessibilityPromptGate()
+        var waits = 0
+        let completion = gate.waitForExplicitRequestCompletion(
+            AccessibilityTrustResult(trusted: true, didPrompt: true),
+            attempts: 3,
+            waitBetweenAttempts: { waits += 1 },
+            isTrusted: { false }
+        )
+
+        #expect(!completion.trusted)
+        #expect(completion.didPrompt)
+        #expect(waits == 2)
+    }
+
+    @Test("trusted protected operation never invokes the prompt API")
+    func trustedProtectedOperationDoesNotPrompt() {
+        let gate = AccessibilityPromptGate()
+        var prompts = 0
+
+        let result = gate.trustForProtectedOperation(
+            isTrusted: { true },
+            requestPrompt: {
+                prompts += 1
+                return true
+            }
+        )
+
+        #expect(result.trusted)
+        #expect(!result.didPrompt)
+        #expect(prompts == 0)
+        #expect(gate.promptRequestCount == 0)
+    }
+
+    @Test("explicit prompt consumes the automatic allowance for later protected operations")
+    func explicitPromptPreventsUnexpectedAutomaticReprompt() {
+        let gate = AccessibilityPromptGate()
+        var prompts = 0
+
+        _ = gate.requestExplicitly {
+            prompts += 1
+            return false
+        }
+        let protectedOperation = gate.trustForProtectedOperation(
+            isTrusted: { false },
+            requestPrompt: {
+                prompts += 1
+                return false
+            }
+        )
+
+        #expect(!protectedOperation.trusted)
+        #expect(!protectedOperation.didPrompt)
+        #expect(prompts == 1)
+        #expect(gate.promptRequestCount == 1)
+    }
+
+    @Test("permission helper outcome reports both permission results truthfully")
+    func permissionHelperOutcome() {
+        #expect(PermissionRequestOutcome(
+            microphoneGranted: true,
+            accessibilityTrusted: true
+        ).succeeded)
+        #expect(!PermissionRequestOutcome(
+            microphoneGranted: false,
+            accessibilityTrusted: true
+        ).succeeded)
+        #expect(!PermissionRequestOutcome(
+            microphoneGranted: true,
+            accessibilityTrusted: false
+        ).succeeded)
     }
 
     @Test("recording cannot begin while already recording or transcribing")
@@ -60,6 +223,27 @@ struct RecordingStartGateTests {
             isTranscribing: false,
             isAwaitingMicrophonePermission: true
         ) == false)
+        #expect(RecordingEngine.canBeginRecording(
+            isRecording: false,
+            isTranscribing: false,
+            isDeliveryPending: true
+        ) == false)
+    }
+
+    @Test("recording status is derived from the frozen capture mode")
+    func statusUsesCapturedMode() {
+        #expect(RecordingEngine.recordingStatus(
+            capturedMode: .command,
+            trigger: .keyboardShortcut
+        ) == "Speak your instruction...")
+        #expect(RecordingEngine.recordingStatus(
+            capturedMode: .dictation,
+            trigger: .keyboardShortcut
+        ) == "Recording — release to stop")
+        #expect(RecordingEngine.recordingStatus(
+            capturedMode: .pushToTalk,
+            trigger: .manual
+        ) == "Recording — click Stop when finished")
     }
 
     @Test("microphone permission start gate admits one current continuation")

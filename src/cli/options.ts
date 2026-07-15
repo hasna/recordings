@@ -1,5 +1,9 @@
 import type { RecordingsConfig } from "../types/index.js";
-import { normalizePostProcessingConfig, normalizePostProcessingMode } from "../lib/config.js";
+import {
+  normalizeModelSlots,
+  normalizePostProcessingConfig,
+  normalizePostProcessingMode,
+} from "../lib/config.js";
 
 const POST_PROCESSING_MODES = new Set(["off", "auto", "always"]);
 
@@ -10,7 +14,10 @@ export type EnhancementOptionBag = {
   transcriberPrompt?: string;
   systemPrompt?: string;
   transcriberModel?: string;
+  transcriptionModel?: string;
   enhancementModel?: string;
+  enhanceTriggersJson?: string;
+  keywordTransformsJson?: string;
 };
 
 export function parseListPagination(
@@ -61,11 +68,34 @@ export function applyEnhancementOptions(
   } else if (opts.systemPrompt !== undefined) {
     config.transcriber_prompt = opts.systemPrompt;
   }
+  if (opts.enhancementModel) {
+    config.enhancement_model = opts.enhancementModel;
+  }
   if (opts.transcriberModel) {
     config.transcriber_model = opts.transcriberModel;
   } else if (opts.enhancementModel) {
-    config.enhancement_model = opts.enhancementModel;
     config.transcriber_model = opts.enhancementModel;
   }
+  if (opts.transcriptionModel) {
+    config.transcription_model = opts.transcriptionModel;
+  }
+  if (opts.enhanceTriggersJson !== undefined) {
+    const triggers = JSON.parse(opts.enhanceTriggersJson) as unknown;
+    if (!Array.isArray(triggers) || !triggers.every((trigger) => typeof trigger === "string")) {
+      throw new Error("Invalid enhancement triggers snapshot; expected a JSON string array.");
+    }
+    config.enhance_triggers = triggers;
+  }
+  if (opts.keywordTransformsJson !== undefined) {
+    const transforms = JSON.parse(opts.keywordTransformsJson) as unknown;
+    if (
+      typeof transforms !== "object" || transforms === null || Array.isArray(transforms)
+      || !Object.values(transforms).every((value) => typeof value === "string")
+    ) {
+      throw new Error("Invalid keyword transforms snapshot; expected a JSON string map.");
+    }
+    config.keyword_transforms = transforms as Record<string, string>;
+  }
+  normalizeModelSlots(config);
   return config;
 }

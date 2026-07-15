@@ -1,7 +1,8 @@
 -- @hasna/recordings cloud (RDS) schema — canonical DDL.
 -- Applied idempotently by `recordings-serve migrate` (src/server/cloud.ts ensureCloudSchema).
--- NEVER drops or rewrites existing tables. The api_keys table is created by
--- the @hasna/contracts ApiKeyStore.ensureSchema() at migrate time.
+-- Migrations are idempotent and retain table data. Migration 18 replaces the
+-- idempotency foreign key in place. The api_keys table is created by the
+-- @hasna/contracts ApiKeyStore.ensureSchema() at migrate time.
 
 CREATE TABLE IF NOT EXISTS _pg_migrations (id SERIAL PRIMARY KEY, version INT UNIQUE NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW());
 
@@ -103,3 +104,21 @@ CREATE TABLE IF NOT EXISTS feedback (
 -- migration 16
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS active_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
 
+-- migration 17
+CREATE TABLE IF NOT EXISTS recording_idempotency (
+    principal TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    recording_id TEXT NOT NULL UNIQUE REFERENCES recordings(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT NOW()::text,
+    PRIMARY KEY (principal, idempotency_key)
+  );
+
+-- migration 18
+ALTER TABLE recording_idempotency
+  DROP CONSTRAINT IF EXISTS recording_idempotency_recording_id_fkey;
+ALTER TABLE recording_idempotency
+  ALTER COLUMN recording_id DROP NOT NULL;
+ALTER TABLE recording_idempotency
+  ADD CONSTRAINT recording_idempotency_recording_id_fkey
+  FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE SET NULL;

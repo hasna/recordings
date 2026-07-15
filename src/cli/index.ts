@@ -21,7 +21,9 @@ import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
+import { runMacOSPermissionRequest } from "./macos-permissions.js";
 import { currentMachineId } from "../lib/machine.js";
+import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 
 const program = new Command();
 
@@ -177,10 +179,21 @@ program
   .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
   .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
   .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--transcription-model <model>", "Model for bounded audio transcription")
   .option("--transcriber-model <model>", "Model for post-transcription cleanup")
+  .option("--enhancement-model <model>", "Enhancement model fallback")
+  .option("--enhance-triggers-json <json>", "Frozen JSON string array of enhancement triggers")
+  .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
+  .option("-l, --language <lang>", "Language code (e.g. en, es, fr)")
+  .option("--recording-id <id>", "Stable recording ID for idempotent retries")
   .action(async (file, opts) => {
+    const recordingId = recordingCreateIdentity({
+      id: opts.recordingId,
+      raw_text: "",
+    }).input.id;
     const config = loadConfig();
     ensureDataDir(config);
+    if (opts.language) config.language = opts.language;
     if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
@@ -201,6 +214,7 @@ program
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
     const recording = await getStore().createRecording({
+      id: recordingId,
       audio_path: file,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -219,7 +233,7 @@ program
         transcriberPromptFromRequest:
           opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
       }),
-    });
+    }, recordingId);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));
@@ -253,8 +267,17 @@ program
   .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
   .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
   .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcription-model <model>", "Model for bounded audio transcription")
   .option("--transcriber-model <model>", "Model for post-transcription cleanup")
+  .option("--enhancement-model <model>", "Enhancement model fallback")
+  .option("--enhance-triggers-json <json>", "Frozen JSON string array of enhancement triggers")
+  .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
+  .option("--recording-id <id>", "Stable recording ID for idempotent retries")
   .action(async (text: string | undefined, opts) => {
+    const recordingId = recordingCreateIdentity({
+      id: opts.recordingId,
+      raw_text: "",
+    }).input.id;
     const rawText = await readSaveTextInput(text, opts);
     const config = loadConfig();
     ensureDataDir(config);
@@ -278,6 +301,7 @@ program
     };
 
     const recording = await getStore().createRecording({
+      id: recordingId,
       audio_path: opts.audioPath || undefined,
       raw_text: rawText,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -292,7 +316,7 @@ program
       session_id: parentOpts.session || undefined,
       machine_id: currentMachineId(),
       metadata,
-    });
+    }, recordingId);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));
@@ -309,8 +333,21 @@ program
   .command("rewrite <text>")
   .description("Rewrite provided text using an instruction")
   .requiredOption("-i, --instruction <instruction>", "Rewrite instruction")
+  .option("--prompt <prompt>", "Frozen transcription vocabulary/context prompt")
+  .option("--transcriber-prompt <prompt>", "Frozen post-transcription instructions")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--post-processing <mode>", "Frozen post-processing mode")
+  .option("--language <lang>", "Frozen transcription language")
+  .option("--transcription-model <model>", "Frozen transcription model")
+  .option("--transcriber-model <model>", "Frozen rewrite model")
+  .option("--enhancement-model <model>", "Frozen enhancement fallback model")
+  .option("--enhance-triggers-json <json>", "Frozen JSON string array of enhancement triggers")
+  .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
   .action(async (text, opts) => {
     const config = loadConfig();
+    if (opts.language !== undefined) config.language = opts.language;
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
+    applyEnhancementOptions(config, opts);
     const parentOpts = program.opts();
     const instruction = `Instruction: ${opts.instruction}\n\nText:\n${text}`;
 
@@ -845,18 +882,11 @@ appCommand
       resetMacOSPermissions();
     }
 
-    const result = spawnSync("open", [
-      "-n",
-      status.installed_app_path,
-      "--args",
-      "--request-permissions",
-      "--open-permission-settings",
-    ], { stdio: "inherit" });
-    if (result.error) {
-      console.error(chalk.red(result.error.message));
-      process.exit(1);
+    const result = runMacOSPermissionRequest(status.installed_app_path);
+    if (result.errorMessage) {
+      console.error(chalk.red(result.errorMessage));
     }
-    process.exit(result.status ?? 1);
+    process.exit(result.exitCode);
   });
 
 appCommand

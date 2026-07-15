@@ -13,7 +13,7 @@
  * @hasna/contracts API-key auth. No local sync/cache lives in the service.
  */
 import { VERSION } from "../version.js";
-import { isCloudModeEnabled, pingCloud } from "./cloud.js";
+import { isCloudModeEnabled } from "./cloud-config.js";
 import { handleV1Request } from "./v1.js";
 import { buildV1OpenApiDocument } from "./openapi.js";
 
@@ -67,7 +67,22 @@ export interface StartServerOptions {
   host?: string;
 }
 
-export function buildFetch() {
+export interface BuildFetchOptions {
+  checkCloudAuth?: () => unknown | Promise<unknown>;
+  pingCloud?: () => Promise<unknown>;
+  logError?: (...args: unknown[]) => void;
+}
+
+export function buildFetch(options: BuildFetchOptions = {}) {
+  const checkCloudAuth = options.checkCloudAuth ?? (async () => {
+    const { getCloudVerifier } = await import("./cloud.js");
+    return getCloudVerifier();
+  });
+  const checkCloud = options.pingCloud ?? (async () => {
+    const { pingCloud } = await import("./cloud.js");
+    return pingCloud();
+  });
+  const logError = options.logError ?? console.error;
   return async function fetch(
     req: Request,
     server: { requestIP(req: Request): { address: string } | null },
@@ -106,10 +121,12 @@ export function buildFetch() {
       if (path === "/ready") {
         if (mode === "remote") {
           try {
-            await pingCloud();
-          } catch (e) {
+            await checkCloudAuth();
+            await checkCloud();
+          } catch {
+            logError("recordings-serve: readiness dependency check failed");
             return jsonResponse(
-              { status: "unavailable", version: VERSION, mode, error: (e as Error).message },
+              { status: "unavailable", version: VERSION, mode, error: "dependency unavailable" },
               503,
             );
           }

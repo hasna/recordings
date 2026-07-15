@@ -1,9 +1,51 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import type { Subprocess } from "bun";
 import packageJson from "../../package.json";
+
+let compiledCompanionDirectory = "";
+let compiledCompanion = "";
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function stopAndReap(process: Subprocess | undefined, label: string): Promise<void> {
+  if (!process) return;
+  if (process.exitCode === null) process.kill("SIGTERM");
+  try {
+    await withTimeout(process.exited, 2_000, `${label} termination`);
+  } catch {
+    if (process.exitCode === null) process.kill("SIGKILL");
+    await withTimeout(process.exited, 2_000, `${label} forced termination`);
+  }
+}
+
+beforeAll(() => {
+  compiledCompanionDirectory = mkdtempSync(join(tmpdir(), "recordings-companion-fixture-"));
+  compiledCompanion = join(compiledCompanionDirectory, "recordings");
+  const build = spawnSync("bash", ["scripts/build_companion_cli.sh", compiledCompanion], {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  expect(build.error, build.stderr).toBeUndefined();
+  expect(build.status, build.stderr).toBe(0);
+}, 60_000);
+
+afterAll(() => {
+  if (compiledCompanionDirectory) {
+    rmSync(compiledCompanionDirectory, { recursive: true, force: true });
+  }
+});
 
 describe("native app companion contract", () => {
   test("build embeds a self-contained recordings CLI and runtime prefers it", () => {
@@ -17,20 +59,16 @@ describe("native app companion contract", () => {
     expect(build).toContain('HELPERS="$CONTENTS/Helpers"');
     expect(build).toContain("build_companion_cli.sh");
     expect(companionBuild).toContain("--compile");
+    expect(companionBuild).toContain('COMPILE_DIR="$(mktemp -d)"');
+    expect(companionBuild).toContain('trap cleanup EXIT');
     expect(runner).toContain("Contents/Helpers/recordings");
   });
 
   test("compiled companion exposes the app-required version and commands", () => {
-    const directory = mkdtempSync(join(tmpdir(), "recordings-companion-"));
-    const executable = join(directory, "recordings");
+    const directory = mkdtempSync(join(tmpdir(), "recordings-companion-runtime-"));
     try {
-      const build = spawnSync("bash", ["scripts/build_companion_cli.sh", executable], {
-        encoding: "utf8",
-      });
-      expect(build.status, build.stderr).toBe(0);
-
       const run = (...args: string[]) =>
-        spawnSync(executable, args, { encoding: "utf8" });
+        spawnSync(compiledCompanion, args, { encoding: "utf8", timeout: 10_000 });
       expect(run("--version").stdout.trim()).toBe(packageJson.version);
       expect(run("project", "register", "--help").status).toBe(0);
       expect(run("save-text", "--help").status).toBe(0);
@@ -51,6 +89,11 @@ describe("native app companion contract", () => {
       const transcribeHelp = run("transcribe", "--help").stdout;
       expect(transcribeHelp).toContain("--post-processing");
       expect(transcribeHelp).toContain("--transcriber-prompt");
+      expect(transcribeHelp).toContain("--language");
+      expect(transcribeHelp).toContain("--recording-id");
+      expect(transcribeHelp).toContain("--transcription-model");
+      expect(transcribeHelp).toContain("--enhance-triggers-json");
+      expect(transcribeHelp).toContain("--keyword-transforms-json");
       const saveTextHelp = run("save-text", "--help").stdout;
       for (const flag of [
         "--text-file",
@@ -61,13 +104,19 @@ describe("native app companion contract", () => {
         "--duration-ms",
         "--language",
         "--transcriber-prompt",
+        "--recording-id",
+        "--transcription-model",
+        "--transcriber-model",
+        "--enhancement-model",
+        "--enhance-triggers-json",
+        "--keyword-transforms-json",
       ]) {
         expect(saveTextHelp).toContain(flag);
       }
       expect(run("rewrite", "--help").stdout).toContain("--instruction");
 
       const registration = spawnSync(
-        executable,
+        compiledCompanion,
         [
           "--json",
           "project",
@@ -80,6 +129,7 @@ describe("native app companion contract", () => {
         {
           cwd: directory,
           encoding: "utf8",
+          timeout: 10_000,
           env: {
             HOME: join(directory, "home"),
             PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -101,6 +151,117 @@ describe("native app companion contract", () => {
     }
   });
 
+  test("compiled rewrite keeps frozen A config and option-like text over ambient B config", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "recordings-rewrite-contract-"));
+    const requestPath = join(directory, "request.json");
+    const home = join(directory, "home");
+    let server: Subprocess | undefined;
+    let rewrite: Subprocess | undefined;
+    try {
+      const configDirectory = join(home, ".hasna", "recordings");
+      mkdirSync(configDirectory, { recursive: true });
+      writeFileSync(join(configDirectory, "config.json"), JSON.stringify({
+        openai_api_key: "ambient-b-key",
+        transcription_prompt: "Project B vocabulary",
+        transcriber_prompt: "Project B rewrite policy",
+        post_processing_mode: "off",
+        language: "en",
+        transcription_model: "whisper-b",
+        transcriber_model: "gpt-command-b",
+        enhancement_model: "gpt-fallback-b",
+        enhance_triggers: ["rewrite b"],
+        keyword_transforms: { "open ai": "OpenAI B" },
+      }));
+
+      server = Bun.spawn([
+        process.execPath,
+        "-e",
+        `
+          const requestPath = process.argv[1];
+          let watchdog;
+          const server = Bun.serve({
+            port: 0,
+            async fetch(request) {
+              await Bun.write(requestPath, await request.text());
+              clearTimeout(watchdog);
+              setTimeout(() => server.stop(true), 10);
+              return Response.json({ choices: [{ message: { content: "Frozen A result" } }] });
+            },
+          });
+          console.log(server.port);
+          watchdog = setTimeout(() => server.stop(true), 10000);
+        `,
+        requestPath,
+      ], { stdout: "pipe", stderr: "pipe" });
+      const portReader = server.stdout.getReader();
+      const portChunk = await withTimeout(portReader.read(), 5_000, "rewrite fixture server startup");
+      portReader.releaseLock();
+      const port = Number(new TextDecoder().decode(portChunk.value).trim());
+      expect(port).toBeGreaterThan(0);
+
+      rewrite = Bun.spawn([
+        compiledCompanion,
+        "rewrite",
+        "--instruction", "instruction A",
+        "--post-processing", "always",
+        "--language", "es",
+        "--prompt", "Project A vocabulary",
+        "--transcriber-prompt", "Project A rewrite policy",
+        "--transcription-model", "whisper-a",
+        "--transcriber-model", "gpt-command-a",
+        "--enhancement-model", "gpt-fallback-a",
+        "--enhance-triggers-json", '["rewrite a"]',
+        "--keyword-transforms-json", '{"code with":"Codewith A"}',
+        "--",
+        "--help",
+      ], {
+        cwd: directory,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          HOME: home,
+          PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+          OPENAI_BASE_URL: `http://127.0.0.1:${port}`,
+        },
+      });
+      const [status, stdout, stderr] = await withTimeout(Promise.all([
+        rewrite.exited,
+        new Response(rewrite.stdout).text(),
+        new Response(rewrite.stderr).text(),
+      ]), 10_000, "compiled rewrite");
+      expect(status, stderr).toBe(0);
+      expect(stdout.trim()).toBe("Frozen A result");
+      await withTimeout(server.exited, 2_000, "rewrite fixture server shutdown");
+
+      const request = JSON.parse(readFileSync(requestPath, "utf8"));
+      expect(request.model).toBe("gpt-command-a");
+      const messages = JSON.stringify(request.messages);
+      for (const expected of [
+        "--help",
+        "instruction A",
+        "Project A rewrite policy",
+        "Codewith A",
+      ]) {
+        expect(messages).toContain(expected);
+      }
+      for (const forbidden of [
+        "Project B rewrite policy",
+        "gpt-command-b",
+        "OpenAI B",
+      ]) {
+        expect(messages).not.toContain(forbidden);
+      }
+    } finally {
+      const cleanup = await Promise.allSettled([
+        stopAndReap(rewrite, "compiled rewrite"),
+        stopAndReap(server, "rewrite fixture server"),
+      ]);
+      rmSync(directory, { recursive: true, force: true });
+      const failedCleanup = cleanup.find((result) => result.status === "rejected");
+      if (failedCleanup?.status === "rejected") throw failedCleanup.reason;
+    }
+  }, 20_000);
+
   test("normal app launch declares a menu bar surface", () => {
     const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
 
@@ -110,7 +271,46 @@ describe("native app companion contract", () => {
     );
     expect(app).not.toContain("if state.declaresMenuBar");
     expect(app).toContain("if plan.isRuntimeSmoke");
-    expect(app).toContain("else if plan.isHelper");
+    expect(app).toContain("else if plan.requestsAccessibilityPrompt");
+    const launchInitialization = app.slice(
+      app.indexOf("init() {"),
+      app.indexOf("@SceneBuilder var body"),
+    );
+    expect(launchInitialization).not.toContain("AXIsProcessTrustedWithOptions");
+  });
+
+  test("Accessibility prompting is process-gated and runtime smoke reports prompt calls", () => {
+    const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+    const gate = readFileSync(
+      "src/native/Recordings/RecordingsLib/AccessibilityPromptGate.swift",
+      "utf8",
+    );
+    expect(app).toContain("AccessibilityPromptGate.processShared.requestExplicitly");
+    expect(app).toContain("AccessibilityPromptGate.processShared.promptRequestCount");
+    expect(app).not.toContain("AXIsProcessTrustedWithOptions");
+    expect(engine).toContain("AccessibilityPromptGate.processShared");
+    expect(engine).not.toContain("AXIsProcessTrustedWithOptions");
+    expect(engine).not.toContain("lastAccessibilityPromptAt");
+    expect(engine).not.toContain("timeIntervalSince(lastAccessibilityPromptAt)");
+    expect(gate.match(/AXIsProcessTrustedWithOptions/g)).toHaveLength(1);
+  });
+
+  test("command rewrite retains and revalidates the exact AX element and selection", () => {
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+
+    expect(engine).toContain("AccessibilitySelectionToken");
+    expect(engine).toContain("CFEqual(element, currentElement)");
+    expect(engine).toContain("matchesCurrentSelection(for: app.processIdentifier)");
+    expect(engine).toContain("commandSelectionToken:");
+    expect(engine.match(/targetIsReady\(\)/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(engine).not.toContain("activateIgnoringOtherApps");
   });
 
   test("recording capture is not gated on project synchronization readiness", () => {
@@ -124,9 +324,9 @@ describe("native app companion contract", () => {
 
     expect(startBody).not.toContain("guard store.isReadyForRecording");
     expect(startBody).toContain("continuing capture");
-    expect(engine).toContain("let activeProjectId = projectStore?.settings.activeProjectId");
+    expect(engine).toContain("displayProjectId: projectStore?.settings.activeProjectId");
     expect(engine).toContain(
-      "let canonicalProjectId = projectStore?.activeCanonicalProjectIdForRecording",
+      "canonicalProjectId: projectStore?.activeCanonicalProjectIdForRecording",
     );
     expect(engine).toContain("activeProjectId: canonicalProjectId");
     expect(engine).toContain("activeProjectId: activeProjectId");

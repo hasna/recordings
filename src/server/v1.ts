@@ -45,24 +45,25 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
   const requiredScopes = [isWrite ? "recordings:write" : "recordings:read"];
 
   // ── Auth (contracts API-key verifier) ──
-  let verifier;
+  let decision;
   try {
-    verifier = getCloudVerifier();
-  } catch (e) {
-    return error(503, (e as Error).message);
+    const verifier = getCloudVerifier();
+    decision = await verifier.authenticate(req.headers, { method, path, requiredScopes });
+  } catch {
+    return error(503, "authentication service unavailable");
   }
-  const decision = await verifier.authenticate(req.headers, { method, path, requiredScopes });
   if (!decision.ok) {
     return error(decision.status, decision.message, { reason: decision.reason });
   }
 
   // Schema is idempotently ensured on the first authenticated request.
+  let pg;
   try {
     await ensureCloudSchema();
-  } catch (e) {
-    return error(503, `storage unavailable: ${(e as Error).message}`);
+    pg = getCloudPg();
+  } catch {
+    return error(503, "storage unavailable");
   }
-  const pg = getCloudPg();
 
   const segments = path.split("/").filter(Boolean); // ["v1", resource, id?, action?]
   const resource = segments[1];
@@ -101,7 +102,12 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
           if (!body || typeof body.raw_text !== "string" || !body.raw_text.trim()) {
             return error(400, "raw_text is required");
           }
-          const recording = await repo.createRecording(pg, body);
+          const recording = await repo.createRecording(
+            pg,
+            body,
+            req.headers.get("Idempotency-Key") ?? undefined,
+            { principal: `${decision.principal.app}:${decision.principal.kid}` },
+          );
           return json({ recording }, 201);
         }
         return error(405, `method ${method} not allowed on /v1/recordings`);
@@ -218,6 +224,9 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
     // Clean domain errors carry a safe, client-facing message → 400.
     if (e instanceof repo.ProjectNotFoundError || e instanceof repo.ValidationError) {
       return error(400, e.message);
+    }
+    if (e instanceof repo.IdempotencyConflictError) {
+      return error(409, e.message);
     }
     // Anything else is an unexpected/internal failure. Its raw text (e.g. a
     // Postgres constraint name like `agents_active_project_id_fkey`, table or

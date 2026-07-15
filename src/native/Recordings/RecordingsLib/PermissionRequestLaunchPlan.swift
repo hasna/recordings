@@ -14,6 +14,7 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
         return !isHelper
     }
     public var terminatesAfterHandling: Bool { isHelper }
+    public var requestsAccessibilityPrompt: Bool { isHelper && !isRuntimeSmoke }
 
     public init(arguments: [String]) {
         isHelper = arguments.contains("--request-permissions")
@@ -27,5 +28,19 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
             return nil
         }
         return arguments[index + 1]
+    }
+}
+
+public struct PermissionRequestOutcome: Sendable, Equatable {
+    public let microphoneGranted: Bool
+    public let accessibilityTrusted: Bool
+
+    public init(microphoneGranted: Bool, accessibilityTrusted: Bool) {
+        self.microphoneGranted = microphoneGranted
+        self.accessibilityTrusted = accessibilityTrusted
+    }
+
+    public var succeeded: Bool {
+        microphoneGranted && accessibilityTrusted
     }
 }

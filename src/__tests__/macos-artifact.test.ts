@@ -26,20 +26,20 @@ function fixture(): {
   const root = mkdtempSync(join(tmpdir(), "recordings-artifact-"));
   temporaryDirectories.push(root);
   mkdirSync(root, { recursive: true });
-  const archivePath = join(root, "Recordings-0.2.11-macos.zip");
-  const manifestPath = join(root, "Recordings-0.2.11-macos.manifest.json");
+  const archivePath = join(root, "Recordings-0.2.12-macos.zip");
+  const manifestPath = join(root, "Recordings-0.2.12-macos.manifest.json");
   writeFileSync(archivePath, "immutable signed archive fixture");
   const manifest: MacOSArtifactManifest = {
     schema_version: 1,
     artifact_type: "recordings-macos-app",
     bundle_id: "com.hasna.recordings",
-    bundle_version: "0.2.11",
+    bundle_version: "0.2.12",
     git_sha: "a".repeat(40),
     architectures: ["arm64"],
     team_id: "EXAMPLE123",
     app_sha256: "b".repeat(64),
     provenance_sha256: "c".repeat(64),
-    companion: { version: "0.2.11", sha256: "d".repeat(64) },
+    companion: { version: "0.2.12", sha256: "d".repeat(64) },
     signing: {
       authority: "Developer ID Application: Example Corp (EXAMPLE123)",
       team_id: "EXAMPLE123",
@@ -50,7 +50,7 @@ function fixture(): {
       designated_requirement_sha256: "e".repeat(64),
     },
     archive: {
-      filename: "Recordings-0.2.11-macos.zip",
+      filename: "Recordings-0.2.12-macos.zip",
       sha256: sha256File(archivePath),
     },
   };

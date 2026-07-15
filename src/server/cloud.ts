@@ -13,36 +13,20 @@
 import { verifyApiKey, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import { ApiKeyStore, type AuthQueryClient } from "@hasna/contracts/auth";
 import { PgAdapterAsync } from "../db/remote-storage.js";
-import { PG_MIGRATIONS } from "../db/pg-migrations.js";
+import {
+  isCloudModeEnabled,
+  requireSigningSecret,
+  resolveCloudDatabaseUrl,
+} from "./cloud-config.js";
+import {
+  assertCloudSchemaReady,
+  pingCloudConnectivity as pingCloudConnectivityWith,
+  pingCloudReadiness,
+} from "./cloud-readiness.js";
+import { applyRecordedCloudMigrations } from "./migrate-command.js";
 
 export const RECORDINGS_APP_SLUG = "recordings";
-
-/** Resolve the remote DATABASE_URL from the supported env vars (priority order). */
-export function resolveCloudDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return (
-    env.HASNA_RECORDINGS_DATABASE_URL ||
-    env.RECORDINGS_DATABASE_URL ||
-    env.DATABASE_URL ||
-    undefined
-  );
-}
-
-/** Resolve the HMAC signing secret used to verify API keys. */
-export function resolveSigningSecret(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return (
-    env.HASNA_RECORDINGS_API_SIGNING_KEY ||
-    env.HASNA_API_SIGNING_KEY ||
-    env.API_KEY_SIGNING_SECRET ||
-    undefined
-  );
-}
-
-/** True when this process is configured to serve the cloud `/v1` API. */
-export function isCloudModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const mode = (env.HASNA_RECORDINGS_STORAGE_MODE || env.RECORDINGS_STORAGE_MODE || "").toLowerCase();
-  if (mode === "remote" || mode === "hybrid") return true;
-  return Boolean(resolveCloudDatabaseUrl(env));
-}
+export { isCloudModeEnabled, requireSigningSecret, resolveCloudDatabaseUrl, resolveSigningSecret } from "./cloud-config.js";
 
 let cachedPg: PgAdapterAsync | null = null;
 let cachedStore: ApiKeyStore | null = null;
@@ -95,12 +79,7 @@ export function getApiKeyStore(): ApiKeyStore {
  */
 export function getCloudVerifier(): ApiKeyVerifier {
   if (cachedVerifier) return cachedVerifier;
-  const signingSecret = resolveSigningSecret();
-  if (!signingSecret) {
-    throw new Error(
-      "Cloud /v1 auth requires a signing secret (HASNA_RECORDINGS_API_SIGNING_KEY / HASNA_API_SIGNING_KEY / API_KEY_SIGNING_SECRET).",
-    );
-  }
+  const signingSecret = requireSigningSecret();
   const store = getApiKeyStore();
   cachedVerifier = verifyApiKey({
     app: RECORDINGS_APP_SLUG,
@@ -110,76 +89,36 @@ export function getCloudVerifier(): ApiKeyVerifier {
   return cachedVerifier;
 }
 
-function isPrivilegeError(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message.toLowerCase() : String(e).toLowerCase();
-  return (
-    msg.includes("permission denied") ||
-    msg.includes("must be owner") ||
-    msg.includes("insufficient privilege")
-  );
-}
-
-/** Cheap check (SELECT only) that the required tables already exist. */
-async function requiredTablesExist(): Promise<boolean> {
-  const pg = getCloudPg();
-  const row = (await pg.get(
-    `SELECT
-       (to_regclass('public.recordings') IS NOT NULL) AS has_recordings,
-       (to_regclass('public.api_keys')   IS NOT NULL) AS has_api_keys`,
-  )) as { has_recordings: boolean; has_api_keys: boolean } | null;
-  return Boolean(row?.has_recordings && row?.has_api_keys);
-}
-
 /**
- * Ensure the remote schema exists: the relational recordings tables plus the
- * contracts api-keys table. Idempotent (CREATE ... IF NOT EXISTS / ADD COLUMN IF
- * NOT EXISTS) — safe to run against a populated DB; NEVER drops or rewrites.
- *
- * Per the platform isolation model the request-path role (`recordings_app`) has
- * DML only — no DDL. DDL is owned by the `recordings_owner` role (the migration
- * task / out-of-band apply). So when this runs under the app role and the tables
- * already exist, a "permission denied" on the CREATE path is EXPECTED: we treat
- * the schema as externally managed and continue. If the tables are genuinely
- * missing we fail loudly (never a silent stub).
+ * Apply the owner-managed relational and API-key schemas. This is intentionally
+ * separate from runtime readiness so it can bootstrap an empty database and
+ * upgrade a migration-17 database before the migration-18 contract is checked.
  */
+export async function migrateCloudSchema(): Promise<void> {
+  await applyRecordedCloudMigrations(getCloudPg(), () => getApiKeyStore().ensureSchema());
+}
+
+/** Request-path gate: validate the externally managed schema and DML-only role. */
 export async function ensureCloudSchema(): Promise<void> {
   if (schemaEnsured) return schemaEnsured;
-  schemaEnsured = (async () => {
-    const pg = getCloudPg();
-    try {
-      await pg.run(
-        `CREATE TABLE IF NOT EXISTS _pg_migrations (id SERIAL PRIMARY KEY, version INT UNIQUE NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW())`,
-      );
-      const applied = (await pg.all("SELECT version FROM _pg_migrations ORDER BY version")) as Array<{
-        version: number;
-      }>;
-      const appliedSet = new Set(applied.map((r) => Number(r.version)));
-      for (let i = 0; i < PG_MIGRATIONS.length; i++) {
-        if (appliedSet.has(i)) continue;
-        await pg.exec(PG_MIGRATIONS[i]!);
-        await pg.run("INSERT INTO _pg_migrations (version) VALUES (?) ON CONFLICT DO NOTHING", i);
-      }
-      await getApiKeyStore().ensureSchema();
-    } catch (e) {
-      // App role lacking DDL is fine ONLY if the schema is already in place.
-      if (isPrivilegeError(e) && (await requiredTablesExist())) {
-        console.warn(
-          "recordings-serve: schema is externally managed (owner-applied); the request-path role lacks DDL — continuing.",
-        );
-        return;
-      }
-      schemaEnsured = null; // allow a later retry
-      throw e;
-    }
-  })();
+  schemaEnsured = assertCloudSchemaReady(getCloudPg()).catch((error) => {
+    schemaEnsured = null;
+    throw error;
+  });
   return schemaEnsured;
 }
 
-/** Cheap readiness probe: round-trips a trivial query to cloud Postgres. */
-export async function pingCloud(): Promise<boolean> {
-  const pg = getCloudPg();
-  const res = (await pg.get("SELECT 1 as ok")) as { ok: number } | null;
-  return Number(res?.ok) === 1;
+export async function pingCloudConnectivity(
+  pg: Pick<PgAdapterAsync, "get"> = getCloudPg(),
+): Promise<boolean> {
+  return pingCloudConnectivityWith(pg);
+}
+
+/** Schema-aware readiness probe for the DML-only cloud service role. */
+export async function pingCloud(
+  pg: Pick<PgAdapterAsync, "all" | "get"> = getCloudPg(),
+): Promise<boolean> {
+  return pingCloudReadiness(pg);
 }
 
 /** Test/shutdown helper. */

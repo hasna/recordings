@@ -20,10 +20,25 @@ import type {
   Agent,
   Project,
 } from "../types/index.js";
+import {
+  recordingCreateFingerprint,
+  recordingCreateIdentity,
+} from "../lib/recording-create-identity.js";
 
 // Re-exported so `/v1` route code can `import * as repo` and reference
 // `repo.ProjectNotFoundError` when mapping a bad focus ref to a clean 400.
 export { ProjectNotFoundError, ValidationError };
+
+export class IdempotencyConflictError extends Error {
+  constructor() {
+    super("idempotency key is already in use");
+    this.name = "IdempotencyConflictError";
+  }
+}
+
+export interface RecordingIdempotencyContext {
+  principal: string;
+}
 
 function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
@@ -91,38 +106,74 @@ function parseProject(row: Record<string, unknown>): Project {
 export async function createRecording(
   pg: PgAdapterAsync,
   input: CreateRecordingInput,
+  idempotencyKey?: string,
+  idempotencyContext?: RecordingIdempotencyContext,
 ): Promise<Recording> {
   if (typeof input.raw_text !== "string" || !input.raw_text) {
     throw new ValidationError("raw_text is required");
   }
-
-  // Resolve the agent_id/project_id references BEFORE inserting so an unresolved
-  // name (or a truncated id-prefix) never trips the recordings.agent_id /
-  // recordings.project_id foreign keys and 500s. On local SQLite the FK is not
-  // enforced so a dangling ref just stores; on the cloud Postgres it must be a
-  // real PK. Postgres enforces FKs, so we normalize the client-supplied ref to
-  // an existing row here (mirroring the id/name/prefix widening the lookups use).
-  let resolvedAgentId: string | null = null;
-  if (input.agent_id) {
-    const agent = await getAgent(pg, input.agent_id);
-    // A first-time agent name/id that isn't registered yet is self-registered
-    // (idempotent, same semantics as register_agent) so `--agent <name> save`
-    // just works instead of erroring on a missing agent.
-    resolvedAgentId = agent ? agent.id : (await registerAgent(pg, input.agent_id)).id;
+  const identity = recordingCreateIdentity(input, idempotencyKey, {
+    bindIdempotencyKeyToId: false,
+  });
+  input = identity.input;
+  const id = input.id || crypto.randomUUID();
+  const effectiveKey = identity.idempotencyKey;
+  if (effectiveKey !== undefined && !idempotencyContext?.principal) {
+    throw new ValidationError("idempotency principal is required");
   }
-  let resolvedProjectId: string | null = null;
-  if (input.project_id) {
-    const project = await getProject(pg, input.project_id);
-    // A project can't be materialized from a bare ref (it needs a path), so an
-    // unknown project ref fails cleanly as a 400 instead of leaking the raw FK.
-    if (!project) throw new ProjectNotFoundError(input.project_id);
-    resolvedProjectId = project.id;
-  }
+  const principal = idempotencyContext?.principal;
+  const requestFingerprint = recordingCreateFingerprint(input);
 
-  const id = shortUuid();
-  await pg.run(
+  return pg.transaction(async (transaction) => {
+    if (effectiveKey !== undefined && principal !== undefined) {
+      const lockRef = JSON.stringify([principal, effectiveKey]);
+      await transaction.get("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", lockRef);
+      const replay = (await transaction.get(
+        `SELECT request_fingerprint, recording_id
+         FROM recording_idempotency
+         WHERE principal = ? AND idempotency_key = ?`,
+        principal,
+        effectiveKey,
+      )) as { request_fingerprint: string; recording_id: string | null } | null;
+      if (replay) {
+        if (replay.request_fingerprint !== requestFingerprint) {
+          throw new IdempotencyConflictError();
+        }
+        if (replay.recording_id === null) throw new IdempotencyConflictError();
+        const existing = await getRecordingExact(transaction, replay.recording_id);
+        if (!existing) throw new IdempotencyConflictError();
+        return existing;
+      }
+
+      // An existing row without this principal's ledger entry is never safe to
+      // return from a write-only endpoint: it may belong to another caller or
+      // predate the scoped ledger.
+      if (await getRecordingExact(transaction, id)) {
+        throw new IdempotencyConflictError();
+      }
+    }
+
+    // Resolve references only after the scoped idempotency lock and winner recheck. A
+    // concurrent retry must not mutate an agent or fail a changed project ref
+    // after another request has already committed this logical recording.
+    let resolvedAgentId: string | null = null;
+    if (input.agent_id) {
+      const agent = await getAgent(transaction, input.agent_id);
+      resolvedAgentId = agent
+        ? agent.id
+        : (await registerAgent(transaction, input.agent_id)).id;
+    }
+    let resolvedProjectId: string | null = null;
+    if (input.project_id) {
+      const project = await getProject(transaction, input.project_id);
+      if (!project) throw new ProjectNotFoundError(input.project_id);
+      resolvedProjectId = project.id;
+    }
+
+    const insertResult = await transaction.run(
     `INSERT INTO recordings (id, audio_path, raw_text, processed_text, processing_mode, model_used, enhancement_model, duration_ms, language, tags, agent_id, project_id, session_id, goal, role, task_list_id, machine_id, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
     id,
     input.audio_path || null,
     input.raw_text,
@@ -142,20 +193,48 @@ export async function createRecording(
     input.machine_id || null,
     JSON.stringify(input.metadata || {}),
   );
-
-  if (input.tags && input.tags.length > 0) {
-    for (const tag of input.tags) {
-      await pg.run(
-        "INSERT INTO recording_tags (recording_id, tag) VALUES (?, ?) ON CONFLICT DO NOTHING",
-        id,
-        tag,
-      );
+    if (insertResult.changes === 0) {
+      throw new IdempotencyConflictError();
     }
-  }
 
-  const created = await getRecording(pg, id);
-  if (!created) throw new Error("failed to read back created recording");
-  return created;
+    if (input.tags && input.tags.length > 0) {
+      for (const tag of input.tags) {
+        await transaction.run(
+          "INSERT INTO recording_tags (recording_id, tag) VALUES (?, ?) ON CONFLICT DO NOTHING",
+          id,
+          tag,
+        );
+      }
+    }
+
+    if (effectiveKey !== undefined && principal !== undefined) {
+      const ledgerInsert = await transaction.run(
+        `INSERT INTO recording_idempotency
+           (principal, idempotency_key, request_fingerprint, recording_id)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
+        principal,
+        effectiveKey,
+        requestFingerprint,
+        id,
+      );
+      if (ledgerInsert.changes === 0) throw new IdempotencyConflictError();
+    }
+
+    const created = await getRecordingExact(transaction, id);
+    if (!created) throw new Error("failed to read back created recording");
+    return created;
+  });
+}
+
+async function getRecordingExact(
+  pg: PgAdapterAsync,
+  id: string,
+): Promise<Recording | null> {
+  const row = (await pg.get("SELECT * FROM recordings WHERE id = ?", id)) as
+    | Record<string, unknown>
+    | null;
+  return row ? parseRecording(row) : null;
 }
 
 export async function getRecording(

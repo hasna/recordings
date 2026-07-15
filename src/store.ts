@@ -27,7 +27,8 @@ import * as agentsDb from "./db/agents.js";
 import * as projectsDb from "./db/projects.js";
 import { saveFeedback as saveFeedbackLocal, type FeedbackInput } from "./db/feedback.js";
 import { resolveStorageClient, type StorageClient } from "./http/client.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { recordingCreateIdentity } from "./lib/recording-create-identity.js";
 
 export const APP = "recordings";
 
@@ -46,7 +47,7 @@ export interface Store {
   readonly baseUrl: string | null;
 
   // ── recordings ──
-  createRecording(input: CreateRecordingInput): Promise<Recording>;
+  createRecording(input: CreateRecordingInput, idempotencyKey?: string): Promise<Recording>;
   getRecording(id: string): Promise<Recording | null>;
   listRecordings(filter?: RecordingFilter): Promise<Recording[]>;
   countRecordings?(filter?: RecordingFilter): Promise<number>;
@@ -100,8 +101,8 @@ function unwrap<T>(res: unknown, key: string): T {
 const localStore: Store = {
   mode: "local",
   baseUrl: null,
-  async createRecording(input) {
-    return recordingsDb.createRecording(input);
+  async createRecording(input, idempotencyKey) {
+    return recordingsDb.createRecording(input, undefined, idempotencyKey);
   },
   async getRecording(id) {
     return recordingsDb.getRecording(id);
@@ -156,8 +157,21 @@ function apiStore(client: StorageClient): Store {
   return {
     mode: "cloud-http",
     baseUrl: client.baseUrl,
-    async createRecording(input) {
-      const res = await client.create<unknown>("recordings", input);
+    async createRecording(input, idempotencyKey) {
+      const keyCandidate = idempotencyKey === undefined
+        && (input.id === undefined || input.id === null)
+        ? randomUUID()
+        : idempotencyKey;
+      const identity = recordingCreateIdentity(
+        input,
+        keyCandidate,
+        { bindIdempotencyKeyToId: false },
+      );
+      const res = await client.create<unknown>(
+        "recordings",
+        identity.input,
+        identity.idempotencyKey,
+      );
       return unwrap<Recording>(res, "recording");
     },
     async getRecording(id) {

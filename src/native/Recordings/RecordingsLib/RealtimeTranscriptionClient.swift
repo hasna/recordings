@@ -8,6 +8,194 @@ public struct RealtimeFinishResult: Sendable {
     public let error: String?
 }
 
+enum RealtimeCommitTerminalStatus: Equatable, Sendable {
+    case completed
+    case failed
+}
+
+enum RealtimeCommitSettlementResolution: Equatable, Sendable {
+    case waiting
+    case settled
+    case failed
+}
+
+struct RealtimeCommitSettlementTracker: Sendable {
+    struct Commit: Equatable, Sendable {
+        let sequence: Int
+        var itemID: String?
+        var isFinal: Bool
+    }
+
+    private(set) var commits: [Commit] = []
+    private(set) var terminalStatusByItemID: [String: RealtimeCommitTerminalStatus] = [:]
+    private var pendingAcknowledgementSequences: [Int] = []
+    private var nextSequence = 0
+    private(set) var finalSequence: Int?
+
+    @discardableResult
+    mutating func queueCommit(isFinal: Bool) -> Int {
+        let sequence = nextSequence
+        nextSequence += 1
+        commits.append(Commit(sequence: sequence, itemID: nil, isFinal: isFinal))
+        pendingAcknowledgementSequences.append(sequence)
+        if isFinal { finalSequence = sequence }
+        return sequence
+    }
+
+    mutating func markLatestCommitFinal() -> Bool {
+        guard let latest = commits.indices.last else { return false }
+        for index in commits.indices { commits[index].isFinal = false }
+        commits[latest].isFinal = true
+        finalSequence = commits[latest].sequence
+        return true
+    }
+
+    @discardableResult
+    mutating func acknowledge(itemID: String) -> Commit? {
+        if let existing = commits.first(where: { $0.itemID == itemID }) {
+            return existing
+        }
+        guard !pendingAcknowledgementSequences.isEmpty else { return nil }
+        let sequence = pendingAcknowledgementSequences.removeFirst()
+        guard let index = commits.firstIndex(where: { $0.sequence == sequence }) else { return nil }
+        commits[index].itemID = itemID
+        return commits[index]
+    }
+
+    mutating func complete(itemID: String) {
+        if terminalStatusByItemID[itemID] != .failed {
+            terminalStatusByItemID[itemID] = .completed
+        }
+    }
+
+    mutating func fail(itemID: String) {
+        terminalStatusByItemID[itemID] = .failed
+    }
+
+    func resolution(uncommittedRealAudioBytes: Int) -> RealtimeCommitSettlementResolution {
+        guard uncommittedRealAudioBytes == 0,
+              let finalSequence,
+              let finalIndex = commits.firstIndex(where: { $0.sequence == finalSequence })
+        else { return .waiting }
+
+        let requiredCommits = commits[...finalIndex]
+        for commit in requiredCommits {
+            guard let itemID = commit.itemID,
+                  let status = terminalStatusByItemID[itemID]
+            else { return .waiting }
+            if status == .failed { return .failed }
+        }
+        return .settled
+    }
+
+    var finalItemID: String? {
+        guard let finalSequence else { return nil }
+        return commits.first(where: { $0.sequence == finalSequence })?.itemID
+    }
+}
+
+struct RealtimeFinalCommitPlan: Equatable, Sendable {
+    let realAudioByteCount: Int
+    let paddingByteCount: Int
+
+    var committedAudioByteCount: Int { realAudioByteCount + paddingByteCount }
+    var realtimePadding: Data { Data(repeating: 0, count: paddingByteCount) }
+}
+
+struct RealtimePendingAudioBuffer: Sendable {
+    private let maximumByteCount: Int
+    private var chunks: [Data] = []
+    private(set) var byteCount = 0
+
+    init(maximumByteCount: Int) {
+        precondition(maximumByteCount > 0)
+        self.maximumByteCount = maximumByteCount
+    }
+
+    var chunkCount: Int { chunks.count }
+
+    mutating func append(_ data: Data) -> Bool {
+        guard data.count <= maximumByteCount - byteCount else { return false }
+        chunks.append(data)
+        byteCount += data.count
+        return true
+    }
+
+    mutating func drain() -> [Data] {
+        let drained = chunks
+        chunks.removeAll(keepingCapacity: true)
+        byteCount = 0
+        return drained
+    }
+
+    mutating func removeAll() {
+        chunks.removeAll(keepingCapacity: true)
+        byteCount = 0
+    }
+}
+
+enum RealtimeOutboundPayload: Equatable, Sendable {
+    case audio(Data)
+    case event(String)
+
+    var byteCount: Int {
+        switch self {
+        case .audio(let data): data.count
+        case .event(let text): text.utf8.count
+        }
+    }
+}
+
+struct RealtimeQueuedOutboundEvent: Equatable, Sendable {
+    let sequence: Int
+    let payload: RealtimeOutboundPayload
+}
+
+struct RealtimeOutboundEventBuffer: Sendable {
+    private let maximumByteCount: Int
+    private let maximumEventCount: Int
+    private var events: [RealtimeQueuedOutboundEvent] = []
+    private(set) var byteCount = 0
+
+    init(maximumByteCount: Int, maximumEventCount: Int) {
+        precondition(maximumByteCount > 0)
+        precondition(maximumEventCount > 0)
+        self.maximumByteCount = maximumByteCount
+        self.maximumEventCount = maximumEventCount
+    }
+
+    var eventCount: Int { events.count }
+
+    mutating func append(_ payload: RealtimeOutboundPayload, sequence: Int) -> Bool {
+        guard events.count < maximumEventCount,
+              payload.byteCount <= maximumByteCount - byteCount else { return false }
+        events.append(RealtimeQueuedOutboundEvent(sequence: sequence, payload: payload))
+        byteCount += payload.byteCount
+        return true
+    }
+
+    mutating func popFirst() -> RealtimeQueuedOutboundEvent? {
+        guard !events.isEmpty else { return nil }
+        let event = events.removeFirst()
+        byteCount -= event.payload.byteCount
+        return event
+    }
+
+    mutating func removeAll() {
+        events.removeAll(keepingCapacity: true)
+        byteCount = 0
+    }
+}
+
+private struct RealtimeSendTimeout: LocalizedError {
+    var errorDescription: String? { "Realtime send timed out" }
+}
+
+@MainActor
+private final class RealtimeOutboundOperationState {
+    var result: Result<Void, Error>?
+}
+
 /// Streams PCM audio to OpenAI's Realtime Transcription API via WebSocket.
 /// Receives transcription deltas in real time.
 @MainActor
@@ -26,18 +214,24 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
     private var ws: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
-    private var outboundEventTask: Task<Void, Never>?
+    private var outboundDrainTask: Task<Void, Never>?
+    private var outboundEvents = RealtimeOutboundEventBuffer(
+        maximumByteCount: 262_144,
+        maximumEventCount: 128
+    )
+    private var nextOutboundSequence = 0
+    private var completedOutboundSequence: Int?
     private var isConfigured = false
-    private var pendingAudioChunks: [Data] = []
+    private var pendingAudio = RealtimePendingAudioBuffer(maximumByteCount: 1_228_800)
     private var itemOrder: [String] = []
     private var deltaTextByItem: [String: String] = [:]
     private var completedTextByItem: [String: String] = [:]
-    private var committedItemIDs = Set<String>()
-    private var completedItemIDs = Set<String>()
-    private var completedEventCount = 0
-    private var queuedCommitCount = 0
+    private var settlementTracker = RealtimeCommitSettlementTracker()
     private var uncommittedAudioBytes = 0
-    private var lastRealtimeEventAt = Date.distantPast
+    private var uncommittedRealAudioBytes = 0
+    private var finishPipelineID: String?
+    private var finishPipelineStartedUptimeMilliseconds: UInt64?
+    private var transportFailure: String?
 
     private nonisolated static let minimumManualCommitBytes = 5_760
 
@@ -63,16 +257,19 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         isStreaming = true
         isConfigured = false
         accumulatedText = ""
-        pendingAudioChunks.removeAll(keepingCapacity: true)
+        pendingAudio.removeAll()
+        outboundEvents.removeAll()
+        nextOutboundSequence = 0
+        completedOutboundSequence = nil
         itemOrder.removeAll(keepingCapacity: true)
         deltaTextByItem.removeAll(keepingCapacity: true)
         completedTextByItem.removeAll(keepingCapacity: true)
-        committedItemIDs.removeAll(keepingCapacity: true)
-        completedItemIDs.removeAll(keepingCapacity: true)
-        completedEventCount = 0
-        queuedCommitCount = 0
+        settlementTracker = RealtimeCommitSettlementTracker()
         uncommittedAudioBytes = 0
-        lastRealtimeEventAt = Date()
+        uncommittedRealAudioBytes = 0
+        finishPipelineID = nil
+        finishPipelineStartedUptimeMilliseconds = nil
+        transportFailure = nil
         error = nil
 
         var request = URLRequest(url: Self.transcriptionURL)
@@ -109,71 +306,98 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
     /// Send a chunk of PCM audio data to the transcription session.
     public func sendAudio(_ data: Data) {
-        guard isStreaming, !data.isEmpty else { return }
+        queueAudio(data, isRealAudio: true)
+    }
+
+    private func queueAudio(_ data: Data, isRealAudio: Bool) {
+        guard isStreaming, transportFailure == nil, !data.isEmpty else { return }
         guard ws != nil, isConfigured else {
-            pendingAudioChunks.append(data)
-            if pendingAudioChunks.count > 256 {
-                pendingAudioChunks.removeFirst(pendingAudioChunks.count - 256)
+            if isRealAudio, !pendingAudio.append(data) {
+                recordTransportFailure(
+                    "Realtime setup took too long; full audio will be transcribed after recording"
+                )
             }
             return
         }
-        let base64 = data.base64EncodedString()
+        guard enqueueOutboundPayload(.audio(data)) != nil else { return }
         uncommittedAudioBytes += data.count
-        let msg: [String: Any] = [
-            "type": "input_audio_buffer.append",
-            "audio": base64,
-        ]
-        enqueueOutboundEvent(msg)
+        if isRealAudio { uncommittedRealAudioBytes += data.count }
     }
 
     /// Signal end of input — triggers final transcription completion.
     @discardableResult
     public func commitInput(reason: String = "final") async -> Bool {
-        guard isStreaming, ws != nil else { return false }
+        guard isStreaming, ws != nil, transportFailure == nil else { return false }
         flushPendingAudio()
-        let bytesToCommit = uncommittedAudioBytes
-        guard Self.shouldManuallyCommit(uncommittedAudioBytes: bytesToCommit) else {
+
+        let isFinal = reason == "final"
+        let realBytesToCommit = uncommittedRealAudioBytes
+        if isFinal, realBytesToCommit == 0 {
+            let reusedLatestCommit = settlementTracker.markLatestCommitFinal()
+            if reusedLatestCommit {
+                logFinishStage(
+                    "final_commit_reused",
+                    detail: "item_id=\(settlementTracker.finalItemID ?? "pending")"
+                )
+            }
+            return reusedLatestCommit
+        }
+
+        let plan = Self.finalCommitPlan(realAudioByteCount: realBytesToCommit)
+        if isFinal, plan.paddingByteCount > 0 {
+            queueAudio(plan.realtimePadding, isRealAudio: false)
+        } else if !isFinal, !Self.shouldManuallyCommit(uncommittedAudioBytes: uncommittedAudioBytes) {
             return false
         }
+
+        let bytesToCommit = uncommittedAudioBytes
         let msg: [String: Any] = [
             "type": "input_audio_buffer.commit",
         ]
         uncommittedAudioBytes = 0
-        queuedCommitCount += 1
-        lastRealtimeEventAt = Date()
-        NativeAppLog.write("realtime commit queued reason=\(reason) bytes=\(bytesToCommit)", homePath: homePath)
-        let commitTask = enqueueOutboundEvent(msg)
-        await commitTask?.value
-        return true
+        uncommittedRealAudioBytes = 0
+        let sequence = settlementTracker.queueCommit(isFinal: isFinal)
+        NativeAppLog.write(
+            "realtime commit queued reason=\(reason) sequence=\(sequence) real_bytes=\(realBytesToCommit) padding_bytes=\(plan.paddingByteCount) committed_bytes=\(bytesToCommit)",
+            homePath: homePath
+        )
+        if isFinal { logFinishStage("final_commit_queued") }
+        guard let commitSequence = enqueueOutboundPayload(.event(encodeJSON(msg))) else {
+            return false
+        }
+        return await waitForOutboundSequence(commitSequence)
     }
 
     /// Commit buffered input, wait briefly for a final completed event, then close.
-    public func finish(timeoutMilliseconds: UInt64 = 700) async -> RealtimeFinishResult {
+    public func finish(
+        timeoutMilliseconds: UInt64 = 700,
+        pipelineID: String? = nil,
+        pipelineStartedUptimeMilliseconds: UInt64? = nil
+    ) async -> RealtimeFinishResult {
         guard isStreaming else {
             return RealtimeFinishResult(text: accumulatedText, settled: true, error: error)
         }
-        let completedCountBeforeCommit = completedEventCount
-        let didManualCommit = await commitInput()
-        let expectedCommitCount = queuedCommitCount
-        var settled = false
-
-        let deadline = Date().addingTimeInterval(TimeInterval(timeoutMilliseconds) / 1_000)
-        while Date() < deadline, isStreaming {
-            let hasIncompleteCommittedItems = !committedItemIDs.subtracting(completedItemIDs).isEmpty
-            if Self.isFinishSettled(
-                didManualCommit: didManualCommit,
-                completedCountBeforeCommit: completedCountBeforeCommit,
-                completedEventCount: completedEventCount,
-                expectedCommitCount: expectedCommitCount,
-                hasIncompleteCommittedItems: hasIncompleteCommittedItems,
-                uncommittedAudioBytes: uncommittedAudioBytes,
-                secondsSinceLastEvent: Date().timeIntervalSince(lastRealtimeEventAt)
-            ) {
-                settled = true
-                break
+        finishPipelineID = pipelineID
+        finishPipelineStartedUptimeMilliseconds = pipelineStartedUptimeMilliseconds
+        let waitResult = await Self.waitForSettlementWhileCommitRuns(
+            timeoutMilliseconds: timeoutMilliseconds,
+            beginCommit: { [weak self] in
+                await self?.commitInput() ?? false
+            },
+            resolution: { [weak self] in
+                guard let self, self.isStreaming else { return .waiting }
+                return self.currentSettlementResolution()
+            },
+            nowMilliseconds: Self.monotonicMilliseconds,
+            sleepMilliseconds: { milliseconds in
+                try? await Task.sleep(for: .milliseconds(Int64(clamping: milliseconds)))
             }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
+        )
+        let settled = waitResult.resolution == .settled
+        logFinishStage(
+            settled ? "final_transcription_settled" : "final_transcription_fallback",
+            detail: "wait_ms=\(waitResult.elapsedMilliseconds) resolution=\(waitResult.resolution)"
+        )
 
         let text = stop()
         return RealtimeFinishResult(text: text, settled: settled, error: error)
@@ -185,7 +409,7 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     public func stop() -> String {
         if isStreaming {
             NativeAppLog.write(
-                "realtime session summary items=\(itemOrder.count) committed=\(committedItemIDs.count) completed=\(completedItemIDs.count) deltaChars=\(deltaTextByItem.values.map(\.count).reduce(0, +)) finalChars=\(accumulatedText.count) error=\(error ?? "none")",
+                "realtime session summary items=\(itemOrder.count) commits=\(settlementTracker.commits.count) terminal=\(settlementTracker.terminalStatusByItemID.count) deltaChars=\(deltaTextByItem.values.map(\.count).reduce(0, +)) finalChars=\(accumulatedText.count) error=\(error ?? "none")",
                 homePath: homePath
             )
         }
@@ -193,11 +417,12 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         isConfigured = false
         receiveTask?.cancel()
         ws?.cancel(with: .normalClosure, reason: nil)
-        outboundEventTask?.cancel()
+        outboundDrainTask?.cancel()
         ws = nil
         receiveTask = nil
-        outboundEventTask = nil
-        pendingAudioChunks.removeAll(keepingCapacity: true)
+        outboundDrainTask = nil
+        outboundEvents.removeAll()
+        pendingAudio.removeAll()
         let text = accumulatedText
         return text
     }
@@ -220,10 +445,10 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
                 }
             }
         } catch {
-            // Connection closed
             if isStreaming {
                 let safeError = Self.safeError(error.localizedDescription)
                 fputs("[RealtimeClient] Receive loop ended: \(safeError)\n", stderr)
+                recordTransportFailure("Realtime receive failed: \(safeError)")
             }
         }
     }
@@ -237,14 +462,14 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
         switch type {
         case "input_audio_buffer.committed":
-            lastRealtimeEventAt = Date()
             if let itemID = json["item_id"] as? String {
                 registerItem(itemID, previousItemID: json["previous_item_id"] as? String)
-                committedItemIDs.insert(itemID)
+                if let commit = settlementTracker.acknowledge(itemID: itemID), commit.isFinal {
+                    logFinishStage("final_commit_acknowledged", detail: "item_id=\(itemID)")
+                }
             }
 
         case "conversation.item.input_audio_transcription.delta":
-            lastRealtimeEventAt = Date()
             let itemID = json["item_id"] as? String ?? "__default__"
             registerItem(itemID, previousItemID: nil)
             if let delta = json["delta"] as? String {
@@ -254,21 +479,23 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
         case "conversation.item.input_audio_transcription.completed":
             // The server may send the complete transcript here
-            lastRealtimeEventAt = Date()
             let itemID = json["item_id"] as? String ?? "__default__"
             registerItem(itemID, previousItemID: nil)
-            completedItemIDs.insert(itemID)
-            completedEventCount += 1
+            settlementTracker.complete(itemID: itemID)
             if let text = json["transcript"] as? String, !text.isEmpty {
                 completedTextByItem[itemID] = text
             }
             rebuildAccumulatedText()
+            if settlementTracker.finalItemID == itemID {
+                logFinishStage("final_item_completed", detail: "item_id=\(itemID)")
+            }
 
         case "conversation.item.input_audio_transcription.failed":
-            lastRealtimeEventAt = Date()
             if let itemID = json["item_id"] as? String {
-                completedItemIDs.insert(itemID)
-                completedEventCount += 1
+                settlementTracker.fail(itemID: itemID)
+                if settlementTracker.finalItemID == itemID {
+                    logFinishStage("final_item_failed", detail: "item_id=\(itemID)")
+                }
             }
             if let msg = json["error"] as? [String: Any],
                let message = msg["message"] as? String {
@@ -276,7 +503,6 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
             }
 
         case "error":
-            lastRealtimeEventAt = Date()
             if let detail = json["error"] as? [String: Any],
                let msg = detail["message"] as? String {
                 let safeMessage = Self.safeError(msg)
@@ -296,15 +522,68 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     }
 
     @discardableResult
-    private func enqueueOutboundEvent(_ obj: [String: Any]) -> Task<Void, Never>? {
-        guard ws != nil else { return nil }
-        let previousTask = outboundEventTask
-        let task = Task { [weak self] in
-            await previousTask?.value
-            try? await self?.sendEvent(obj)
+    private func enqueueOutboundPayload(_ payload: RealtimeOutboundPayload) -> Int? {
+        guard ws != nil, transportFailure == nil else {
+            recordTransportFailure("Realtime send failed: connection unavailable")
+            return nil
         }
-        outboundEventTask = task
-        return task
+        let sequence = nextOutboundSequence
+        guard outboundEvents.append(payload, sequence: sequence) else {
+            recordTransportFailure(
+                "Realtime send queue exceeded its bounded capacity; full audio will be transcribed after recording"
+            )
+            return nil
+        }
+        nextOutboundSequence += 1
+        startOutboundDrainIfNeeded()
+        return sequence
+    }
+
+    private func startOutboundDrainIfNeeded() {
+        guard outboundDrainTask == nil, outboundEvents.eventCount > 0 else { return }
+        outboundDrainTask = Task { [weak self] in
+            await self?.drainOutboundEvents()
+        }
+    }
+
+    private func drainOutboundEvents() async {
+        while !Task.isCancelled, isStreaming, transportFailure == nil,
+              let event = outboundEvents.popFirst() {
+            let encodedEvent = switch event.payload {
+            case .audio(let data):
+                encodeJSON([
+                    "type": "input_audio_buffer.append",
+                    "audio": data.base64EncodedString(),
+                ])
+            case .event(let text):
+                text
+            }
+            do {
+                try await sendEncodedEvent(encodedEvent)
+                completedOutboundSequence = event.sequence
+            } catch {
+                if isStreaming, !Task.isCancelled {
+                    recordTransportFailure("Realtime send failed: \(error.localizedDescription)")
+                }
+                break
+            }
+        }
+        outboundDrainTask = nil
+        if transportFailure != nil {
+            outboundEvents.removeAll()
+        } else {
+            startOutboundDrainIfNeeded()
+        }
+    }
+
+    private func waitForOutboundSequence(_ sequence: Int) async -> Bool {
+        while isStreaming, transportFailure == nil, !Task.isCancelled {
+            if let completedOutboundSequence, completedOutboundSequence >= sequence {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return false
     }
 
     private func registerItem(_ itemID: String, previousItemID: String?) {
@@ -327,16 +606,69 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 
     private func flushPendingAudio() {
         guard isConfigured else { return }
-        let chunks = pendingAudioChunks
-        pendingAudioChunks.removeAll(keepingCapacity: true)
-        for chunk in chunks {
+        for chunk in pendingAudio.drain() {
             sendAudio(chunk)
         }
     }
 
     private func sendEvent(_ obj: [String: Any]) async throws {
-        guard let ws else { return }
-        try await ws.send(.string(encodeJSON(obj)))
+        try await sendEncodedEvent(encodeJSON(obj))
+    }
+
+    private func sendEncodedEvent(_ text: String) async throws {
+        guard let ws else { throw URLError(.networkConnectionLost) }
+        try await Self.runOutboundOperationWithDeadline(
+            timeoutMilliseconds: 500,
+            operation: { try await ws.send(.string(text)) },
+            nowMilliseconds: Self.monotonicMilliseconds,
+            sleepMilliseconds: { milliseconds in
+                try? await Task.sleep(for: .milliseconds(Int64(clamping: milliseconds)))
+            }
+        )
+    }
+
+    private func recordTransportFailure(_ message: String) {
+        guard transportFailure == nil else { return }
+        let safeMessage = Self.safeError(message)
+        transportFailure = safeMessage
+        error = safeMessage
+        NativeAppLog.write("realtime transport failure: \(safeMessage)", homePath: homePath)
+    }
+
+    private static func runOutboundOperationWithDeadline(
+        timeoutMilliseconds: UInt64,
+        operation: @escaping @MainActor @Sendable () async throws -> Void,
+        nowMilliseconds: @MainActor () -> UInt64,
+        sleepMilliseconds: @MainActor (UInt64) async -> Void
+    ) async throws {
+        let state = RealtimeOutboundOperationState()
+        let operationTask = Task {
+            do {
+                try await operation()
+                state.result = .success(())
+            } catch {
+                state.result = .failure(error)
+            }
+        }
+        defer { operationTask.cancel() }
+
+        let startedAt = nowMilliseconds()
+        let (candidateDeadline, overflowed) = startedAt.addingReportingOverflow(timeoutMilliseconds)
+        let deadline = overflowed ? UInt64.max : candidateDeadline
+        while state.result == nil {
+            try Task.checkCancellation()
+            let now = nowMilliseconds()
+            guard now < deadline else { throw RealtimeSendTimeout() }
+            await sleepMilliseconds(min(10, deadline - now))
+        }
+        try state.result!.get()
+    }
+
+    private func currentSettlementResolution() -> RealtimeCommitSettlementResolution {
+        if transportFailure != nil { return .failed }
+        return settlementTracker.resolution(
+            uncommittedRealAudioBytes: uncommittedRealAudioBytes
+        )
     }
 
     private func parseJSON(_ text: String) -> [String: Any]? {
@@ -390,23 +722,80 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         uncommittedAudioBytes >= minimumManualCommitBytes
     }
 
-    private nonisolated static func isFinishSettled(
-        didManualCommit: Bool,
-        completedCountBeforeCommit: Int,
-        completedEventCount: Int,
-        expectedCommitCount: Int,
-        hasIncompleteCommittedItems: Bool,
-        uncommittedAudioBytes: Int,
-        secondsSinceLastEvent: TimeInterval
-    ) -> Bool {
-        let hasManualCommitCompletion = !didManualCommit || completedEventCount > completedCountBeforeCommit
-        let hasQueuedCommitCompletion = completedEventCount >= expectedCommitCount
-        let quietLongEnough = secondsSinceLastEvent >= 0.35
-        return !hasIncompleteCommittedItems
-            && uncommittedAudioBytes == 0
-            && hasManualCommitCompletion
-            && hasQueuedCommitCompletion
-            && quietLongEnough
+    private nonisolated static func finalCommitPlan(realAudioByteCount: Int) -> RealtimeFinalCommitPlan {
+        let paddingByteCount: Int
+        if realAudioByteCount > 0, realAudioByteCount < minimumManualCommitBytes {
+            paddingByteCount = minimumManualCommitBytes - realAudioByteCount
+        } else {
+            paddingByteCount = 0
+        }
+        return RealtimeFinalCommitPlan(
+            realAudioByteCount: realAudioByteCount,
+            paddingByteCount: paddingByteCount
+        )
+    }
+
+    private struct SettlementWaitResult: Sendable {
+        let resolution: RealtimeCommitSettlementResolution
+        let elapsedMilliseconds: UInt64
+    }
+
+    private static func waitForSettlement(
+        timeoutMilliseconds: UInt64,
+        resolution: @MainActor () -> RealtimeCommitSettlementResolution,
+        nowMilliseconds: @MainActor () -> UInt64,
+        sleepMilliseconds: @MainActor (UInt64) async -> Void
+    ) async -> SettlementWaitResult {
+        let startedAt = nowMilliseconds()
+        let (candidateDeadline, deadlineOverflowed) = startedAt.addingReportingOverflow(timeoutMilliseconds)
+        let deadline = deadlineOverflowed ? UInt64.max : candidateDeadline
+        while true {
+            let currentResolution = resolution()
+            let now = nowMilliseconds()
+            if currentResolution != .waiting || now >= deadline {
+                return SettlementWaitResult(
+                    resolution: currentResolution,
+                    elapsedMilliseconds: now >= startedAt ? now - startedAt : 0
+                )
+            }
+            await sleepMilliseconds(min(10, deadline - now))
+        }
+    }
+
+    private static func waitForSettlementWhileCommitRuns(
+        timeoutMilliseconds: UInt64,
+        beginCommit: @escaping @MainActor @Sendable () async -> Bool,
+        resolution: @MainActor () -> RealtimeCommitSettlementResolution,
+        nowMilliseconds: @MainActor () -> UInt64,
+        sleepMilliseconds: @MainActor (UInt64) async -> Void
+    ) async -> SettlementWaitResult {
+        let commitTask = Task { await beginCommit() }
+        defer { commitTask.cancel() }
+        return await waitForSettlement(
+            timeoutMilliseconds: timeoutMilliseconds,
+            resolution: resolution,
+            nowMilliseconds: nowMilliseconds,
+            sleepMilliseconds: sleepMilliseconds
+        )
+    }
+
+    private nonisolated static func monotonicMilliseconds() -> UInt64 {
+        UInt64(ProcessInfo.processInfo.systemUptime * 1_000)
+    }
+
+    private func logFinishStage(_ stage: String, detail: String = "") {
+        guard let pipelineID = finishPipelineID,
+              let pipelineStartedUptimeMilliseconds = finishPipelineStartedUptimeMilliseconds
+        else { return }
+        let nowMilliseconds = Self.monotonicMilliseconds()
+        let elapsedMilliseconds = nowMilliseconds >= pipelineStartedUptimeMilliseconds
+            ? nowMilliseconds - pipelineStartedUptimeMilliseconds
+            : 0
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        NativeAppLog.write(
+            "pipeline_timing pipeline_id=\(pipelineID) stage=\(stage) elapsed_ms=\(elapsedMilliseconds)\(suffix)",
+            homePath: homePath
+        )
     }
 
     private nonisolated static func transcriptionSessionUpdateEvent(transcription: [String: Any]) -> [String: Any] {
@@ -432,6 +821,64 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
 // MARK: - Test Helpers (expose private parsing for unit testing)
 
 extension RealtimeTranscriptionClient {
+    @MainActor
+    func enqueueOutboundOperationTestHelper(
+        _ operation: @escaping @MainActor @Sendable () async throws -> Void
+    ) async -> Bool {
+        await enqueueOutboundOperationTestHelper(
+            timeoutMilliseconds: 500,
+            operation: operation,
+            nowMilliseconds: Self.monotonicMilliseconds,
+            sleepMilliseconds: { milliseconds in
+                try? await Task.sleep(for: .milliseconds(Int64(clamping: milliseconds)))
+            }
+        )
+    }
+
+    @MainActor
+    func enqueueOutboundOperationTestHelper(
+        timeoutMilliseconds: UInt64,
+        operation: @escaping @MainActor @Sendable () async throws -> Void,
+        nowMilliseconds: @MainActor () -> UInt64,
+        sleepMilliseconds: @MainActor (UInt64) async -> Void
+    ) async -> Bool {
+        do {
+            try await Self.runOutboundOperationWithDeadline(
+                timeoutMilliseconds: timeoutMilliseconds,
+                operation: operation,
+                nowMilliseconds: nowMilliseconds,
+                sleepMilliseconds: sleepMilliseconds
+            )
+            return true
+        } catch {
+            recordTransportFailure("Realtime send failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @MainActor
+    func settlementResolutionTestHelper() -> RealtimeCommitSettlementResolution {
+        currentSettlementResolution()
+    }
+
+    @MainActor
+    static func waitForSettlementWhileCommitRunsTestHelper(
+        timeoutMilliseconds: UInt64,
+        beginCommit: @escaping @MainActor @Sendable () async -> Bool,
+        resolution: @MainActor () -> RealtimeCommitSettlementResolution,
+        nowMilliseconds: @MainActor () -> UInt64,
+        sleepMilliseconds: @MainActor (UInt64) async -> Void
+    ) async -> (resolution: RealtimeCommitSettlementResolution, elapsedMilliseconds: UInt64) {
+        let result = await waitForSettlementWhileCommitRuns(
+            timeoutMilliseconds: timeoutMilliseconds,
+            beginCommit: beginCommit,
+            resolution: resolution,
+            nowMilliseconds: nowMilliseconds,
+            sleepMilliseconds: sleepMilliseconds
+        )
+        return (result.resolution, result.elapsedMilliseconds)
+    }
+
     public nonisolated static func parseDeltaTestHelper(_ text: String) -> String? {
         return _parseJSON(text).flatMap { json -> String? in
             guard let type = json["type"] as? String else { return nil }
@@ -476,24 +923,26 @@ extension RealtimeTranscriptionClient {
         shouldManuallyCommit(uncommittedAudioBytes: uncommittedAudioBytes)
     }
 
-    public nonisolated static func isFinishSettledTestHelper(
-        didManualCommit: Bool,
-        completedCountBeforeCommit: Int,
-        completedEventCount: Int,
-        expectedCommitCount: Int,
-        hasIncompleteCommittedItems: Bool,
-        uncommittedAudioBytes: Int,
-        secondsSinceLastEvent: TimeInterval
-    ) -> Bool {
-        isFinishSettled(
-            didManualCommit: didManualCommit,
-            completedCountBeforeCommit: completedCountBeforeCommit,
-            completedEventCount: completedEventCount,
-            expectedCommitCount: expectedCommitCount,
-            hasIncompleteCommittedItems: hasIncompleteCommittedItems,
-            uncommittedAudioBytes: uncommittedAudioBytes,
-            secondsSinceLastEvent: secondsSinceLastEvent
+    nonisolated static func finalCommitPlanTestHelper(
+        realAudioByteCount: Int
+    ) -> RealtimeFinalCommitPlan {
+        finalCommitPlan(realAudioByteCount: realAudioByteCount)
+    }
+
+    @MainActor
+    static func waitForSettlementTestHelper(
+        timeoutMilliseconds: UInt64,
+        resolution: @MainActor () -> RealtimeCommitSettlementResolution,
+        nowMilliseconds: @MainActor () -> UInt64,
+        sleepMilliseconds: @MainActor (UInt64) async -> Void
+    ) async -> (resolution: RealtimeCommitSettlementResolution, elapsedMilliseconds: UInt64) {
+        let result = await waitForSettlement(
+            timeoutMilliseconds: timeoutMilliseconds,
+            resolution: resolution,
+            nowMilliseconds: nowMilliseconds,
+            sleepMilliseconds: sleepMilliseconds
         )
+        return (result.resolution, result.elapsedMilliseconds)
     }
 
     public nonisolated static func sessionUpdateTestHelper(prompt: String, language: String = "") -> [String: Any] {

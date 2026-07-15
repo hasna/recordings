@@ -81,4 +81,23 @@ export const PG_MIGRATIONS: string[] = [
 
   // Migration 4: agent focus
   `ALTER TABLE agents ADD COLUMN IF NOT EXISTS active_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL`,
+
+  // Migration 5: principal-scoped, request-bound create idempotency
+  `CREATE TABLE IF NOT EXISTS recording_idempotency (
+    principal TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    recording_id TEXT NOT NULL UNIQUE REFERENCES recordings(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT NOW()::text,
+    PRIMARY KEY (principal, idempotency_key)
+  )`,
+
+  // Migration 18: preserve idempotency bindings as tombstones after deletion
+  `ALTER TABLE recording_idempotency
+     DROP CONSTRAINT IF EXISTS recording_idempotency_recording_id_fkey;
+   ALTER TABLE recording_idempotency
+     ALTER COLUMN recording_id DROP NOT NULL;
+   ALTER TABLE recording_idempotency
+     ADD CONSTRAINT recording_idempotency_recording_id_fkey
+     FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE SET NULL`,
 ];

@@ -36,15 +36,15 @@ share one store without depending on a possibly stale global CLI installation.
 ```bash
 # Install the finalized ZIP and matching provenance manifest without changing the app:
 recordings app install \
-  --artifact /path/to/Recordings-0.2.11-macos.zip \
-  --manifest /path/to/Recordings-0.2.11-macos.manifest.json \
+  --artifact /path/to/Recordings-0.2.12-macos.zip \
+  --manifest /path/to/Recordings-0.2.12-macos.manifest.json \
   --expected-team-id TEAMID1234 \
   --launch
 
 # The first migration from an ad-hoc or different signing identity is explicit:
 recordings app install \
-  --artifact /path/to/Recordings-0.2.11-macos.zip \
-  --manifest /path/to/Recordings-0.2.11-macos.manifest.json \
+  --artifact /path/to/Recordings-0.2.12-macos.zip \
+  --manifest /path/to/Recordings-0.2.12-macos.manifest.json \
   --expected-team-id TEAMID1234 \
   --allow-signing-identity-migration --launch
 
