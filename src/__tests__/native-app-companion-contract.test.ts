@@ -95,9 +95,9 @@ describe("native app companion contract", () => {
   test("normal app launch declares a menu bar surface", () => {
     const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
 
-    expect(app).toContain("MenuBarExtra");
-    expect(app).toContain("if state.declaresMenuBar {");
-    expect(app).not.toContain("if state.declaresMenuBar, let store");
+    expect(app).toContain("MenuBarExtra(isInserted: menuBarInsertion)");
+    expect(app).toContain("get: { state.declaresMenuBar && state.store != nil }");
+    expect(app).not.toContain("if state.declaresMenuBar");
   });
 
   test("recording capture is not gated on project synchronization readiness", () => {

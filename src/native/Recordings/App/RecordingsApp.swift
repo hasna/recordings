@@ -89,21 +89,19 @@ struct RecordingsApp: App {
     }
 
     @SceneBuilder var body: some Scene {
-        if state.declaresMenuBar {
-            MenuBarExtra {
-                if let store = state.store {
-                    MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
-                }
-            } label: {
-                if let store = state.store {
-                    MenuBarStatusLabel(store: store)
-                } else {
-                    Image(systemName: "mic.fill")
-                        .accessibilityLabel("Recordings")
-                }
+        MenuBarExtra(isInserted: menuBarInsertion) {
+            if let store = state.store {
+                MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
             }
-            .menuBarExtraStyle(.window)
+        } label: {
+            if let store = state.store {
+                MenuBarStatusLabel(store: store)
+            } else {
+                Image(systemName: "mic.fill")
+                    .accessibilityLabel("Recordings")
+            }
         }
+        .menuBarExtraStyle(.window)
 
         Settings {
             if let store = state.store {
@@ -127,6 +125,13 @@ struct RecordingsApp: App {
                 }
             }
         }
+    }
+
+    private var menuBarInsertion: Binding<Bool> {
+        Binding(
+            get: { state.declaresMenuBar && state.store != nil },
+            set: { _ in }
+        )
     }
 
     private static func handlePermissionRequest(_ plan: PermissionRequestLaunchPlan) {
