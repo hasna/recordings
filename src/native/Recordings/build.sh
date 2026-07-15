@@ -104,11 +104,21 @@ verify_helper_entitlements() {
     fi
 }
 
+has_hardened_runtime_flag() {
+    local details="$1"
+    local flags
+    flags="$(printf '%s\n' "$details" | sed -n 's/^CodeDirectory .*flags=[^(]*(\([^)]*\)).*/\1/p' | head -n 1)"
+    case ",$flags," in
+        *,runtime,*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 verify_hardened_helper() {
     local details
     codesign --verify --strict --verbose=2 "$HELPERS/recordings"
     details="$(codesign -d --verbose=4 "$HELPERS/recordings" 2>&1)"
-    if [[ "$details" != *"(runtime)"* ]]; then
+    if ! has_hardened_runtime_flag "$details"; then
         echo "Companion CLI is missing hardened runtime signing." >&2
         exit 1
     fi
@@ -194,7 +204,7 @@ verify_signed_code() {
         echo "$label TeamIdentifier ${team_id:-missing} does not match ${EXPECTED_TEAM_ID}." >&2
         exit 1
     fi
-    if [[ "$details" != *"(runtime)"* ]]; then
+    if ! has_hardened_runtime_flag "$details"; then
         echo "$label is missing hardened runtime signing." >&2
         exit 1
     fi

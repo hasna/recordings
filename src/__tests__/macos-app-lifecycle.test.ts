@@ -500,7 +500,7 @@ fi
     return { exitCode, stdout, stderr };
   }
 
-  async function runDebugBuild(fixture: ReturnType<typeof createBuildFixture>) {
+  async function runDebugBuild(fixture: ReturnType<typeof createBuildFixture>, environment = {}) {
     const process = Bun.spawn(["bash", join(fixture.native, "build.sh"), "debug"], {
       cwd: fixture.native,
       env: {
@@ -514,6 +514,7 @@ fi
         RECORDINGS_CODESIGN_IDENTITY: "",
         RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
         RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "",
+        ...environment,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -528,7 +529,9 @@ fi
 
   test("debug builds ad-hoc locally without release credentials", async () => {
     const fixture = createBuildFixture();
-    const result = await runDebugBuild(fixture);
+    const result = await runDebugBuild(fixture, {
+      SIGNING_FLAGS: "0x10002(adhoc,runtime)",
+    });
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toContain("ad-hoc signed and non-distributable");
     expect(result.stdout).toContain("Built non-distributable debug app");
