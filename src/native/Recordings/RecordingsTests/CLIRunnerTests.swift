@@ -134,7 +134,7 @@ struct CLIRunnerTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: childScript.path)
 
-        let startedAt = ContinuousClock.now
+        var executionDeadlineStartedAt: ContinuousClock.Instant?
         var observedReadiness = false
         var lifecycleEvents: [CLIRunner.ProcessLifecycleEvent] = []
         do {
@@ -165,6 +165,7 @@ struct CLIRunnerTests {
                     #expect(processGroup == parentPid)
                     #expect(Darwin.getpgid(childPid) == parentPid)
                     #expect(processGroup != Darwin.getpgrp())
+                    executionDeadlineStartedAt = ContinuousClock.now
                 },
                 lifecycleObserver: { lifecycleEvents.append($0) }
             )
@@ -179,6 +180,7 @@ struct CLIRunnerTests {
             #expect(error.localizedDescription.contains("timed out"))
         }
 
+        let startedAt = try #require(executionDeadlineStartedAt)
         #expect(ContinuousClock.now - startedAt < .seconds(2.5))
         #expect(observedReadiness)
         #expect(try String(contentsOf: termFile, encoding: .utf8) == "term")

@@ -23,6 +23,7 @@ import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
 import { runMacOSPermissionRequest } from "./macos-permissions.js";
 import { currentMachineId } from "../lib/machine.js";
+import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 
 const program = new Command();
 
@@ -186,6 +187,10 @@ program
   .option("-l, --language <lang>", "Language code (e.g. en, es, fr)")
   .option("--recording-id <id>", "Stable recording ID for idempotent retries")
   .action(async (file, opts) => {
+    const recordingId = recordingCreateIdentity({
+      id: opts.recordingId,
+      raw_text: "",
+    }).input.id;
     const config = loadConfig();
     ensureDataDir(config);
     if (opts.language) config.language = opts.language;
@@ -209,7 +214,7 @@ program
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
     const recording = await getStore().createRecording({
-      id: opts.recordingId || undefined,
+      id: recordingId,
       audio_path: file,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -228,7 +233,7 @@ program
         transcriberPromptFromRequest:
           opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
       }),
-    }, opts.recordingId || undefined);
+    }, recordingId);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));
@@ -269,6 +274,10 @@ program
   .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
   .option("--recording-id <id>", "Stable recording ID for idempotent retries")
   .action(async (text: string | undefined, opts) => {
+    const recordingId = recordingCreateIdentity({
+      id: opts.recordingId,
+      raw_text: "",
+    }).input.id;
     const rawText = await readSaveTextInput(text, opts);
     const config = loadConfig();
     ensureDataDir(config);
@@ -292,7 +301,7 @@ program
     };
 
     const recording = await getStore().createRecording({
-      id: opts.recordingId || undefined,
+      id: recordingId,
       audio_path: opts.audioPath || undefined,
       raw_text: rawText,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -307,7 +316,7 @@ program
       session_id: parentOpts.session || undefined,
       machine_id: currentMachineId(),
       metadata,
-    }, opts.recordingId || undefined);
+    }, recordingId);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));

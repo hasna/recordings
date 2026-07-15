@@ -138,18 +138,21 @@ describe("cloud HTTP CRUD mapping + auth", () => {
     expect(committedRows.size).toBe(1);
   });
 
-  test("ApiStore binds an idempotency key to the request body for ambiguous retries", async () => {
+  test("ApiStore retries with a stable key without making it the global recording id", async () => {
     const originalFetch = globalThis.fetch;
     const committedRows = new Map<string, { id: string; raw_text: string }>();
     let attempts = 0;
     globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
       attempts += 1;
       const body = JSON.parse(String(init?.body)) as { id?: string; raw_text: string };
-      expect((init?.headers as Record<string, string>)["Idempotency-Key"]).toBe("logical-save-a");
-      expect(body.id).toBe("logical-save-a");
-      if (!committedRows.has(body.id!)) committedRows.set(body.id!, body as { id: string; raw_text: string });
+      const key = (init?.headers as Record<string, string>)["Idempotency-Key"]!;
+      expect(key).toBe("logical-save-a");
+      expect(body.id).toBeUndefined();
+      if (!committedRows.has(key)) {
+        committedRows.set(key, { id: "server-recording-a", raw_text: body.raw_text });
+      }
       if (attempts === 1) throw new Error("response lost after server commit");
-      return Response.json({ recording: committedRows.get(body.id!) }, { status: 201 });
+      return Response.json({ recording: committedRows.get(key) }, { status: 201 });
     };
 
     try {
@@ -163,7 +166,7 @@ describe("cloud HTTP CRUD mapping + auth", () => {
         "logical-save-a",
       );
 
-      expect(recovered.id).toBe("logical-save-a");
+      expect(recovered.id).toBe("server-recording-a");
       expect(recovered.raw_text).toBe("settled realtime text");
       expect(attempts).toBe(2);
       expect(committedRows.size).toBe(1);
@@ -225,7 +228,9 @@ describe("cloud HTTP CRUD mapping + auth", () => {
     let postedBody: unknown;
     globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
       postedBody = JSON.parse(String(init?.body));
-      return Response.json({ recording: postedBody }, { status: 201 });
+      return Response.json({
+        recording: { ...(postedBody as object), id: "server-recording-null" },
+      }, { status: 201 });
     };
 
     try {
@@ -238,8 +243,8 @@ describe("cloud HTTP CRUD mapping + auth", () => {
         JSON.parse('{"id":null,"raw_text":"settled realtime text"}'),
         "logical-save-null",
       );
-      expect(recording.id).toBe("logical-save-null");
-      expect(postedBody).toMatchObject({ id: "logical-save-null" });
+      expect(recording.id).toBe("server-recording-null");
+      expect(postedBody).not.toHaveProperty("id");
     } finally {
       globalThis.fetch = originalFetch;
     }

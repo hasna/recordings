@@ -32,6 +32,7 @@ const PROJECT_ROW = {
 const runCalls: Array<{ sql: string; params: unknown[] }> = [];
 const queryCalls: Array<{ method: "get" | "all"; sql: string; params: unknown[] }> = [];
 const recordingRows: Array<Record<string, unknown>> = [];
+const idempotencyRows: Array<Record<string, unknown>> = [];
 
 const fakePg = {
   async transaction<T>(operation: (transaction: typeof fakePg) => Promise<T>) {
@@ -39,7 +40,18 @@ const fakePg = {
   },
   async run(sql: string, ...params: unknown[]) {
     runCalls.push({ sql, params });
-    if (/insert\s+into\s+recordings/i.test(sql)) {
+    if (/insert\s+into\s+recording_idempotency/i.test(sql)) {
+      if (idempotencyRows.some((row) =>
+        (row["principal"] === params[0] && row["idempotency_key"] === params[1]) ||
+        row["recording_id"] === params[3]
+      )) return { changes: 0 };
+      idempotencyRows.push({
+        principal: params[0],
+        idempotency_key: params[1],
+        request_fingerprint: params[2],
+        recording_id: params[3],
+      });
+    } else if (/insert\s+into\s+recordings/i.test(sql)) {
       if (recordingRows.some((row) => row["id"] === params[0])) return { changes: 0 };
       recordingRows.push({
         id: params[0],
@@ -62,12 +74,24 @@ const fakePg = {
         metadata: params[17],
         created_at: "2026-01-01T00:00:00.000Z",
       });
+    } else if (/delete\s+from\s+recordings/i.test(sql)) {
+      const index = recordingRows.findIndex((row) => row["id"] === params[0]);
+      if (index === -1) return { changes: 0 };
+      recordingRows.splice(index, 1);
+      for (const row of idempotencyRows) {
+        if (row["recording_id"] === params[0]) row["recording_id"] = null;
+      }
     }
     return { changes: 1 };
   },
   async get(sql: string, ...params: unknown[]) {
     queryCalls.push({ method: "get", sql, params });
     if (/select\s+count\(\*\)\s+as\s+c\s+from\s+recordings/i.test(sql)) return { c: 7 };
+    if (/from\s+recording_idempotency/i.test(sql)) {
+      return idempotencyRows.find((row) =>
+        row["principal"] === params[0] && row["idempotency_key"] === params[1]
+      ) ?? null;
+    }
     if (/from\s+recordings/i.test(sql)) {
       const ref = params[0] as string;
       return recordingRows.find((row) => row["id"] === ref) ?? null;
@@ -97,7 +121,28 @@ const fakePg = {
 mock.module("./cloud.js", () => ({
   getCloudPg: () => fakePg,
   getCloudVerifier: () => ({
-    authenticate: async () => ({ ok: true }),
+    authenticate: async (headers: Headers) => {
+      const authorization = headers.get("Authorization") ?? "Bearer test";
+      const kid = authorization.replace(/^Bearer\s+/i, "") || "test";
+      return {
+        ok: true,
+        status: 200,
+        principal: {
+          kid,
+          app: "recordings",
+          scopes: ["recordings:write"],
+          agent: null,
+          claims: {
+            v: 1,
+            kid,
+            app: "recordings",
+            scopes: ["recordings:write"],
+            iat: 0,
+            exp: null,
+          },
+        },
+      };
+    },
   }),
   ensureCloudSchema: async () => {},
 }));
@@ -112,10 +157,21 @@ function post(path: string, body?: unknown, headers: Record<string, string> = {}
   });
 }
 
+function postAs(kid: string, path: string, body?: unknown, headers: Record<string, string> = {}): Request {
+  return post(path, body, { Authorization: `Bearer ${kid}`, ...headers });
+}
+
 function get(path: string): Request {
   return new Request(`https://recordings.hasna.xyz${path}`, {
     method: "GET",
     headers: { Authorization: "Bearer test" },
+  });
+}
+
+function delAs(kid: string, path: string): Request {
+  return new Request(`https://recordings.hasna.xyz${path}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${kid}` },
   });
 }
 
@@ -124,6 +180,7 @@ describe("v1 handler: previously-failing cloud routes", () => {
     runCalls.length = 0;
     queryCalls.length = 0;
     recordingRows.length = 0;
+    idempotencyRows.length = 0;
   });
 
   test("GET /v1/recordings propagates exploded tags/date filters and returns filtered total", async () => {
@@ -150,22 +207,141 @@ describe("v1 handler: previously-failing cloud routes", () => {
     );
     const firstResponse = await handleV1Request(firstRequest, new URL(firstRequest.url));
     expect(firstResponse!.status).toBe(201);
-    expect((await firstResponse!.json() as { recording: { id: string } }).recording.id).toBe("logical-save-a");
+    const first = await firstResponse!.json() as { recording: { id: string; raw_text: string } };
 
     const retryRequest = post(
       "/v1/recordings",
-      { raw_text: "batch fallback transcript" },
+      { raw_text: "settled realtime text" },
       { "Idempotency-Key": "logical-save-a" },
     );
     const retryResponse = await handleV1Request(retryRequest, new URL(retryRequest.url));
     const retry = await retryResponse!.json() as { recording: { id: string; raw_text: string } };
     expect(retryResponse!.status).toBe(201);
     expect(retry.recording).toMatchObject({
-      id: "logical-save-a",
+      id: first.recording.id,
       raw_text: "settled realtime text",
     });
     expect(recordingRows).toHaveLength(1);
     expect(queryCalls.filter((call) => /pg_advisory_xact_lock/i.test(call.sql))).toHaveLength(2);
+  });
+
+  test("POST /v1/recordings never exposes another principal's idempotent result", async () => {
+    const firstRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { raw_text: "principal A private transcript" },
+      { "Idempotency-Key": "shared-logical-key" },
+    );
+    const firstResponse = await handleV1Request(firstRequest, new URL(firstRequest.url));
+    expect(firstResponse!.status).toBe(201);
+
+    const collisionRequest = postAs(
+      "writer-b",
+      "/v1/recordings",
+      { raw_text: "principal B request" },
+      { "Idempotency-Key": "shared-logical-key" },
+    );
+    const collisionResponse = await handleV1Request(collisionRequest, new URL(collisionRequest.url));
+    expect(collisionResponse!.status).toBe(201);
+    const collision = await collisionResponse!.json() as { recording: { id: string; raw_text: string } };
+    expect(collision.recording.raw_text).toBe("principal B request");
+    expect(collision.recording.id).not.toBe(
+      (await firstResponse!.clone().json() as { recording: { id: string } }).recording.id,
+    );
+    expect(recordingRows).toHaveLength(2);
+  });
+
+  test("POST /v1/recordings rejects a changed request under the same principal and key", async () => {
+    const firstRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { raw_text: "first request body" },
+      { "Idempotency-Key": "changed-request-key" },
+    );
+    const firstResponse = await handleV1Request(firstRequest, new URL(firstRequest.url));
+    expect(firstResponse!.status).toBe(201);
+
+    const changedRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { raw_text: "different request body" },
+      { "Idempotency-Key": "changed-request-key" },
+    );
+    const changedResponse = await handleV1Request(changedRequest, new URL(changedRequest.url));
+    expect(changedResponse!.status).toBe(409);
+    expect(await changedResponse!.json()).toEqual({ error: "idempotency key is already in use" });
+  });
+
+  test("DELETE keeps the caller's key tombstoned and returns no deleted transcript on retry", async () => {
+    const createRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { raw_text: "private deleted transcript" },
+      { "Idempotency-Key": "deleted-request-key" },
+    );
+    const createResponse = await handleV1Request(createRequest, new URL(createRequest.url));
+    const created = await createResponse!.json() as { recording: { id: string } };
+
+    const deleteRequest = delAs("writer-a", `/v1/recordings/${created.recording.id}`);
+    const deleteResponse = await handleV1Request(deleteRequest, new URL(deleteRequest.url));
+    expect(deleteResponse!.status).toBe(200);
+
+    const retryRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { raw_text: "private deleted transcript" },
+      { "Idempotency-Key": "deleted-request-key" },
+    );
+    const retryResponse = await handleV1Request(retryRequest, new URL(retryRequest.url));
+    expect(retryResponse!.status).toBe(409);
+    expect(await retryResponse!.json()).toEqual({ error: "idempotency key is already in use" });
+    expect(recordingRows).toHaveLength(0);
+  });
+
+  test("a deleted principal's tombstone neither leaks nor binds another principal's key", async () => {
+    const createRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { raw_text: "principal A deleted transcript" },
+      { "Idempotency-Key": "deleted-shared-key" },
+    );
+    const createResponse = await handleV1Request(createRequest, new URL(createRequest.url));
+    const created = await createResponse!.json() as { recording: { id: string } };
+    const deleteRequest = delAs("writer-a", `/v1/recordings/${created.recording.id}`);
+    expect((await handleV1Request(deleteRequest, new URL(deleteRequest.url)))!.status).toBe(200);
+
+    const otherRequest = postAs(
+      "writer-b",
+      "/v1/recordings",
+      { raw_text: "principal B request" },
+      { "Idempotency-Key": "deleted-shared-key" },
+    );
+    const otherResponse = await handleV1Request(otherRequest, new URL(otherRequest.url));
+    expect(otherResponse!.status).toBe(201);
+    expect(await otherResponse!.json()).toEqual({
+      recording: expect.objectContaining({ raw_text: "principal B request" }),
+    });
+    expect(recordingRows).toHaveLength(1);
+    expect(recordingRows[0]!["raw_text"]).not.toBe("principal A deleted transcript");
+  });
+
+  test("POST /v1/recordings never returns another principal's explicit-id row", async () => {
+    const firstRequest = postAs(
+      "writer-a",
+      "/v1/recordings",
+      { id: "shared-explicit-id", raw_text: "principal A private transcript" },
+    );
+    const firstResponse = await handleV1Request(firstRequest, new URL(firstRequest.url));
+    expect(firstResponse!.status).toBe(201);
+
+    const collisionRequest = postAs(
+      "writer-b",
+      "/v1/recordings",
+      { id: "shared-explicit-id", raw_text: "principal B request" },
+    );
+    const collisionResponse = await handleV1Request(collisionRequest, new URL(collisionRequest.url));
+    expect(collisionResponse!.status).toBe(409);
+    expect(await collisionResponse!.json()).toEqual({ error: "idempotency key is already in use" });
   });
 
   test("POST /v1/recordings rejects an idempotency header that conflicts with body id", async () => {
@@ -190,7 +366,7 @@ describe("v1 handler: previously-failing cloud routes", () => {
     const response = await handleV1Request(request, new URL(request.url));
 
     expect(response!.status).toBe(201);
-    expect((await response!.json() as { recording: { id: string } }).recording.id).toBe("logical-save-null");
+    expect((await response!.json() as { recording: { id: string } }).recording.id).not.toBe("logical-save-null");
     expect(recordingRows).toHaveLength(1);
   });
 

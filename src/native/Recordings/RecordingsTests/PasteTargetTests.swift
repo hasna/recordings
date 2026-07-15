@@ -3,6 +3,30 @@ import Testing
 @testable import RecordingsLib
 
 struct PasteTargetTests {
+    @Test("command selection is frozen when recording starts, not after transcription")
+    func commandSelectionCapturePolicy() {
+        #expect(RecordingEngine.shouldCaptureCommandSelection(
+            recordingMode: .command,
+            targetPid: 42,
+            accessibilityTrusted: true
+        ))
+        #expect(!RecordingEngine.shouldCaptureCommandSelection(
+            recordingMode: .dictation,
+            targetPid: 42,
+            accessibilityTrusted: true
+        ))
+        #expect(!RecordingEngine.shouldCaptureCommandSelection(
+            recordingMode: .command,
+            targetPid: nil,
+            accessibilityTrusted: true
+        ))
+        #expect(!RecordingEngine.shouldCaptureCommandSelection(
+            recordingMode: .command,
+            targetPid: 42,
+            accessibilityTrusted: false
+        ))
+    }
+
     @Test("serialized paste transactions write their own payload immediately before one post")
     @MainActor
     func serializedPasteTransactionsKeepPayloadsIsolated() {
@@ -284,6 +308,8 @@ struct PasteTargetTests {
     func commandSelectionRejectsDifferentFocusedElement() {
         let captured = AccessibilitySelectionIdentity(
             element: "field-a",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
             rangeLocation: 4,
             rangeLength: 7,
             selectedText: "rewrite"
@@ -291,6 +317,8 @@ struct PasteTargetTests {
 
         #expect(!captured.matches(
             element: "field-b",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
             rangeLocation: 4,
             rangeLength: 7,
             selectedText: "rewrite"
@@ -301,6 +329,8 @@ struct PasteTargetTests {
     func commandSelectionRejectsChangedRangeOrText() {
         let captured = AccessibilitySelectionIdentity(
             element: "field-a",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
             rangeLocation: 4,
             rangeLength: 7,
             selectedText: "rewrite"
@@ -308,22 +338,82 @@ struct PasteTargetTests {
 
         #expect(!captured.matches(
             element: "field-a",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
             rangeLocation: 5,
             rangeLength: 7,
             selectedText: "rewrite"
         ))
         #expect(!captured.matches(
             element: "field-a",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
             rangeLocation: 4,
             rangeLength: 7,
             selectedText: "changed"
         ))
         #expect(captured.matches(
             element: "field-a",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
             rangeLocation: 4,
             rangeLength: 7,
             selectedText: "rewrite"
         ))
+    }
+
+    @Test("command rewrite rejects a changed window or document in the same focused field")
+    func commandSelectionRejectsChangedDocumentContext() {
+        let captured = AccessibilitySelectionIdentity(
+            element: "shared-editor",
+            window: "window-a",
+            documentIdentifier: "file:///document-a",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        )
+
+        #expect(!captured.matches(
+            element: "shared-editor",
+            window: "window-b",
+            documentIdentifier: "file:///document-a",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        ))
+        #expect(!captured.matches(
+            element: "shared-editor",
+            window: "window-a",
+            documentIdentifier: "file:///document-b",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        ))
+    }
+
+    @Test("command selection requires a stable AX document identity")
+    func commandSelectionRejectsMissingDocumentIdentity() {
+        #expect(RecordingEngine.stableAccessibilityDocumentIdentifier(nil) == nil)
+        #expect(RecordingEngine.stableAccessibilityDocumentIdentifier(" \n ") == nil)
+        #expect(RecordingEngine.stableAccessibilityDocumentIdentifier(
+            "file:///document-a"
+        ) == "file:///document-a")
+    }
+
+    @Test("documentless command selection fails closed even with a stable AX control identifier")
+    func commandSelectionRejectsControlIdentifierWithoutDocumentIdentity() {
+        #expect(RecordingEngine.stableAccessibilityContextIdentifier(
+            documentIdentifier: nil,
+            elementIdentifier: "editor-field"
+        ) == nil)
+        #expect(RecordingEngine.stableAccessibilityContextIdentifier(
+            documentIdentifier: "file:///document-a",
+            elementIdentifier: "editor-field"
+        ) == "document:file:///document-a")
+        #expect(RecordingEngine.stableAccessibilityContextIdentifier(
+            documentIdentifier: nil,
+            elementIdentifier: " \n "
+        ) == nil)
     }
 
     @Test("paste readiness requires the exact frontmost pid and current Accessibility trust")
@@ -353,6 +443,26 @@ struct PasteTargetTests {
             expectedPid: 20,
             expectedBundleIdentifier: "com.editor",
             frontmostPid: 20,
+            frontmostBundleIdentifier: "com.editor",
+            accessibilityTrusted: true,
+            expectedLaunchDate: Date(timeIntervalSince1970: 1_000),
+            frontmostLaunchDate: Date(timeIntervalSince1970: 2_000),
+            requiresProcessIdentity: true
+        ))
+        #expect(RecordingEngine.pasteTargetIsReady(
+            expectedPid: 20,
+            expectedBundleIdentifier: "com.editor",
+            frontmostPid: 20,
+            frontmostBundleIdentifier: "com.editor",
+            accessibilityTrusted: true,
+            expectedLaunchDate: Date(timeIntervalSince1970: 1_000),
+            frontmostLaunchDate: Date(timeIntervalSince1970: 1_000),
+            requiresProcessIdentity: true
+        ))
+        #expect(!RecordingEngine.pasteTargetIsReady(
+            expectedPid: 20,
+            expectedBundleIdentifier: "com.editor",
+            frontmostPid: 20,
             frontmostBundleIdentifier: "com.other",
             accessibilityTrusted: true
         ))
@@ -365,10 +475,167 @@ struct PasteTargetTests {
         ))
     }
 
-    @Test("command paste precondition failures preserve the current clipboard")
-    func commandPasteFailureDoesNotCopyFallback() {
-        #expect(!RecordingEngine.shouldCopyPasteFallback(restoreClipboard: true))
-        #expect(RecordingEngine.shouldCopyPasteFallback(restoreClipboard: false))
+    @Test("Accessibility denial preserves dictation but command rewrite remains fail-closed")
+    func accessibilityDeniedDeliveryPolicyDistinguishesDictationFromCommand() {
+        #expect(RecordingEngine.shouldCopyPasteFallback(deliveryKind: .ordinaryDictation))
+        #expect(RecordingEngine.shouldCopyPasteFallback(deliveryKind: .manualPaste))
+        #expect(!RecordingEngine.shouldCopyPasteFallback(deliveryKind: .commandRewrite))
+        #expect(RecordingEngine.shouldCopyAfterPasteFailure(
+            outcome: .targetUnavailable,
+            deliveryKind: .ordinaryDictation,
+            accessibilityTrusted: false
+        ))
+        #expect(!RecordingEngine.shouldCopyAfterPasteFailure(
+            outcome: .targetUnavailable,
+            deliveryKind: .ordinaryDictation,
+            accessibilityTrusted: true
+        ))
+        #expect(!RecordingEngine.shouldCopyAfterPasteFailure(
+            outcome: .targetUnavailable,
+            deliveryKind: .commandRewrite,
+            accessibilityTrusted: false
+        ))
+        #expect(!RecordingEngine.shouldCopyAfterPasteFailure(
+            outcome: .clipboardOwnershipLost,
+            deliveryKind: .ordinaryDictation,
+            accessibilityTrusted: false
+        ))
+        #expect(!RecordingEngine.shouldCopyAfterPasteFailure(
+            outcome: .targetUnavailable,
+            deliveryKind: .ordinaryDictation,
+            accessibilityTrusted: false,
+            clipboardOwnershipWasLost: true
+        ))
+        #expect(!RecordingEngine.shouldCopyAfterPasteFailure(
+            outcome: .targetUnavailable,
+            deliveryKind: .ordinaryDictation,
+            accessibilityTrusted: false,
+            completedTranscriptAlreadyOnClipboard: true
+        ))
+        #expect(RecordingEngine.targetUnavailableDeliveryStatus(
+            deliveryKind: .manualPaste,
+            accessibilityTrusted: true,
+            clipboardOwnershipWasLost: false,
+            completedTranscriptAlreadyOnClipboard: true,
+            fallbackWriteRequested: false,
+            fallbackWriteSucceeded: false
+        ) == "Copied — target app lost focus")
+        #expect(RecordingEngine.targetUnavailableDeliveryStatus(
+            deliveryKind: .commandRewrite,
+            accessibilityTrusted: false,
+            clipboardOwnershipWasLost: false,
+            completedTranscriptAlreadyOnClipboard: false,
+            fallbackWriteRequested: false,
+            fallbackWriteSucceeded: false
+        ) == "Paste cancelled because Accessibility permission changed")
+        #expect(RecordingEngine.targetUnavailableDeliveryStatus(
+            deliveryKind: .ordinaryDictation,
+            accessibilityTrusted: false,
+            clipboardOwnershipWasLost: true,
+            completedTranscriptAlreadyOnClipboard: false,
+            fallbackWriteRequested: false,
+            fallbackWriteSucceeded: false
+        ) == "Paste cancelled because the clipboard changed")
+    }
+
+    @Test("manual paste records lost clipboard ownership before delayed Accessibility fallback")
+    @MainActor
+    func manualPasteDoesNotOverwriteNewClipboardOwnerAfterAccessibilityLoss() {
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        var targetChecks = 0
+        var clipboardOwnershipWasLost = false
+        var fallbackCopied = false
+        let coordinator = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in
+                PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
+            },
+            postPaste: { true }
+        )
+
+        #expect(coordinator.submit(
+            text: "completed dictation",
+            generation: 1,
+            delay: 0,
+            targetIsReady: {
+                targetChecks += 1
+                return targetChecks < 3
+            }
+        ) { _, outcome in
+            fallbackCopied = RecordingEngine.shouldCopyAfterPasteFailure(
+                outcome: outcome,
+                deliveryKind: .manualPaste,
+                accessibilityTrusted: false,
+                clipboardOwnershipWasLost: clipboardOwnershipWasLost
+            )
+        } settlement: { _, outcome in
+            clipboardOwnershipWasLost = RecordingEngine.clipboardOwnershipWasLostAfterPasteFailure(
+                outcome: outcome,
+                hasOwnershipToken: true,
+                stillOwnsPayload: false
+            )
+        })
+
+        scheduled.removeFirst()()
+
+        #expect(clipboardOwnershipWasLost)
+        #expect(!fallbackCopied)
+        #expect(!coordinator.hasPendingTransaction)
+    }
+
+    @Test("manual paste keeps its owned transcript without rewriting the clipboard")
+    @MainActor
+    func manualPasteDoesNotRewriteOwnedTranscriptAfterAccessibilityLoss() {
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        var targetChecks = 0
+        var completedTranscriptAlreadyOnClipboard = false
+        var fallbackWriteRequested = true
+        let coordinator = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in
+                PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
+            },
+            postPaste: { true }
+        )
+
+        #expect(coordinator.submit(
+            text: "completed dictation",
+            generation: 1,
+            delay: 0,
+            targetIsReady: {
+                targetChecks += 1
+                return targetChecks < 3
+            }
+        ) { _, outcome in
+            fallbackWriteRequested = RecordingEngine.shouldCopyAfterPasteFailure(
+                outcome: outcome,
+                deliveryKind: .manualPaste,
+                accessibilityTrusted: false,
+                completedTranscriptAlreadyOnClipboard: completedTranscriptAlreadyOnClipboard
+            )
+        } settlement: { _, outcome in
+            completedTranscriptAlreadyOnClipboard = outcome == .targetUnavailable
+        })
+
+        scheduled.removeFirst()()
+
+        #expect(completedTranscriptAlreadyOnClipboard)
+        #expect(!fallbackWriteRequested)
+        #expect(!coordinator.hasPendingTransaction)
+    }
+
+    @Test("ordinary dictation fallback leaves the completed transcript on the clipboard")
+    func dictationFallbackCopiesCompletedTranscript() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("recordings-dictation-fallback-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("previous value", forType: .string)
+
+        #expect(RecordingEngine.writeClipboardPreservingOnFailure(
+            "completed dictation",
+            to: pasteboard
+        ))
+        #expect(pasteboard.string(forType: .string) == "completed dictation")
     }
 
     @Test("named pasteboard runtime preserves A/B payload isolation")
@@ -692,5 +959,83 @@ struct PasteTargetTests {
             frontmostPid: 20
         )
         #expect(nilBundleCapture == nil)
+    }
+
+    @Test("captured pid with no bundle identity is rejected instead of trusting pid reuse")
+    func nilBundleCaptureFailsClosed() {
+        let selected = RecordingEngine.selectPasteTarget(
+            candidates: [
+                PasteTargetCandidate(pid: 20, bundleIdentifier: nil, isRegularApp: true),
+            ],
+            currentPid: 99,
+            targetBundleIdentifier: nil,
+            targetPid: 20,
+            frontmostPid: 20
+        )
+
+        #expect(selected == nil)
+    }
+
+    @Test("same-bundle PID reuse with a different process launch identity is rejected")
+    func reusedCapturedPidRequiresProcessBirthIdentity() {
+        let capturedLaunchDate = Date(timeIntervalSince1970: 1_000)
+        let replacementLaunchDate = Date(timeIntervalSince1970: 2_000)
+        let capturedIdentity = PasteTargetProcessIdentity(
+            pid: 20,
+            bundleIdentifier: "com.editor",
+            launchDate: capturedLaunchDate
+        )
+
+        let rejected = RecordingEngine.selectPasteTarget(
+            candidates: [
+                PasteTargetCandidate(
+                    pid: 20,
+                    bundleIdentifier: "com.editor",
+                    isRegularApp: true,
+                    launchDate: replacementLaunchDate
+                ),
+            ],
+            currentPid: 99,
+            targetBundleIdentifier: "com.editor",
+            targetPid: 20,
+            frontmostPid: 20,
+            requiredProcessIdentity: capturedIdentity,
+            requiresProcessIdentity: true
+        )
+        let accepted = RecordingEngine.selectPasteTarget(
+            candidates: [
+                PasteTargetCandidate(
+                    pid: 20,
+                    bundleIdentifier: "com.editor",
+                    isRegularApp: true,
+                    launchDate: capturedLaunchDate
+                ),
+            ],
+            currentPid: 99,
+            targetBundleIdentifier: "com.editor",
+            targetPid: 20,
+            frontmostPid: 20,
+            requiredProcessIdentity: capturedIdentity,
+            requiresProcessIdentity: true
+        )
+        let missingIdentity = RecordingEngine.selectPasteTarget(
+            candidates: [
+                PasteTargetCandidate(
+                    pid: 20,
+                    bundleIdentifier: "com.editor",
+                    isRegularApp: true,
+                    launchDate: capturedLaunchDate
+                ),
+            ],
+            currentPid: 99,
+            targetBundleIdentifier: "com.editor",
+            targetPid: 20,
+            frontmostPid: 20,
+            requiresProcessIdentity: true
+        )
+
+        #expect(rejected == nil)
+        #expect(accepted?.pid == 20)
+        #expect(missingIdentity == nil)
     }
 }

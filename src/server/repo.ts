@@ -20,11 +20,25 @@ import type {
   Agent,
   Project,
 } from "../types/index.js";
-import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
+import {
+  recordingCreateFingerprint,
+  recordingCreateIdentity,
+} from "../lib/recording-create-identity.js";
 
 // Re-exported so `/v1` route code can `import * as repo` and reference
 // `repo.ProjectNotFoundError` when mapping a bad focus ref to a clean 400.
 export { ProjectNotFoundError, ValidationError };
+
+export class IdempotencyConflictError extends Error {
+  constructor() {
+    super("idempotency key is already in use");
+    this.name = "IdempotencyConflictError";
+  }
+}
+
+export interface RecordingIdempotencyContext {
+  principal: string;
+}
 
 function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
@@ -93,21 +107,53 @@ export async function createRecording(
   pg: PgAdapterAsync,
   input: CreateRecordingInput,
   idempotencyKey?: string,
+  idempotencyContext?: RecordingIdempotencyContext,
 ): Promise<Recording> {
   if (typeof input.raw_text !== "string" || !input.raw_text) {
     throw new ValidationError("raw_text is required");
   }
-  input = recordingCreateIdentity(input, idempotencyKey).input;
-  const id = input.id || shortUuid();
+  const identity = recordingCreateIdentity(input, idempotencyKey, {
+    bindIdempotencyKeyToId: false,
+  });
+  input = identity.input;
+  const id = input.id || crypto.randomUUID();
+  const effectiveKey = identity.idempotencyKey;
+  if (effectiveKey !== undefined && !idempotencyContext?.principal) {
+    throw new ValidationError("idempotency principal is required");
+  }
+  const principal = idempotencyContext?.principal;
+  const requestFingerprint = recordingCreateFingerprint(input);
 
   return pg.transaction(async (transaction) => {
-    if (input.id) {
-      await transaction.get("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", id);
-      const existing = await getRecording(transaction, id);
-      if (existing?.id === id) return existing;
+    if (effectiveKey !== undefined && principal !== undefined) {
+      const lockRef = JSON.stringify([principal, effectiveKey]);
+      await transaction.get("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", lockRef);
+      const replay = (await transaction.get(
+        `SELECT request_fingerprint, recording_id
+         FROM recording_idempotency
+         WHERE principal = ? AND idempotency_key = ?`,
+        principal,
+        effectiveKey,
+      )) as { request_fingerprint: string; recording_id: string | null } | null;
+      if (replay) {
+        if (replay.request_fingerprint !== requestFingerprint) {
+          throw new IdempotencyConflictError();
+        }
+        if (replay.recording_id === null) throw new IdempotencyConflictError();
+        const existing = await getRecordingExact(transaction, replay.recording_id);
+        if (!existing) throw new IdempotencyConflictError();
+        return existing;
+      }
+
+      // An existing row without this principal's ledger entry is never safe to
+      // return from a write-only endpoint: it may belong to another caller or
+      // predate the scoped ledger.
+      if (await getRecordingExact(transaction, id)) {
+        throw new IdempotencyConflictError();
+      }
     }
 
-    // Resolve references only after the caller-id lock and winner recheck. A
+    // Resolve references only after the scoped idempotency lock and winner recheck. A
     // concurrent retry must not mutate an agent or fail a changed project ref
     // after another request has already committed this logical recording.
     let resolvedAgentId: string | null = null;
@@ -148,9 +194,7 @@ export async function createRecording(
     JSON.stringify(input.metadata || {}),
   );
     if (insertResult.changes === 0) {
-      const existing = await getRecording(transaction, id);
-      if (existing?.id === id) return existing;
-      throw new Error("recording id conflict could not be read back");
+      throw new IdempotencyConflictError();
     }
 
     if (input.tags && input.tags.length > 0) {
@@ -163,10 +207,34 @@ export async function createRecording(
       }
     }
 
-    const created = await getRecording(transaction, id);
+    if (effectiveKey !== undefined && principal !== undefined) {
+      const ledgerInsert = await transaction.run(
+        `INSERT INTO recording_idempotency
+           (principal, idempotency_key, request_fingerprint, recording_id)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
+        principal,
+        effectiveKey,
+        requestFingerprint,
+        id,
+      );
+      if (ledgerInsert.changes === 0) throw new IdempotencyConflictError();
+    }
+
+    const created = await getRecordingExact(transaction, id);
     if (!created) throw new Error("failed to read back created recording");
     return created;
   });
+}
+
+async function getRecordingExact(
+  pg: PgAdapterAsync,
+  id: string,
+): Promise<Recording | null> {
+  const row = (await pg.get("SELECT * FROM recordings WHERE id = ?", id)) as
+    | Record<string, unknown>
+    | null;
+  return row ? parseRecording(row) : null;
 }
 
 export async function getRecording(

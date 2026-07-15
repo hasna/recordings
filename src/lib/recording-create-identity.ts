@@ -1,5 +1,6 @@
 import { ValidationError } from "../db/errors.js";
 import type { CreateRecordingInput } from "../types/index.js";
+import { createHash } from "node:crypto";
 
 export interface RecordingCreateIdentity {
   input: CreateRecordingInput;
@@ -7,6 +8,42 @@ export interface RecordingCreateIdentity {
 }
 
 export const MAX_RECORDING_IDENTITY_LENGTH = 255;
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .filter((key) => object[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+    .join(",")}}`;
+}
+
+/** Fingerprint the values that one recording insert would persist. */
+export function recordingCreateFingerprint(input: CreateRecordingInput): string {
+  const persisted = {
+    id: input.id ?? null,
+    audio_path: input.audio_path || null,
+    raw_text: input.raw_text,
+    processed_text: input.processed_text || null,
+    processing_mode: input.processing_mode || "raw",
+    model_used: input.model_used || "gpt-4o-transcribe",
+    enhancement_model: input.enhancement_model || null,
+    duration_ms: input.duration_ms || 0,
+    language: input.language || null,
+    tags: input.tags || [],
+    agent_id: input.agent_id || null,
+    project_id: input.project_id || null,
+    session_id: input.session_id || null,
+    goal: input.goal || null,
+    role: input.role || null,
+    task_list_id: input.task_list_id || null,
+    machine_id: input.machine_id || null,
+    metadata: input.metadata || {},
+  };
+  return createHash("sha256").update(canonicalJson(persisted), "utf8").digest("hex");
+}
 
 function validateIdentityValue(
   value: unknown,
@@ -39,6 +76,7 @@ function validateIdentityValue(
 export function recordingCreateIdentity(
   input: CreateRecordingInput,
   idempotencyKey?: unknown,
+  options: { bindIdempotencyKeyToId?: boolean } = {},
 ): RecordingCreateIdentity {
   const bodyId = validateIdentityValue(input.id, "recording id", true);
   const headerKey = validateIdentityValue(idempotencyKey, "idempotency key");
@@ -48,10 +86,11 @@ export function recordingCreateIdentity(
 
   const effectiveKey = headerKey ?? bodyId;
   const { id: _runtimeId, ...inputWithoutId } = input;
+  const persistedId = options.bindIdempotencyKeyToId === false ? bodyId : effectiveKey;
   return {
-    input: effectiveKey === undefined
+    input: persistedId === undefined
       ? inputWithoutId
-      : { ...inputWithoutId, id: effectiveKey },
+      : { ...inputWithoutId, id: persistedId },
     idempotencyKey: effectiveKey,
   };
 }

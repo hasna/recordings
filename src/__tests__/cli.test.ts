@@ -683,6 +683,70 @@ describe("recordings CLI", () => {
     expect(recording.metadata.post_processing.applied).toBe(false);
   });
 
+  test("explicit empty --recording-id is validated instead of treated as absent", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-empty-recording-id-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        cliEntry,
+        "--json",
+        "save-text",
+        "must not persist",
+        "--post-processing",
+        "off",
+        "--recording-id",
+        "",
+      ],
+      {
+        cwd: home,
+        env: isolatedCliEnv(home),
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).toBe(1);
+    expect(`${stdout}\n${stderr}`).toContain("recording id must not be empty");
+
+    const transcribe = Bun.spawn(
+      [
+        process.execPath,
+        cliEntry,
+        "--json",
+        "transcribe",
+        "/nonexistent/must-not-be-read.wav",
+        "--recording-id",
+        "",
+      ],
+      {
+        cwd: home,
+        env: isolatedCliEnv(home),
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [transcribeStdout, transcribeStderr, transcribeExitCode] = await Promise.all([
+      new Response(transcribe.stdout).text(),
+      new Response(transcribe.stderr).text(),
+      transcribe.exited,
+    ]);
+    expect(transcribeExitCode).toBe(1);
+    expect(`${transcribeStdout}\n${transcribeStderr}`).toContain(
+      "recording id must not be empty"
+    );
+    expect(`${transcribeStdout}\n${transcribeStderr}`).not.toContain(
+      "must-not-be-read.wav"
+    );
+  });
+
   test("list is compact by default while JSON and detail preserve full text", async () => {
     const home = join(tmpdir(), `open-recordings-cli-compact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     tempDirs.push(home);

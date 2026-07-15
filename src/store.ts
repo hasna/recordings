@@ -165,6 +165,7 @@ function apiStore(client: StorageClient): Store {
       const identity = recordingCreateIdentity(
         input,
         keyCandidate,
+        { bindIdempotencyKeyToId: false },
       );
       const res = await client.create<unknown>(
         "recordings",

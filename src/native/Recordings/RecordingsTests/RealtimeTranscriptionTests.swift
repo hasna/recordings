@@ -242,6 +242,123 @@ struct RealtimeTranscriptionTests {
         #expect(RealtimeTranscriptionClient.shouldManuallyCommitTestHelper(uncommittedAudioBytes: 5_760) == true)
     }
 
+    @Test("Realtime configuration buffering fails closed before dropping early audio")
+    func pendingAudioOverflowRequiresBatchFallback() {
+        var buffer = RealtimePendingAudioBuffer(maximumByteCount: 6)
+        let acceptedFirstChunk = buffer.append(Data([1, 2, 3]))
+        let acceptedSecondChunk = buffer.append(Data([4, 5, 6]))
+        let acceptedOverflowChunk = buffer.append(Data([7, 8, 9]))
+        let retainedChunkCount = buffer.chunkCount
+        let retainedByteCount = buffer.byteCount
+        let retainedChunks = buffer.drain()
+
+        #expect(acceptedFirstChunk)
+        #expect(acceptedSecondChunk)
+        #expect(!acceptedOverflowChunk)
+        #expect(retainedChunkCount == 2)
+        #expect(retainedByteCount == 6)
+        #expect(retainedChunks == [Data([1, 2, 3]), Data([4, 5, 6])])
+    }
+
+    @Test("Configured realtime outbound audio stays bounded without Base64 task accumulation")
+    func configuredOutboundAudioQueueIsBounded() {
+        var queue = RealtimeOutboundEventBuffer(maximumByteCount: 8, maximumEventCount: 2)
+
+        let acceptedFirst = queue.append(.audio(Data([1, 2, 3, 4])), sequence: 0)
+        let acceptedSecond = queue.append(.audio(Data([5, 6, 7, 8])), sequence: 1)
+        let acceptedOverflow = queue.append(.audio(Data([9])), sequence: 2)
+        #expect(acceptedFirst)
+        #expect(acceptedSecond)
+        #expect(!acceptedOverflow)
+        #expect(queue.byteCount == 8)
+        #expect(queue.eventCount == 2)
+
+        #expect(queue.popFirst()?.payload == .audio(Data([1, 2, 3, 4])))
+        #expect(queue.byteCount == 4)
+        #expect(queue.eventCount == 1)
+    }
+
+    @Test("A stalled configured WebSocket send reaches a bounded deadline and forces fallback")
+    @MainActor
+    func configuredOutboundSendDeadlineIsBounded() async {
+        let client = RealtimeTranscriptionClient(apiKey: "synthetic-test-value", homePath: "/tmp")
+        let clock = FakeRealtimeClock()
+        let sent = await client.enqueueOutboundOperationTestHelper(
+            timeoutMilliseconds: 50,
+            operation: {
+                try await Task.sleep(for: .seconds(60))
+            },
+            nowMilliseconds: { clock.nowMilliseconds },
+            sleepMilliseconds: { milliseconds in
+                await Task.yield()
+                clock.advance(by: milliseconds)
+            }
+        )
+
+        #expect(!sent)
+        #expect(clock.nowMilliseconds == 50)
+        #expect(client.error?.contains("timed out") == true)
+        #expect(client.settlementResolutionTestHelper() == .failed)
+    }
+
+    @Test("Final realtime deadline includes a stalled outbound commit chain")
+    @MainActor
+    func stalledOutboundCommitCannotExtendFinishDeadline() async {
+        let clock = FakeRealtimeClock()
+        var commitStarted = false
+        let waitResult = await RealtimeTranscriptionClient.waitForSettlementWhileCommitRunsTestHelper(
+            timeoutMilliseconds: 700,
+            beginCommit: {
+                commitStarted = true
+                try? await Task.sleep(for: .seconds(60))
+                return false
+            },
+            resolution: { .waiting },
+            nowMilliseconds: { clock.nowMilliseconds },
+            sleepMilliseconds: { milliseconds in
+                await Task.yield()
+                clock.advance(by: milliseconds)
+            }
+        )
+
+        #expect(commitStarted)
+        #expect(waitResult.resolution == .waiting)
+        #expect(waitResult.elapsedMilliseconds == 700)
+    }
+
+    @Test("WebSocket send failure settles immediately and never accepts partial realtime text")
+    @MainActor
+    func outboundSendFailureRequiresImmediateBatchFallback() async {
+        struct SyntheticSendFailure: Error {}
+        let client = RealtimeTranscriptionClient(apiKey: "synthetic-test-value", homePath: "/tmp")
+        let sent = await client.enqueueOutboundOperationTestHelper {
+            throw SyntheticSendFailure()
+        }
+        #expect(!sent)
+        #expect(client.error?.contains("Realtime send failed") == true)
+
+        let clock = FakeRealtimeClock()
+        let waitResult = await RealtimeTranscriptionClient.waitForSettlementTestHelper(
+            timeoutMilliseconds: 700,
+            resolution: { client.settlementResolutionTestHelper() },
+            nowMilliseconds: { clock.nowMilliseconds },
+            sleepMilliseconds: { clock.advance(by: $0) }
+        )
+        #expect(waitResult.resolution == .failed)
+        #expect(waitResult.elapsedMilliseconds == 0)
+
+        let failedResult = RealtimeFinishResult(
+            text: "optimistic partial",
+            settled: false,
+            error: client.error
+        )
+        #expect(RecordingEngine.settledRealtimeFastPathTranscript(
+            finishResult: failedResult,
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == nil)
+    }
+
     @Test("Realtime finish waits for the exact final item and every prior item")
     func exactFinalItemSettlementHandlesOutOfOrderCompletion() {
         var tracker = RealtimeCommitSettlementTracker()
@@ -309,6 +426,48 @@ struct RealtimeTranscriptionTests {
             pcmByteCount: 12_000,
             language: "en"
         ) == "final words")
+    }
+
+    @Test("Settlement deadline arithmetic saturates at UInt64 bounds")
+    @MainActor
+    func settlementDeadlineDoesNotOverflow() async {
+        var now = UInt64.max - 5
+        let waitResult = await RealtimeTranscriptionClient.waitForSettlementTestHelper(
+            timeoutMilliseconds: 10,
+            resolution: { .waiting },
+            nowMilliseconds: { now },
+            sleepMilliseconds: { milliseconds in
+                let (advanced, overflow) = now.addingReportingOverflow(milliseconds)
+                now = overflow ? UInt64.max : advanced
+            }
+        )
+
+        #expect(waitResult.resolution == .waiting)
+        #expect(waitResult.elapsedMilliseconds == 5)
+    }
+
+    @Test("Periodic realtime commits use bounded monotonic elapsed time")
+    func periodicCommitSchedulingIsMonotonicAndBounded() {
+        #expect(RecordingEngine.realtimePeriodicCommitIsDue(
+            nowMilliseconds: 10,
+            lastCommitMilliseconds: nil
+        ))
+        #expect(!RecordingEngine.realtimePeriodicCommitIsDue(
+            nowMilliseconds: 999,
+            lastCommitMilliseconds: 100
+        ))
+        #expect(RecordingEngine.realtimePeriodicCommitIsDue(
+            nowMilliseconds: 1_000,
+            lastCommitMilliseconds: 100
+        ))
+        #expect(!RecordingEngine.realtimePeriodicCommitIsDue(
+            nowMilliseconds: 99,
+            lastCommitMilliseconds: 100
+        ))
+        #expect(!RecordingEngine.realtimePeriodicCommitIsDue(
+            nowMilliseconds: UInt64.max,
+            lastCommitMilliseconds: UInt64.max - 899
+        ))
     }
 
     @Test("A sub-threshold final PCM tail is retained and padded only for realtime commit")

@@ -105,6 +105,7 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
             pg,
             body,
             req.headers.get("Idempotency-Key") ?? undefined,
+            { principal: `${decision.principal.app}:${decision.principal.kid}` },
           );
           return json({ recording }, 201);
         }
@@ -222,6 +223,9 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
     // Clean domain errors carry a safe, client-facing message → 400.
     if (e instanceof repo.ProjectNotFoundError || e instanceof repo.ValidationError) {
       return error(400, e.message);
+    }
+    if (e instanceof repo.IdempotencyConflictError) {
+      return error(409, e.message);
     }
     // Anything else is an unexpected/internal failure. Its raw text (e.g. a
     // Postgres constraint name like `agents_active_project_id_fkey`, table or

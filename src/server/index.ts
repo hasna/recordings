@@ -54,7 +54,15 @@ Environment:
 }
 
 async function runMigrate(): Promise<void> {
-  const { ensureCloudSchema, pingCloud, resolveCloudDatabaseUrl, closeCloud } = await import("./cloud.js");
+  const {
+    closeCloud,
+    getCloudPg,
+    migrateCloudSchema,
+    pingCloudConnectivity,
+    resolveCloudDatabaseUrl,
+  } = await import("./cloud.js");
+  const { assertCloudSchemaContract } = await import("./cloud-readiness.js");
+  const { runCloudMigration } = await import("./migrate-command.js");
   if (!resolveCloudDatabaseUrl()) {
     console.error(
       "migrate: no database URL (HASNA_RECORDINGS_DATABASE_URL / RECORDINGS_DATABASE_URL / DATABASE_URL)",
@@ -62,9 +70,14 @@ async function runMigrate(): Promise<void> {
     process.exit(2);
   }
   console.log("migrate: connecting…");
-  await pingCloud();
-  console.log("migrate: applying schema (recordings tables + api_keys)…");
-  await ensureCloudSchema();
+  await runCloudMigration({
+    pingConnectivity: pingCloudConnectivity,
+    applyMigrations: async () => {
+      console.log("migrate: applying schema (recordings tables + api_keys)…");
+      await migrateCloudSchema();
+    },
+    validateContract: () => assertCloudSchemaContract(getCloudPg()),
+  });
   console.log("migrate: done");
   await closeCloud();
   process.exit(0);
