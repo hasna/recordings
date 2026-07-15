@@ -548,6 +548,74 @@ struct RealtimeTranscriptionTests {
         ) == .deliver("foreground transcript"))
     }
 
+    @Test("Delayed delivery from recording A pastes once without overwriting recording B")
+    func delayedDeliveryRespectsNewerPipeline() {
+        var gate = PipelineDeliveryGate()
+        gate.registerPipeline(4)
+        gate.registerPipeline(5)
+
+        let firstA = gate.claimDelivery(for: 4)
+        let duplicateA = gate.claimDelivery(for: 4)
+        let firstB = gate.claimDelivery(for: 5)
+        #expect(firstA)
+        #expect(!duplicateA)
+        #expect(firstB)
+        #expect(!gate.shouldApplyStatus(
+            deliveryGeneration: 4,
+            currentGeneration: 5,
+            isRecording: true,
+            isTranscribing: false
+        ))
+        #expect(gate.shouldApplyStatus(
+            deliveryGeneration: 5,
+            currentGeneration: 5,
+            isRecording: false,
+            isTranscribing: false
+        ))
+    }
+
+    @Test("Delivery claims compact without forgetting old or out-of-order generations")
+    func deliveryClaimsRemainExactAfterCompaction() {
+        var gate = PipelineDeliveryGate()
+        var sequentialClaims: [Bool] = []
+        for generation in 1...64 {
+            gate.registerPipeline(UInt64(generation))
+            sequentialClaims.append(gate.claimDelivery(for: UInt64(generation)))
+        }
+        let duplicateOne = gate.claimDelivery(for: 1)
+        let duplicateThirtyTwo = gate.claimDelivery(for: 32)
+        #expect(sequentialClaims.allSatisfy { $0 })
+        #expect(!duplicateOne)
+        #expect(!duplicateThirtyTwo)
+
+        var outOfOrder = PipelineDeliveryGate()
+        outOfOrder.registerPipeline(100)
+        outOfOrder.registerPipeline(1)
+        let highClaim = outOfOrder.claimDelivery(for: 100)
+        let pendingLowClaim = outOfOrder.claimDelivery(for: 1)
+        let duplicateLowClaim = outOfOrder.claimDelivery(for: 1)
+        outOfOrder.registerPipeline(99)
+        let pendingMiddleClaim = outOfOrder.claimDelivery(for: 99)
+        let duplicateHighClaim = outOfOrder.claimDelivery(for: 100)
+        #expect(highClaim)
+        #expect(pendingLowClaim)
+        #expect(!duplicateLowClaim)
+        #expect(pendingMiddleClaim)
+        #expect(!duplicateHighClaim)
+
+        var gapped = PipelineDeliveryGate()
+        var gappedClaims: [Bool] = []
+        for generation in stride(from: 2, through: 200, by: 2) {
+            gapped.registerPipeline(UInt64(generation))
+            gappedClaims.append(gapped.claimDelivery(for: UInt64(generation)))
+        }
+        let duplicateTwo = gapped.claimDelivery(for: 2)
+        let duplicateOneNinetyEight = gapped.claimDelivery(for: 198)
+        #expect(gappedClaims.allSatisfy { $0 })
+        #expect(!duplicateTwo)
+        #expect(!duplicateOneNinetyEight)
+    }
+
     @Test("Background recovery reconstructs missing WAV without replacing an existing capture")
     func backgroundRecoveryAudioReconstruction() throws {
         let directory = FileManager.default.temporaryDirectory
@@ -578,28 +646,57 @@ struct RealtimeTranscriptionTests {
     @Test("Background recovery retains the failed recording's processing configuration")
     func backgroundRecoveryUsesCapturedConfiguration() {
         let recordingA = RecordingProcessingConfiguration(
+            transcriptionPrompt: "Project A vocabulary",
             transcriberPrompt: "Project A vocabulary",
-            postProcessingMode: PostProcessingMode.off.rawValue
+            postProcessingMode: PostProcessingMode.off.rawValue,
+            transcriptionLanguage: "es",
+            transcriptionModel: "whisper-1",
+            transcriberModel: "gpt-a",
+            enhancementModel: "gpt-a-fallback",
+            enhanceTriggersJSON: #"["rewrite a"]"#,
+            keywordTransformsJSON: #"{"code with":"Codewith"}"#
         )
         var currentProject = recordingA
         let capturedForRecovery = currentProject
 
         currentProject = RecordingProcessingConfiguration(
+            transcriptionPrompt: "Project B vocabulary",
             transcriberPrompt: "Project B rewrite policy",
-            postProcessingMode: PostProcessingMode.always.rawValue
+            postProcessingMode: PostProcessingMode.always.rawValue,
+            transcriptionLanguage: "en",
+            transcriptionModel: "gpt-4o-transcribe",
+            transcriberModel: "gpt-b",
+            enhancementModel: "gpt-b-fallback",
+            enhanceTriggersJSON: #"["rewrite b"]"#,
+            keywordTransformsJSON: #"{"open ai":"OpenAI"}"#
         )
         let recoveryArgs = RecordingEngine.transcribeCLIArgs(
             audioPath: "/tmp/recording-a.wav",
             activeProjectId: "project-a",
             transcriberPrompt: capturedForRecovery.transcriberPrompt,
-            postProcessingMode: capturedForRecovery.postProcessingMode
+            postProcessingMode: capturedForRecovery.postProcessingMode,
+            language: capturedForRecovery.transcriptionLanguage,
+            transcriptionPrompt: capturedForRecovery.transcriptionPrompt,
+            transcriptionModel: capturedForRecovery.transcriptionModel,
+            transcriberModel: capturedForRecovery.transcriberModel,
+            enhancementModel: capturedForRecovery.enhancementModel,
+            enhanceTriggersJSON: capturedForRecovery.enhanceTriggersJSON,
+            keywordTransformsJSON: capturedForRecovery.keywordTransformsJSON,
+            recordingId: "pipeline-a"
         )
 
         #expect(capturedForRecovery != currentProject)
         #expect(recoveryArgs.contains("Project A vocabulary"))
         #expect(recoveryArgs.contains(PostProcessingMode.off.rawValue))
+        #expect(recoveryArgs.contains("es"))
+        #expect(recoveryArgs.contains("whisper-1"))
+        #expect(recoveryArgs.contains("gpt-a"))
+        #expect(recoveryArgs.contains(#"["rewrite a"]"#))
+        #expect(recoveryArgs.contains(#"{"code with":"Codewith"}"#))
+        #expect(recoveryArgs.contains("pipeline-a"))
         #expect(!recoveryArgs.contains("Project B rewrite policy"))
         #expect(!recoveryArgs.contains(PostProcessingMode.always.rawValue))
+        #expect(!recoveryArgs.contains("en"))
     }
 
     @Test("Partial realtime text falls back for longer recordings")

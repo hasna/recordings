@@ -46,7 +46,7 @@ export interface Store {
   readonly baseUrl: string | null;
 
   // ── recordings ──
-  createRecording(input: CreateRecordingInput): Promise<Recording>;
+  createRecording(input: CreateRecordingInput, idempotencyKey?: string): Promise<Recording>;
   getRecording(id: string): Promise<Recording | null>;
   listRecordings(filter?: RecordingFilter): Promise<Recording[]>;
   countRecordings?(filter?: RecordingFilter): Promise<number>;
@@ -156,8 +156,8 @@ function apiStore(client: StorageClient): Store {
   return {
     mode: "cloud-http",
     baseUrl: client.baseUrl,
-    async createRecording(input) {
-      const res = await client.create<unknown>("recordings", input);
+    async createRecording(input, idempotencyKey) {
+      const res = await client.create<unknown>("recordings", input, idempotencyKey);
       return unwrap<Recording>(res, "recording");
     },
     async getRecording(id) {

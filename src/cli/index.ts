@@ -178,10 +178,17 @@ program
   .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
   .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
   .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
+  .option("--transcription-model <model>", "Model for bounded audio transcription")
   .option("--transcriber-model <model>", "Model for post-transcription cleanup")
+  .option("--enhancement-model <model>", "Enhancement model fallback")
+  .option("--enhance-triggers-json <json>", "Frozen JSON string array of enhancement triggers")
+  .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
+  .option("-l, --language <lang>", "Language code (e.g. en, es, fr)")
+  .option("--recording-id <id>", "Stable recording ID for idempotent retries")
   .action(async (file, opts) => {
     const config = loadConfig();
     ensureDataDir(config);
+    if (opts.language) config.language = opts.language;
     if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
     applyEnhancementOptions(config, opts);
 
@@ -202,6 +209,7 @@ program
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : [];
 
     const recording = await getStore().createRecording({
+      id: opts.recordingId || undefined,
       audio_path: file,
       raw_text: transcription.text,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -220,7 +228,7 @@ program
         transcriberPromptFromRequest:
           opts.transcriberPrompt !== undefined || opts.systemPrompt !== undefined,
       }),
-    });
+    }, opts.recordingId || undefined);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));
@@ -254,7 +262,12 @@ program
   .option("--post-processing <mode>", "Post-processing mode: off, auto, or always")
   .option("--transcriber-prompt <prompt>", "Instructions for post-transcription cleanup")
   .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--transcription-model <model>", "Model for bounded audio transcription")
   .option("--transcriber-model <model>", "Model for post-transcription cleanup")
+  .option("--enhancement-model <model>", "Enhancement model fallback")
+  .option("--enhance-triggers-json <json>", "Frozen JSON string array of enhancement triggers")
+  .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
+  .option("--recording-id <id>", "Stable recording ID for idempotent retries")
   .action(async (text: string | undefined, opts) => {
     const rawText = await readSaveTextInput(text, opts);
     const config = loadConfig();
@@ -279,6 +292,7 @@ program
     };
 
     const recording = await getStore().createRecording({
+      id: opts.recordingId || undefined,
       audio_path: opts.audioPath || undefined,
       raw_text: rawText,
       processed_text: processed.mode === "enhanced" ? processed.text : undefined,
@@ -293,7 +307,7 @@ program
       session_id: parentOpts.session || undefined,
       machine_id: currentMachineId(),
       metadata,
-    });
+    }, opts.recordingId || undefined);
 
     if (parentOpts.json) {
       console.log(JSON.stringify(recording, null, 2));

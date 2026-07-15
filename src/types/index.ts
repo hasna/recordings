@@ -25,6 +25,8 @@ export interface Recording {
 export type ProcessingMode = "raw" | "enhanced";
 
 export interface CreateRecordingInput {
+  /** Stable caller-owned identity for retrying one logical recording create. */
+  id?: string;
   audio_path?: string;
   raw_text: string;
   processed_text?: string;

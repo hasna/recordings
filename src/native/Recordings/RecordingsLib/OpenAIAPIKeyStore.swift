@@ -1,5 +1,14 @@
 import Foundation
 
+struct ProcessingModelSelection: Equatable, Sendable {
+    let transcriptionPrompt: String
+    let transcriptionModel: String
+    let transcriberModel: String
+    let enhancementModel: String
+    let enhanceTriggersJSON: String
+    let keywordTransformsJSON: String
+}
+
 enum OpenAIAPIKeyStore {
     static let defaultLanguage = "en"
 
@@ -38,6 +47,47 @@ enum OpenAIAPIKeyStore {
             return normalizedStoredLanguage(language)
         }
         return defaultLanguage
+    }
+
+    static func loadProcessingModelSelection(
+        homePath: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ProcessingModelSelection {
+        let json = loadMutableConfig(homePath: homePath)
+        let enhancementModel = firstNonEmpty(
+            environment["RECORDINGS_ENHANCEMENT_MODEL"],
+            json["enhancement_model"] as? String
+        ) ?? "gpt-4o"
+        let transcriberModel = firstNonEmpty(
+            environment["RECORDINGS_TRANSCRIBER_MODEL"],
+            json["transcriber_model"] as? String,
+            enhancementModel
+        ) ?? enhancementModel
+        let transcriptionModel = firstNonEmpty(
+            environment["RECORDINGS_MODEL"],
+            json["transcription_model"] as? String
+        ) ?? "gpt-4o-transcribe"
+        let triggers = (json["enhance_triggers"] as? [String]) ?? [
+            "say it better", "rewrite this", "make it sound", "clean this up",
+            "fix this", "rephrase", "write it properly", "make it professional",
+            "improve this", "polish this",
+        ]
+        let triggerData = try? JSONSerialization.data(withJSONObject: triggers)
+        let triggerJSON = triggerData.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let keywordTransforms = (json["keyword_transforms"] as? [String: String]) ?? [:]
+        let transformData = try? JSONSerialization.data(withJSONObject: keywordTransforms)
+        let transformJSON = transformData.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return ProcessingModelSelection(
+            transcriptionPrompt: firstNonEmpty(
+                environment["RECORDINGS_TRANSCRIPTION_PROMPT"],
+                json["transcription_prompt"] as? String
+            ) ?? "",
+            transcriptionModel: transcriptionModel,
+            transcriberModel: transcriberModel,
+            enhancementModel: enhancementModel,
+            enhanceTriggersJSON: triggerJSON,
+            keywordTransformsJSON: transformJSON
+        )
     }
 
     /// Persist the key into ~/.hasna/recordings/config.json so the CLI (which the app

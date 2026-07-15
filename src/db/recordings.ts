@@ -36,14 +36,20 @@ export function createRecording(
   db?: Database
 ): Recording {
   const d = db || getDatabase();
-  const id = shortUuid();
-  const tagsJson = JSON.stringify(input.tags || []);
-  const metadataJson = JSON.stringify(input.metadata || {});
+  const id = input.id || shortUuid();
+  const create = d.transaction(() => {
+    if (input.id) {
+      const existing = getRecording(input.id, d);
+      if (existing?.id === input.id) return existing;
+    }
+    const tagsJson = JSON.stringify(input.tags || []);
+    const metadataJson = JSON.stringify(input.metadata || {});
 
-  d.query(
+    const insertResult = d.query(
     `INSERT INTO recordings (id, audio_path, raw_text, processed_text, processing_mode, model_used, enhancement_model, duration_ms, language, tags, agent_id, project_id, session_id, goal, role, task_list_id, machine_id, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`
+    ).run(
     id,
     input.audio_path || null,
     input.raw_text,
@@ -62,19 +68,25 @@ export function createRecording(
     input.task_list_id || null,
     input.machine_id || null,
     metadataJson
-  );
-
-  // Insert tags into normalized table
-  if (input.tags && input.tags.length > 0) {
-    const insertTag = d.query(
-      "INSERT OR IGNORE INTO recording_tags (recording_id, tag) VALUES (?, ?)"
     );
-    for (const tag of input.tags) {
-      insertTag.run(id, tag);
+    if (insertResult.changes === 0) {
+      const existing = getRecording(id, d);
+      if (existing?.id === id) return existing;
+      throw new Error("recording id conflict could not be read back");
     }
-  }
 
-  return getRecording(id, d)!;
+    if (input.tags && input.tags.length > 0) {
+      const insertTag = d.query(
+        "INSERT OR IGNORE INTO recording_tags (recording_id, tag) VALUES (?, ?)"
+      );
+      for (const tag of input.tags) {
+        insertTag.run(id, tag);
+      }
+    }
+
+    return getRecording(id, d)!;
+  });
+  return create();
 }
 
 export function getRecording(

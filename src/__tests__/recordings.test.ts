@@ -61,6 +61,25 @@ describe("createRecording", () => {
     expect(rec.created_at).toBeDefined();
   });
 
+  test("an ambiguous committed save retried with the same recording id creates one row", () => {
+    const recordingId = "pipeline-ambiguous-save";
+
+    const commitThenLoseResponse = () => {
+      createRecording({ id: recordingId, raw_text: "settled realtime text" }, db);
+      throw new Error("response lost after commit");
+    };
+
+    expect(commitThenLoseResponse).toThrow("response lost after commit");
+    const recovered = createRecording({
+      id: recordingId,
+      raw_text: "batch fallback transcript",
+    }, db);
+
+    expect(recovered.id).toBe(recordingId);
+    expect(recovered.raw_text).toBe("settled realtime text");
+    expect(listRecordings({}, db).filter((recording) => recording.id === recordingId)).toHaveLength(1);
+  });
+
   test("creates a recording with all fields", () => {
     const rec = createRecording(
       {
@@ -101,6 +120,26 @@ describe("createRecording", () => {
       .query("SELECT tag FROM recording_tags WHERE recording_id = ? ORDER BY tag")
       .all(rec.id) as { tag: string }[];
     expect(tags.map((t) => t.tag)).toEqual(["alpha", "beta"]);
+  });
+
+  test("rolls back the recording when normalized tag persistence fails", () => {
+    db.run(`
+      CREATE TRIGGER reject_recording_tag
+      BEFORE INSERT ON recording_tags
+      WHEN NEW.tag = 'reject-me'
+      BEGIN
+        SELECT RAISE(ABORT, 'synthetic tag insert failure');
+      END
+    `);
+
+    expect(() => createRecording({
+      id: "pipeline-atomic-save",
+      raw_text: "atomic",
+      tags: ["winner", "reject-me"],
+    }, db)).toThrow();
+    expect(getRecording("pipeline-atomic-save", db)).toBeNull();
+    expect(db.query("SELECT * FROM recording_tags WHERE recording_id = ?")
+      .all("pipeline-atomic-save")).toHaveLength(0);
   });
 
   test("handles empty tags array", () => {

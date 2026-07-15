@@ -17,6 +17,8 @@ describe("native app companion contract", () => {
     expect(build).toContain('HELPERS="$CONTENTS/Helpers"');
     expect(build).toContain("build_companion_cli.sh");
     expect(companionBuild).toContain("--compile");
+    expect(companionBuild).toContain('COMPILE_DIR="$(mktemp -d)"');
+    expect(companionBuild).toContain('trap cleanup EXIT');
     expect(runner).toContain("Contents/Helpers/recordings");
   });
 
@@ -51,6 +53,11 @@ describe("native app companion contract", () => {
       const transcribeHelp = run("transcribe", "--help").stdout;
       expect(transcribeHelp).toContain("--post-processing");
       expect(transcribeHelp).toContain("--transcriber-prompt");
+      expect(transcribeHelp).toContain("--language");
+      expect(transcribeHelp).toContain("--recording-id");
+      expect(transcribeHelp).toContain("--transcription-model");
+      expect(transcribeHelp).toContain("--enhance-triggers-json");
+      expect(transcribeHelp).toContain("--keyword-transforms-json");
       const saveTextHelp = run("save-text", "--help").stdout;
       for (const flag of [
         "--text-file",
@@ -61,6 +68,12 @@ describe("native app companion contract", () => {
         "--duration-ms",
         "--language",
         "--transcriber-prompt",
+        "--recording-id",
+        "--transcription-model",
+        "--transcriber-model",
+        "--enhancement-model",
+        "--enhance-triggers-json",
+        "--keyword-transforms-json",
       ]) {
         expect(saveTextHelp).toContain(flag);
       }
@@ -149,9 +162,9 @@ describe("native app companion contract", () => {
 
     expect(startBody).not.toContain("guard store.isReadyForRecording");
     expect(startBody).toContain("continuing capture");
-    expect(engine).toContain("let activeProjectId = projectStore?.settings.activeProjectId");
+    expect(engine).toContain("displayProjectId: projectStore?.settings.activeProjectId");
     expect(engine).toContain(
-      "let canonicalProjectId = projectStore?.activeCanonicalProjectIdForRecording",
+      "canonicalProjectId: projectStore?.activeCanonicalProjectIdForRecording",
     );
     expect(engine).toContain("activeProjectId: canonicalProjectId");
     expect(engine).toContain("activeProjectId: activeProjectId");

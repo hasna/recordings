@@ -94,6 +94,7 @@ struct RecordingStartGateTests {
     func explicitAccessibilityActionMayPromptAgain() {
         let gate = AccessibilityPromptGate()
         var prompts = 0
+        var trusted = false
 
         _ = gate.trustForProtectedOperation(
             isTrusted: { false },
@@ -102,15 +103,56 @@ struct RecordingStartGateTests {
                 return false
             }
         )
-        let explicit = gate.requestExplicitly {
-            prompts += 1
-            return false
-        }
+        let explicit = gate.requestExplicitly(
+            isTrusted: { trusted },
+            requestPrompt: {
+                prompts += 1
+                trusted = true
+                return false
+            }
+        )
 
-        #expect(!explicit.trusted)
+        #expect(explicit.trusted)
         #expect(explicit.didPrompt)
         #expect(prompts == 2)
         #expect(gate.promptRequestCount == 2)
+    }
+
+    @Test("permission helper rechecks Accessibility at completion after a delayed grant")
+    func permissionHelperRechecksDelayedAccessibilityGrant() {
+        let gate = AccessibilityPromptGate()
+        var checks = 0
+        let promptResult = AccessibilityTrustResult(trusted: false, didPrompt: true)
+
+        let completion = gate.waitForExplicitRequestCompletion(
+            promptResult,
+            attempts: 3,
+            waitBetweenAttempts: {},
+            isTrusted: {
+                checks += 1
+                return checks == 3
+            }
+        )
+
+        #expect(completion.trusted)
+        #expect(completion.didPrompt)
+        #expect(checks == 3)
+    }
+
+    @Test("permission helper remains denied when Accessibility is still untrusted")
+    func permissionHelperReportsStillDenied() {
+        let gate = AccessibilityPromptGate()
+        var waits = 0
+        let completion = gate.waitForExplicitRequestCompletion(
+            AccessibilityTrustResult(trusted: true, didPrompt: true),
+            attempts: 3,
+            waitBetweenAttempts: { waits += 1 },
+            isTrusted: { false }
+        )
+
+        #expect(!completion.trusted)
+        #expect(completion.didPrompt)
+        #expect(waits == 2)
     }
 
     @Test("trusted protected operation never invokes the prompt API")

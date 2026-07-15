@@ -49,15 +49,51 @@ public final class AccessibilityPromptGate: @unchecked Sendable {
     }
 
     public func requestExplicitly() -> AccessibilityTrustResult {
-        requestExplicitly { AccessibilityPromptGate.requestSystemPrompt() }
+        requestExplicitly(
+            isTrusted: { AXIsProcessTrusted() },
+            requestPrompt: { AccessibilityPromptGate.requestSystemPrompt() }
+        )
     }
 
     public func requestExplicitly(_ requestPrompt: () -> Bool) -> AccessibilityTrustResult {
+        requestExplicitly(isTrusted: { AXIsProcessTrusted() }, requestPrompt: requestPrompt)
+    }
+
+    public func requestExplicitly(
+        isTrusted: () -> Bool,
+        requestPrompt: () -> Bool
+    ) -> AccessibilityTrustResult {
         lock.withLock {
             automaticPromptAttempted = true
             promptRequests += 1
         }
-        return AccessibilityTrustResult(trusted: requestPrompt(), didPrompt: true)
+        _ = requestPrompt()
+        return AccessibilityTrustResult(trusted: isTrusted(), didPrompt: true)
+    }
+
+    public func recheckExplicitRequest(
+        _ promptResult: AccessibilityTrustResult,
+        isTrusted: () -> Bool
+    ) -> AccessibilityTrustResult {
+        AccessibilityTrustResult(trusted: isTrusted(), didPrompt: promptResult.didPrompt)
+    }
+
+    public func waitForExplicitRequestCompletion(
+        _ promptResult: AccessibilityTrustResult,
+        attempts: Int = 20,
+        waitBetweenAttempts: () -> Void = { Thread.sleep(forTimeInterval: 0.25) },
+        isTrusted: () -> Bool = { AXIsProcessTrusted() }
+    ) -> AccessibilityTrustResult {
+        let boundedAttempts = max(attempts, 1)
+        for attempt in 0..<boundedAttempts {
+            if isTrusted() {
+                return AccessibilityTrustResult(trusted: true, didPrompt: promptResult.didPrompt)
+            }
+            if attempt + 1 < boundedAttempts {
+                waitBetweenAttempts()
+            }
+        }
+        return AccessibilityTrustResult(trusted: false, didPrompt: promptResult.didPrompt)
     }
 
     private static func requestSystemPrompt() -> Bool {

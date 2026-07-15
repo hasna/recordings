@@ -77,6 +77,7 @@ export function buildV1OpenApiDocument(version = VERSION) {
           type: "object",
           required: ["raw_text"],
           properties: {
+            id: { type: "string" },
             raw_text: { type: "string" },
             audio_path: { type: "string" },
             processed_text: { type: "string" },

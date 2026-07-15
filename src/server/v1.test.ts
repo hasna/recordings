@@ -33,6 +33,9 @@ const runCalls: Array<{ sql: string; params: unknown[] }> = [];
 const queryCalls: Array<{ method: "get" | "all"; sql: string; params: unknown[] }> = [];
 
 const fakePg = {
+  async transaction<T>(operation: (transaction: typeof fakePg) => Promise<T>) {
+    return operation(fakePg);
+  },
   async run(sql: string, ...params: unknown[]) {
     runCalls.push({ sql, params });
     return { changes: 1 };

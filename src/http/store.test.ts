@@ -106,6 +106,38 @@ describe("cloud HTTP CRUD mapping + auth", () => {
     expect(calls[0].headers["Idempotency-Key"]).toBeTruthy();
   });
 
+  test("create retries a lost committed response with one caller-owned identity", async () => {
+    const calls: Array<Record<string, string>> = [];
+    const committedRows = new Set<string>();
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      calls.push(headers);
+      const body = JSON.parse(String(init?.body)) as { id: string; raw_text: string };
+      committedRows.add(body.id);
+      if (calls.length === 1) throw new Error("response lost after server commit");
+      return Response.json({ recording: body }, { status: 201 });
+    };
+    const client = createStorageClient(APP, createHttpTransport({
+      name: APP,
+      baseUrl: "https://recordings.hasna.xyz/v1",
+      apiKey: "test-key",
+      fetchImpl,
+      sleepImpl: async () => {},
+    }));
+
+    const result = await client.create<{ recording: { id: string } }>(
+      "recordings",
+      { id: "pipeline-a", raw_text: "settled realtime text" },
+      "pipeline-a",
+    );
+
+    expect(result.recording.id).toBe("pipeline-a");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]["Idempotency-Key"]).toBe("pipeline-a");
+    expect(calls[1]["Idempotency-Key"]).toBe("pipeline-a");
+    expect(committedRows.size).toBe(1);
+  });
+
   test("list maps recordings envelope to items", async () => {
     const { fetchImpl, calls } = mockFetch(() => ({ status: 200, body: { recordings: [{ id: "1" }, { id: "2" }], count: 2 } }));
     const client = createStorageClient(APP, createHttpTransport({ name: APP, baseUrl: "https://recordings.hasna.xyz/v1", apiKey: "k", fetchImpl }));

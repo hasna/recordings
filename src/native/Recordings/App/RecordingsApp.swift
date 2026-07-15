@@ -314,8 +314,11 @@ struct RecordingsApp: App {
                 work.leave()
             }
         }
-        work.notify(queue: .main) {
-            let outcome = resultBox.outcome(accessibilityTrusted: accessibility.trusted)
+        work.notify(queue: .global(qos: .userInitiated)) {
+            let completedAccessibility = AccessibilityPromptGate.processShared.waitForExplicitRequestCompletion(
+                accessibility
+            )
+            let outcome = resultBox.outcome(accessibilityTrusted: completedAccessibility.trusted)
             NativeAppLog.write("request-permissions helper completed success=\(outcome.succeeded)")
             exit(outcome.succeeded ? EXIT_SUCCESS : EXIT_FAILURE)
         }
