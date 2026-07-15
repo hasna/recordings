@@ -34,6 +34,35 @@ const queryCalls: Array<{ method: "get" | "all"; sql: string; params: unknown[] 
 const recordingRows: Array<Record<string, unknown>> = [];
 const idempotencyRows: Array<Record<string, unknown>> = [];
 
+const successfulAuthentication = async (headers: Headers) => {
+  const authorization = headers.get("Authorization") ?? "Bearer test";
+  const kid = authorization.replace(/^Bearer\s+/i, "") || "test";
+  return {
+    ok: true as const,
+    status: 200,
+    principal: {
+      kid,
+      app: "recordings",
+      scopes: ["recordings:write"],
+      agent: null,
+      claims: {
+        v: 1 as const,
+        kid,
+        app: "recordings",
+        scopes: ["recordings:write"],
+        iat: 0,
+        exp: null,
+      },
+    },
+  };
+};
+let authenticateImpl: (headers: Headers) => Promise<unknown> = successfulAuthentication;
+let ensureCloudSchemaImpl: () => Promise<void> = async () => {};
+let getCloudVerifierImpl = () => ({
+  authenticate: (headers: Headers) => authenticateImpl(headers),
+});
+let getCloudPgImpl: () => typeof fakePg = () => fakePg;
+
 const fakePg = {
   async transaction<T>(operation: (transaction: typeof fakePg) => Promise<T>) {
     return operation(fakePg);
@@ -119,32 +148,9 @@ const fakePg = {
 };
 
 mock.module("./cloud.js", () => ({
-  getCloudPg: () => fakePg,
-  getCloudVerifier: () => ({
-    authenticate: async (headers: Headers) => {
-      const authorization = headers.get("Authorization") ?? "Bearer test";
-      const kid = authorization.replace(/^Bearer\s+/i, "") || "test";
-      return {
-        ok: true,
-        status: 200,
-        principal: {
-          kid,
-          app: "recordings",
-          scopes: ["recordings:write"],
-          agent: null,
-          claims: {
-            v: 1,
-            kid,
-            app: "recordings",
-            scopes: ["recordings:write"],
-            iat: 0,
-            exp: null,
-          },
-        },
-      };
-    },
-  }),
-  ensureCloudSchema: async () => {},
+  getCloudPg: () => getCloudPgImpl(),
+  getCloudVerifier: () => getCloudVerifierImpl(),
+  ensureCloudSchema: () => ensureCloudSchemaImpl(),
 }));
 
 const { handleV1Request } = await import("./v1.js");
@@ -181,6 +187,122 @@ describe("v1 handler: previously-failing cloud routes", () => {
     queryCalls.length = 0;
     recordingRows.length = 0;
     idempotencyRows.length = 0;
+    authenticateImpl = successfulAuthentication;
+    ensureCloudSchemaImpl = async () => {};
+    getCloudVerifierImpl = () => ({
+      authenticate: (headers: Headers) => authenticateImpl(headers),
+    });
+    getCloudPgImpl = () => fakePg;
+  });
+
+  test("verifier construction failures return a fixed 503 without leaking configuration", async () => {
+    const hostile =
+      'signing configuration for role "api_verifier" references postgres://auth-db.internal/keys?credential=PRIVATE_MARKER';
+    getCloudVerifierImpl = () => {
+      throw new Error(hostile);
+    };
+    const logs: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+
+    try {
+      const req = get("/v1/recordings");
+      const res = await handleV1Request(req, new URL(req.url));
+      expect(res!.status).toBe(503);
+      expect(await res!.json()).toEqual({ error: "authentication service unavailable" });
+      expect(logs.join("\n")).not.toContain(hostile);
+      expect(logs.join("\n")).not.toMatch(/api_verifier|PRIVATE_MARKER|auth-db\.internal/i);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("authenticated schema failures return a fixed 503 without leaking storage details", async () => {
+    const hostile =
+      'relation "recording_idempotency" does not exist for role "svc_writer" at postgres://db.internal/recordings?credential=PRIVATE_MARKER';
+    ensureCloudSchemaImpl = async () => {
+      throw new Error(hostile);
+    };
+    const logs: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+
+    try {
+      const req = get("/v1/recordings");
+      const res = await handleV1Request(req, new URL(req.url));
+      expect(res!.status).toBe(503);
+      expect(await res!.json()).toEqual({ error: "storage unavailable" });
+      expect(logs.join("\n")).not.toContain(hostile);
+      expect(logs.join("\n")).not.toMatch(/recording_idempotency|svc_writer|PRIVATE_MARKER|db\.internal/i);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("storage adapter failures after schema validation return a fixed non-leaking 503", async () => {
+    const hostile =
+      'connection rejected for role "runtime_writer" at postgres://db.internal/recordings?credential=PRIVATE_MARKER';
+    getCloudPgImpl = () => {
+      throw new Error(hostile);
+    };
+    const logs: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+
+    try {
+      const req = get("/v1/recordings");
+      const res = await handleV1Request(req, new URL(req.url));
+      expect(res!.status).toBe(503);
+      expect(await res!.json()).toEqual({ error: "storage unavailable" });
+      expect(logs.join("\n")).not.toContain(hostile);
+      expect(logs.join("\n")).not.toMatch(/runtime_writer|PRIVATE_MARKER|db\.internal/i);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("verifier store failures return a fixed 503 without rejecting or leaking credentials", async () => {
+    const hostile =
+      'credential lookup failed for role "revocation_reader" at postgres://auth-db.internal/keys?credential=PRIVATE_MARKER';
+    authenticateImpl = async () => {
+      throw new Error(hostile);
+    };
+    const logs: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+
+    try {
+      const req = get("/v1/recordings");
+      const res = await handleV1Request(req, new URL(req.url));
+      expect(res!.status).toBe(503);
+      expect(await res!.json()).toEqual({ error: "authentication service unavailable" });
+      expect(logs.join("\n")).not.toContain(hostile);
+      expect(logs.join("\n")).not.toMatch(/revocation_reader|PRIVATE_MARKER|auth-db\.internal/i);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("ordinary invalid credentials preserve the verifier's 401 response", async () => {
+    authenticateImpl = async () => ({
+      ok: false,
+      status: 401,
+      message: "invalid API key",
+      reason: "invalid",
+    });
+
+    const req = get("/v1/recordings");
+    const res = await handleV1Request(req, new URL(req.url));
+    expect(res!.status).toBe(401);
+    expect(await res!.json()).toEqual({ error: "invalid API key", reason: "invalid" });
   });
 
   test("GET /v1/recordings propagates exploded tags/date filters and returns filtered total", async () => {

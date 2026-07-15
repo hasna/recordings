@@ -45,24 +45,25 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
   const requiredScopes = [isWrite ? "recordings:write" : "recordings:read"];
 
   // ── Auth (contracts API-key verifier) ──
-  let verifier;
+  let decision;
   try {
-    verifier = getCloudVerifier();
-  } catch (e) {
-    return error(503, (e as Error).message);
+    const verifier = getCloudVerifier();
+    decision = await verifier.authenticate(req.headers, { method, path, requiredScopes });
+  } catch {
+    return error(503, "authentication service unavailable");
   }
-  const decision = await verifier.authenticate(req.headers, { method, path, requiredScopes });
   if (!decision.ok) {
     return error(decision.status, decision.message, { reason: decision.reason });
   }
 
   // Schema is idempotently ensured on the first authenticated request.
+  let pg;
   try {
     await ensureCloudSchema();
-  } catch (e) {
-    return error(503, `storage unavailable: ${(e as Error).message}`);
+    pg = getCloudPg();
+  } catch {
+    return error(503, "storage unavailable");
   }
-  const pg = getCloudPg();
 
   const segments = path.split("/").filter(Boolean); // ["v1", resource, id?, action?]
   const resource = segments[1];
