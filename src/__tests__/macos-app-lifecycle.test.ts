@@ -424,6 +424,54 @@ exit 0
     return { exitCode, stdout, stderr };
   }
 
+  async function runDebugBuild(fixture: ReturnType<typeof createBuildFixture>) {
+    const process = Bun.spawn(["bash", join(fixture.native, "build.sh"), "debug"], {
+      cwd: fixture.native,
+      env: {
+        ...Bun.env,
+        PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
+        MARKER_DIRECTORY: fixture.markers,
+        PLIST_BUDDY: join(fixture.bin, "plistbuddy"),
+        RECORDINGS_CODESIGN_IDENTITY: "",
+        RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
+        RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
+  }
+
+  test("debug builds ad-hoc locally without release credentials", async () => {
+    const fixture = createBuildFixture();
+    const result = await runDebugBuild(fixture);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("ad-hoc signed and non-distributable");
+    expect(result.stdout).toContain("Built non-distributable debug app");
+    const codesignLog = readFileSync(join(fixture.markers, "codesign.log"), "utf8");
+    expect(codesignLog).toContain("--force --sign -");
+    expect(codesignLog).not.toContain("--timestamp");
+    expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app"))).toBeTrue();
+    expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app", "Contents", "Helpers", "recordings"))).toBeTrue();
+    expect(existsSync(join(fixture.native, ".build", "debug", "Recordings-0.2.11-macos.zip"))).toBeFalse();
+  });
+
+  test("release builds reject missing signer and notary configuration", async () => {
+    const fixture = createBuildFixture();
+    const missingIdentity = await runBuild(fixture, { RECORDINGS_CODESIGN_IDENTITY: "" });
+    expect(missingIdentity.exitCode).not.toBe(0);
+    expect(missingIdentity.stderr).toContain("Release builds require RECORDINGS_CODESIGN_IDENTITY");
+
+    const missingNotary = await runBuild(fixture, { RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "" });
+    expect(missingNotary.exitCode).not.toBe(0);
+    expect(missingNotary.stderr).toContain("Release builds require RECORDINGS_NOTARY_KEYCHAIN_PROFILE");
+  });
+
   test("requires a pinned Team ID", async () => {
     const fixture = createBuildFixture();
     const result = await runBuild(fixture, { RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "" });

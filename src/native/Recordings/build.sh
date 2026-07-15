@@ -22,17 +22,23 @@ EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
 NOTARY_PROFILE="${RECORDINGS_NOTARY_KEYCHAIN_PROFILE:-}"
 PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 
-if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
-    echo "Builds require RECORDINGS_CODESIGN_IDENTITY for a Developer ID Application identity." >&2
-    exit 1
-fi
-if [ -z "$EXPECTED_TEAM_ID" ]; then
-    echo "Builds require RECORDINGS_EXPECTED_TEAM_IDENTIFIER to pin the Developer ID team." >&2
-    exit 1
-fi
-if [ -z "$NOTARY_PROFILE" ]; then
-    echo "Builds require RECORDINGS_NOTARY_KEYCHAIN_PROFILE for notarization." >&2
-    exit 1
+if [ "$MODE" = "release" ]; then
+    if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
+        echo "Release builds require RECORDINGS_CODESIGN_IDENTITY for a Developer ID Application identity." >&2
+        exit 1
+    fi
+    if [ -z "$EXPECTED_TEAM_ID" ]; then
+        echo "Release builds require RECORDINGS_EXPECTED_TEAM_IDENTIFIER to pin the Developer ID team." >&2
+        exit 1
+    fi
+    if [ -z "$NOTARY_PROFILE" ]; then
+        echo "Release builds require RECORDINGS_NOTARY_KEYCHAIN_PROFILE for notarization." >&2
+        exit 1
+    fi
+else
+    CODESIGN_IDENTITY="-"
+    EXPECTED_TEAM_ID="ADHOC"
+    echo "WARNING: debug builds are ad-hoc signed and non-distributable; never install or upload this output." >&2
 fi
 
 echo "Building Recordings.app ($MODE)..."
@@ -57,12 +63,10 @@ for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.
     ditto "$bundle" "$RESOURCES/$(basename "$bundle")"
 done
 
-SIGN_ARGUMENTS=(
-    --force
-    --sign "$CODESIGN_IDENTITY"
-    --options runtime
-    --timestamp
-)
+SIGN_ARGUMENTS=(--force --sign "$CODESIGN_IDENTITY")
+if [ "$MODE" = "release" ]; then
+    SIGN_ARGUMENTS+=(--options runtime --timestamp)
+fi
 codesign "${SIGN_ARGUMENTS[@]}" "$HELPERS/recordings"
 bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" provenance \
     --app "$APP_DIR" \
@@ -104,16 +108,17 @@ verify_signed_code() {
     esac
 }
 
-verify_signed_code "$HELPERS/recordings" "Companion CLI"
-verify_signed_code "$APP_DIR" "Recordings.app"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 VERSION="$("$PLIST_BUDDY" -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
-if [ "$MODE" = "release" ]; then
-    ARTIFACT_BASENAME="Recordings-${VERSION}-macos"
-else
-    ARTIFACT_BASENAME="Recordings-${VERSION}-macos-debug"
+if [ "$MODE" = "debug" ]; then
+    echo "Built non-distributable debug app: $APP_DIR"
+    exit 0
 fi
+
+verify_signed_code "$HELPERS/recordings" "Companion CLI"
+verify_signed_code "$APP_DIR" "Recordings.app"
+ARTIFACT_BASENAME="Recordings-${VERSION}-macos"
 NOTARY_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}-notarization.zip"
 FINAL_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}.zip"
 FINAL_MANIFEST="$BUILD_DIR/${ARTIFACT_BASENAME}.manifest.json"

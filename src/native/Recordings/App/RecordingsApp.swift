@@ -89,11 +89,18 @@ struct RecordingsApp: App {
     }
 
     @SceneBuilder var body: some Scene {
-        if state.declaresMenuBar, let store = state.store {
+        if state.declaresMenuBar {
             MenuBarExtra {
-                MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
+                if let store = state.store {
+                    MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
+                }
             } label: {
-                MenuBarStatusLabel(store: store)
+                if let store = state.store {
+                    MenuBarStatusLabel(store: store)
+                } else {
+                    Image(systemName: "mic.fill")
+                        .accessibilityLabel("Recordings")
+                }
             }
             .menuBarExtraStyle(.window)
         }
