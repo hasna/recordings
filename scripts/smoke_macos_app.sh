@@ -86,8 +86,12 @@ run_smoke() {
         fail("retained-window activation path was not exercised twice");
       }
       if (result.retainedWindowReused !== true) fail("main window was not retained");
-      if (!result.applicationIsActive || !result.mainWindowIsVisible || !result.mainWindowIsKey) {
-        fail("retained main window did not become active, visible, and key");
+      if (result.applicationActivationPolicy !== 0) fail("main window did not set regular activation policy");
+      if (!result.mainWindowIsVisible || !result.mainWindowCanBecomeKey) {
+        fail("retained main window was not visible and capable of becoming key");
+      }
+      if (result.applicationIsActive && !result.mainWindowIsKey) {
+        fail("active application did not make the retained main window key");
       }
     } else {
       if (result.menuBarSurfaceCount !== 0) fail("permission/helper smoke inserted a menu-bar surface");

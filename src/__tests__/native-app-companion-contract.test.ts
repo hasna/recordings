@@ -143,5 +143,10 @@ describe("native app companion contract", () => {
       .toBeLessThan(showMainWindow.indexOf("if let mainWindow"));
     expect(showMainWindow.indexOf("NSApplication.shared.setActivationPolicy(.regular)"))
       .toBeLessThan(showMainWindow.indexOf("NSApplication.shared.activate()"));
+
+    const smoke = readFileSync("scripts/smoke_macos_app.sh", "utf8");
+    expect(smoke).toContain("applicationActivationPolicy !== 0");
+    expect(smoke).toContain("mainWindowCanBecomeKey");
+    expect(smoke).toContain("result.applicationIsActive && !result.mainWindowIsKey");
   });
 });

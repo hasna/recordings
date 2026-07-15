@@ -179,8 +179,10 @@ final class RecordingsAppState: ObservableObject {
             windowCreationCount: windowCreationCount,
             windowActivationCount: windowActivationCount,
             retainedWindowReused: retainedWindowReused,
+            applicationActivationPolicy: NSApplication.shared.activationPolicy().rawValue,
             applicationIsActive: NSApplication.shared.isActive,
             mainWindowIsVisible: mainWindow?.isVisible ?? false,
+            mainWindowCanBecomeKey: mainWindow?.canBecomeKey ?? false,
             mainWindowIsKey: mainWindow?.isKeyWindow ?? false
         )
         do {

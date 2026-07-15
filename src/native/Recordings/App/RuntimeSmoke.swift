@@ -82,8 +82,10 @@ struct RuntimeSmokeResult: Codable {
     let windowCreationCount: Int
     let windowActivationCount: Int
     let retainedWindowReused: Bool
+    let applicationActivationPolicy: Int
     let applicationIsActive: Bool
     let mainWindowIsVisible: Bool
+    let mainWindowCanBecomeKey: Bool
     let mainWindowIsKey: Bool
 }
 
