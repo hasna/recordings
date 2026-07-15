@@ -223,6 +223,27 @@ struct RecordingStartGateTests {
             isTranscribing: false,
             isAwaitingMicrophonePermission: true
         ) == false)
+        #expect(RecordingEngine.canBeginRecording(
+            isRecording: false,
+            isTranscribing: false,
+            isDeliveryPending: true
+        ) == false)
+    }
+
+    @Test("recording status is derived from the frozen capture mode")
+    func statusUsesCapturedMode() {
+        #expect(RecordingEngine.recordingStatus(
+            capturedMode: .command,
+            trigger: .keyboardShortcut
+        ) == "Speak your instruction...")
+        #expect(RecordingEngine.recordingStatus(
+            capturedMode: .dictation,
+            trigger: .keyboardShortcut
+        ) == "Recording — release to stop")
+        #expect(RecordingEngine.recordingStatus(
+            capturedMode: .pushToTalk,
+            trigger: .manual
+        ) == "Recording — click Stop when finished")
     }
 
     @Test("microphone permission start gate admits one current continuation")

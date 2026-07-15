@@ -91,7 +91,9 @@ done
 for flag in --text-file --source --model-used --post-processing --audio-path --duration-ms --language --transcriber-prompt --recording-id --transcription-model --transcriber-model --enhancement-model --enhance-triggers-json --keyword-transforms-json; do
   require_flag "save-text" "$flag" save-text
 done
-require_flag "rewrite" "--instruction" rewrite
+for flag in --instruction --post-processing --language --prompt --transcriber-prompt --transcription-model --transcriber-model --enhancement-model --enhance-triggers-json --keyword-transforms-json; do
+  require_flag "rewrite" "$flag" rewrite
+done
 
 chmod 0755 "$OUTPUT"
 echo "Built Recordings companion CLI ${ACTUAL_VERSION}: ${OUTPUT}"

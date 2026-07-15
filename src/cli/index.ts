@@ -324,8 +324,21 @@ program
   .command("rewrite <text>")
   .description("Rewrite provided text using an instruction")
   .requiredOption("-i, --instruction <instruction>", "Rewrite instruction")
+  .option("--prompt <prompt>", "Frozen transcription vocabulary/context prompt")
+  .option("--transcriber-prompt <prompt>", "Frozen post-transcription instructions")
+  .option("--system-prompt <prompt>", "Alias for --transcriber-prompt")
+  .option("--post-processing <mode>", "Frozen post-processing mode")
+  .option("--language <lang>", "Frozen transcription language")
+  .option("--transcription-model <model>", "Frozen transcription model")
+  .option("--transcriber-model <model>", "Frozen rewrite model")
+  .option("--enhancement-model <model>", "Frozen enhancement fallback model")
+  .option("--enhance-triggers-json <json>", "Frozen JSON string array of enhancement triggers")
+  .option("--keyword-transforms-json <json>", "Frozen JSON string map of keyword transforms")
   .action(async (text, opts) => {
     const config = loadConfig();
+    if (opts.language !== undefined) config.language = opts.language;
+    if (opts.prompt !== undefined) config.transcription_prompt = opts.prompt;
+    applyEnhancementOptions(config, opts);
     const parentOpts = program.opts();
     const instruction = `Instruction: ${opts.instruction}\n\nText:\n${text}`;
 

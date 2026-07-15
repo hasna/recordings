@@ -699,6 +699,68 @@ struct RealtimeTranscriptionTests {
         #expect(!recoveryArgs.contains("en"))
     }
 
+    @Test("Command rewrite retains recording A configuration after switching to project B")
+    func commandRewriteUsesCapturedConfiguration() {
+        let recordingA = RecordingProcessingConfiguration(
+            transcriptionPrompt: "Project A vocabulary",
+            transcriberPrompt: "Project A rewrite policy",
+            postProcessingMode: PostProcessingMode.always.rawValue,
+            transcriptionLanguage: "es",
+            transcriptionModel: "whisper-a",
+            transcriberModel: "gpt-command-a",
+            enhancementModel: "gpt-fallback-a",
+            enhanceTriggersJSON: #"["rewrite a"]"#,
+            keywordTransformsJSON: #"{"code with":"Codewith A"}"#
+        )
+        let recordingB = RecordingProcessingConfiguration(
+            transcriptionPrompt: "Project B vocabulary",
+            transcriberPrompt: "Project B rewrite policy",
+            postProcessingMode: PostProcessingMode.off.rawValue,
+            transcriptionLanguage: "en",
+            transcriptionModel: "whisper-b",
+            transcriberModel: "gpt-command-b",
+            enhancementModel: "gpt-fallback-b",
+            enhanceTriggersJSON: #"["rewrite b"]"#,
+            keywordTransformsJSON: #"{"open ai":"OpenAI B"}"#
+        )
+        var mutableCurrentConfiguration = recordingA
+        let capturedRequest = mutableCurrentConfiguration
+        mutableCurrentConfiguration = recordingB
+
+        let args = RecordingEngine.rewriteCLIArgs(
+            selectedText: "selected A",
+            instruction: "instruction A",
+            activeProjectId: "project-a",
+            processingConfiguration: capturedRequest
+        )
+
+        #expect(capturedRequest != mutableCurrentConfiguration)
+        for expected in [
+            "selected A", "instruction A", "project-a", "Project A vocabulary",
+            "Project A rewrite policy", PostProcessingMode.always.rawValue, "es", "whisper-a",
+            "gpt-command-a", "gpt-fallback-a", #"["rewrite a"]"#,
+            #"{"code with":"Codewith A"}"#,
+        ] {
+            #expect(args.contains(expected))
+        }
+        for forbidden in [
+            "Project B vocabulary", "Project B rewrite policy", PostProcessingMode.off.rawValue,
+            "whisper-b", "gpt-command-b", "gpt-fallback-b", #"["rewrite b"]"#,
+            #"{"open ai":"OpenAI B"}"#,
+        ] {
+            #expect(!args.contains(forbidden))
+        }
+
+        let optionLikeTextArgs = RecordingEngine.rewriteCLIArgs(
+            selectedText: "--literal-selection",
+            instruction: "instruction A",
+            activeProjectId: "project-a",
+            processingConfiguration: capturedRequest
+        )
+        #expect(Array(optionLikeTextArgs.suffix(2)) == ["--", "--literal-selection"])
+        #expect(optionLikeTextArgs.firstIndex(of: "--instruction")! < optionLikeTextArgs.firstIndex(of: "--")!)
+    }
+
     @Test("Partial realtime text falls back for longer recordings")
     func partialRealtimeFallback() {
         #expect(RecordingEngine.shouldFallbackFromPartialRealtime(text: "Hi", pcmByteCount: 96_000) == true)

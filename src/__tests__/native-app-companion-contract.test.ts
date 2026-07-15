@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -113,6 +113,114 @@ describe("native app companion contract", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  test("compiled rewrite keeps frozen A config and option-like text over ambient B config", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "recordings-rewrite-contract-"));
+    const executable = join(directory, "recordings");
+    const requestPath = join(directory, "request.json");
+    const home = join(directory, "home");
+    try {
+      const build = spawnSync("bash", ["scripts/build_companion_cli.sh", executable], {
+        encoding: "utf8",
+      });
+      expect(build.status, build.stderr).toBe(0);
+
+      const configDirectory = join(home, ".hasna", "recordings");
+      mkdirSync(configDirectory, { recursive: true });
+      writeFileSync(join(configDirectory, "config.json"), JSON.stringify({
+        openai_api_key: "ambient-b-key",
+        transcription_prompt: "Project B vocabulary",
+        transcriber_prompt: "Project B rewrite policy",
+        post_processing_mode: "off",
+        language: "en",
+        transcription_model: "whisper-b",
+        transcriber_model: "gpt-command-b",
+        enhancement_model: "gpt-fallback-b",
+        enhance_triggers: ["rewrite b"],
+        keyword_transforms: { "open ai": "OpenAI B" },
+      }));
+
+      const server = Bun.spawn([
+        process.execPath,
+        "-e",
+        `
+          const requestPath = process.argv[1];
+          let watchdog;
+          const server = Bun.serve({
+            port: 0,
+            async fetch(request) {
+              await Bun.write(requestPath, await request.text());
+              clearTimeout(watchdog);
+              setTimeout(() => server.stop(true), 10);
+              return Response.json({ choices: [{ message: { content: "Frozen A result" } }] });
+            },
+          });
+          console.log(server.port);
+          watchdog = setTimeout(() => server.stop(true), 10000);
+        `,
+        requestPath,
+      ], { stdout: "pipe", stderr: "pipe" });
+      const portReader = server.stdout.getReader();
+      const portChunk = await portReader.read();
+      const port = Number(new TextDecoder().decode(portChunk.value).trim());
+      expect(port).toBeGreaterThan(0);
+
+      const rewrite = Bun.spawn([
+        executable,
+        "rewrite",
+        "--instruction", "instruction A",
+        "--post-processing", "always",
+        "--language", "es",
+        "--prompt", "Project A vocabulary",
+        "--transcriber-prompt", "Project A rewrite policy",
+        "--transcription-model", "whisper-a",
+        "--transcriber-model", "gpt-command-a",
+        "--enhancement-model", "gpt-fallback-a",
+        "--enhance-triggers-json", '["rewrite a"]',
+        "--keyword-transforms-json", '{"code with":"Codewith A"}',
+        "--",
+        "--help",
+      ], {
+        cwd: directory,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          HOME: home,
+          PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+          OPENAI_BASE_URL: `http://127.0.0.1:${port}`,
+        },
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        rewrite.exited,
+        new Response(rewrite.stdout).text(),
+        new Response(rewrite.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(0);
+      expect(stdout.trim()).toBe("Frozen A result");
+      await server.exited;
+
+      const request = JSON.parse(readFileSync(requestPath, "utf8"));
+      expect(request.model).toBe("gpt-command-a");
+      const messages = JSON.stringify(request.messages);
+      for (const expected of [
+        "--help",
+        "instruction A",
+        "Project A rewrite policy",
+        "Codewith A",
+      ]) {
+        expect(messages).toContain(expected);
+      }
+      for (const forbidden of [
+        "Project B rewrite policy",
+        "gpt-command-b",
+        "OpenAI B",
+      ]) {
+        expect(messages).not.toContain(forbidden);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   test("normal app launch declares a menu bar surface", () => {
     const app = readFileSync("src/native/Recordings/App/RecordingsApp.swift", "utf8");
