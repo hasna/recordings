@@ -65,6 +65,18 @@ struct RealtimeFastPathSaveResult: Sendable {
     let error: String?
 }
 
+enum FallbackCompletionAction: Equatable, Sendable {
+    case deliver(String)
+    case fail(String)
+    case backgroundRecovered
+    case backgroundFailed(String)
+}
+
+struct RecordingProcessingConfiguration: Equatable, Sendable {
+    let transcriberPrompt: String
+    let postProcessingMode: String
+}
+
 private struct RecordingPipelineTrace: Sendable {
     let id = UUID().uuidString
     let startedUptimeMilliseconds = UInt64(ProcessInfo.processInfo.systemUptime * 1_000)
@@ -218,6 +230,7 @@ public final class RecordingEngine: ObservableObject {
     private var recordedPCM = Data()
     private var activeAudioPath: String?
     private let accessibilityPromptGate = AccessibilityPromptGate.processShared
+    private var recordingGeneration: UInt64 = 0
 
     private nonisolated static let realtimePeriodicCommitInterval: TimeInterval = 0.9
     private nonisolated static let realtimeFinishTimeoutMilliseconds: UInt64 = 700
@@ -416,6 +429,7 @@ public final class RecordingEngine: ObservableObject {
             return
         }
         log("startRecording trigger=\(trigger) microphoneStatus=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) accessibility=\(AXIsProcessTrusted())")
+        recordingGeneration &+= 1
         activeTrigger = trigger
         keyboardShortcutIsDown = trigger == .keyboardShortcut
 
@@ -665,7 +679,12 @@ public final class RecordingEngine: ObservableObject {
         let audioPath = activeAudioPath
         let pcmStreamPipe = pcmStreamPipe
         let client = realtimeClient
-        let postProcessingMode = projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+        let pipelineGeneration = recordingGeneration
+        let processingConfiguration = RecordingProcessingConfiguration(
+            transcriberPrompt: projectStore?.effectiveSystemPrompt ?? "",
+            postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+        )
+        let postProcessingMode = processingConfiguration.postProcessingMode
         statusMessage = Self.shouldLabelRewriting(
             recordingMode: curMode,
             postProcessingMode: postProcessingMode
@@ -718,7 +737,7 @@ public final class RecordingEngine: ObservableObject {
             if let realtimeFastPathText {
                 let pcmData = self.recordedPCM
                 let durationMs = Int(self.recordingDuration * 1_000)
-                let transcriberPrompt = self.projectStore?.effectiveSystemPrompt ?? ""
+                let transcriberPrompt = processingConfiguration.transcriberPrompt
                 let language = OpenAIAPIKeyStore.apiLanguageHint(for: self.transcriptionLanguage)
                 let homePath = self.home
                 self.log(pipelineTrace.message(
@@ -763,11 +782,21 @@ public final class RecordingEngine: ObservableObject {
                             }
                         },
                         persistenceCompleted: { result in
-                            if let error = result.error {
-                                self.log(pipelineTrace.message(
-                                    stage: "async_persistence_failed",
-                                    detail: "error=\(NativeErrorSanitizer.sanitize(error))"
-                                ))
+                            if result.text == nil {
+                                self.recoverAsyncPersistenceFailure(
+                                    error: result.error ?? "Realtime save returned no recording",
+                                    audioPath: audioPath,
+                                    pcmData: pcmData,
+                                    curMode: curMode,
+                                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                                    targetAppPid: targetAppPid,
+                                    canonicalProjectId: canonicalProjectId,
+                                    displayProjectId: activeProjectId,
+                                    activeProjectName: activeProjectName,
+                                    processingConfiguration: processingConfiguration,
+                                    pipelineTrace: pipelineTrace,
+                                    pipelineGeneration: pipelineGeneration
+                                )
                             } else {
                                 self.log(pipelineTrace.message(stage: "async_persistence_complete"))
                             }
@@ -790,6 +819,7 @@ public final class RecordingEngine: ObservableObject {
                             canonicalProjectId: canonicalProjectId,
                             displayProjectId: activeProjectId,
                             activeProjectName: activeProjectName,
+                            processingConfiguration: processingConfiguration,
                             realtimeText: safeRealtimeFallbackText,
                             pipelineTrace: pipelineTrace
                         )
@@ -824,6 +854,7 @@ public final class RecordingEngine: ObservableObject {
                     canonicalProjectId: canonicalProjectId,
                     displayProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
+                    processingConfiguration: processingConfiguration,
                     realtimeText: safeRealtimeFallbackText,
                     pipelineTrace: pipelineTrace
                 )
@@ -1337,6 +1368,128 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Fallback Transcription
 
+    private func recoverAsyncPersistenceFailure(
+        error: String,
+        audioPath: String?,
+        pcmData: Data,
+        curMode: RecordingMode,
+        targetAppBundleIdentifier: String?,
+        targetAppPid: pid_t?,
+        canonicalProjectId: String?,
+        displayProjectId: String?,
+        activeProjectName: String?,
+        processingConfiguration: RecordingProcessingConfiguration,
+        pipelineTrace: RecordingPipelineTrace,
+        pipelineGeneration: UInt64
+    ) {
+        let sanitizedError = NativeErrorSanitizer.sanitize(error)
+        log(pipelineTrace.message(
+            stage: "async_persistence_failed",
+            detail: "error=\(sanitizedError)"
+        ))
+        updateBackgroundRecoveryStatus(
+            "Pasted; recovering recording...",
+            pipelineGeneration: pipelineGeneration
+        )
+
+        Task.detached {
+            let recoveryAudioPath = Self.ensureBackgroundRecoveryAudio(
+                audioPath: audioPath,
+                pcmData: pcmData
+            )
+
+            await MainActor.run {
+                guard let recoveryAudioPath else {
+                    self.updateBackgroundRecoveryStatus(
+                        "Pasted, but recording could not be saved: \(sanitizedError)",
+                        pipelineGeneration: pipelineGeneration
+                    )
+                    return
+                }
+                self.fallbackTranscribe(
+                    audioPath: recoveryAudioPath,
+                    curMode: curMode,
+                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
+                    canonicalProjectId: canonicalProjectId,
+                    displayProjectId: displayProjectId,
+                    activeProjectName: activeProjectName,
+                    processingConfiguration: processingConfiguration,
+                    realtimeText: nil,
+                    pipelineTrace: pipelineTrace,
+                    deliverResult: false,
+                    backgroundRecoveryGeneration: pipelineGeneration
+                )
+            }
+        }
+    }
+
+    nonisolated static func ensureBackgroundRecoveryAudio(
+        audioPath: String?,
+        pcmData: Data
+    ) -> String? {
+        guard let audioPath else { return nil }
+        if FileManager.default.fileExists(atPath: audioPath) {
+            return audioPath
+        }
+        guard !pcmData.isEmpty else { return nil }
+        do {
+            try writeWAV(
+                pcmData: pcmData,
+                sampleRate: 24_000,
+                channelCount: 1,
+                bitsPerSample: 16,
+                to: URL(fileURLWithPath: audioPath)
+            )
+            return audioPath
+        } catch {
+            return nil
+        }
+    }
+
+    nonisolated static func shouldApplyBackgroundRecoveryStatus(
+        recoveryGeneration: UInt64,
+        currentGeneration: UInt64,
+        isRecording: Bool,
+        isTranscribing: Bool
+    ) -> Bool {
+        recoveryGeneration == currentGeneration && !isRecording && !isTranscribing
+    }
+
+    private func updateBackgroundRecoveryStatus(
+        _ message: String,
+        pipelineGeneration: UInt64
+    ) {
+        guard Self.shouldApplyBackgroundRecoveryStatus(
+            recoveryGeneration: pipelineGeneration,
+            currentGeneration: recordingGeneration,
+            isRecording: isRecording,
+            isTranscribing: isTranscribing
+        ) else {
+            log("background recovery status suppressed for superseded pipeline generation=\(pipelineGeneration)")
+            return
+        }
+        statusMessage = message
+    }
+
+    nonisolated static func fallbackCompletionAction(
+        cliText: String?,
+        cliError: String?,
+        realtimeText: String?,
+        deliverResult: Bool
+    ) -> FallbackCompletionAction {
+        let resolved = resolveFinalTranscript(
+            cliText: cliText,
+            cliError: cliError,
+            realtimeText: realtimeText
+        )
+        guard let text = resolved.text else {
+            let failure = resolved.failureStatus ?? "Transcription failed"
+            return deliverResult ? .fail(failure) : .backgroundFailed(failure)
+        }
+        return deliverResult ? .deliver(text) : .backgroundRecovered
+    }
+
     private func fallbackTranscribe(
         audioPath: String,
         curMode: RecordingMode,
@@ -1345,24 +1498,36 @@ public final class RecordingEngine: ObservableObject {
         canonicalProjectId: String?,
         displayProjectId: String?,
         activeProjectName: String?,
+        processingConfiguration: RecordingProcessingConfiguration,
         realtimeText: String? = nil,
-        pipelineTrace: RecordingPipelineTrace? = nil
+        pipelineTrace: RecordingPipelineTrace? = nil,
+        deliverResult: Bool = true,
+        backgroundRecoveryGeneration: UInt64? = nil
     ) {
         let homePath = home
 
-        isTranscribing = true
-        statusMessage = Self.shouldLabelRewriting(
-            recordingMode: curMode,
-            postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
-        ) ? "Rewriting..." : "Transcribing..."
+        if deliverResult {
+            isTranscribing = true
+            statusMessage = Self.shouldLabelRewriting(
+                recordingMode: curMode,
+                postProcessingMode: processingConfiguration.postProcessingMode
+            ) ? "Rewriting..." : "Transcribing..."
+        } else {
+            if let backgroundRecoveryGeneration {
+                updateBackgroundRecoveryStatus(
+                    "Pasted; recovering recording...",
+                    pipelineGeneration: backgroundRecoveryGeneration
+                )
+            }
+        }
 
         // Only a proven canonical Store id may be persisted. The local display id remains
         // available to recent-transcript UI even when synchronization is degraded.
         let transcribeArgs = Self.transcribeCLIArgs(
             audioPath: audioPath,
             activeProjectId: canonicalProjectId,
-            transcriberPrompt: projectStore?.effectiveSystemPrompt ?? "",
-            postProcessingMode: projectStore?.effectivePostProcessingMode ?? PostProcessingMode.auto.rawValue
+            transcriberPrompt: processingConfiguration.transcriberPrompt,
+            postProcessingMode: processingConfiguration.postProcessingMode
         )
 
         Task.detached {
@@ -1388,27 +1553,48 @@ public final class RecordingEngine: ObservableObject {
                     self.log("cli transcription empty output=\(output.prefix(160))")
                 }
 
-                let resolved = Self.resolveFinalTranscript(cliText: cliText, cliError: cliError, realtimeText: realtimeText)
-                guard let text = resolved.text else {
-                    self.finish(resolved.failureStatus ?? "Transcription failed")
-                    return
-                }
-
                 if cliText == nil {
-                    self.log("using realtime transcript fallback chars=\(text.count)")
+                    self.log("using realtime transcript fallback chars=\(realtimeText?.count ?? 0)")
                 } else {
-                    self.log("cli transcription succeeded chars=\(text.count)")
+                    self.log("cli transcription succeeded chars=\(cliText?.count ?? 0)")
                 }
-                self.isTranscribing = false
-                self.finishWithText(
-                    text,
-                    curMode: curMode,
-                    targetAppBundleIdentifier: targetAppBundleIdentifier,
-                    targetAppPid: targetAppPid,
-                    activeProjectId: displayProjectId,
-                    activeProjectName: activeProjectName,
-                    pipelineTrace: pipelineTrace
-                )
+                switch Self.fallbackCompletionAction(
+                    cliText: cliText,
+                    cliError: cliError,
+                    realtimeText: realtimeText,
+                    deliverResult: deliverResult
+                ) {
+                case .deliver(let text):
+                    self.isTranscribing = false
+                    self.finishWithText(
+                        text,
+                        curMode: curMode,
+                        targetAppBundleIdentifier: targetAppBundleIdentifier,
+                        targetAppPid: targetAppPid,
+                        activeProjectId: displayProjectId,
+                        activeProjectName: activeProjectName,
+                        pipelineTrace: pipelineTrace
+                    )
+                case .fail(let failure):
+                    self.finish(failure)
+                case .backgroundRecovered:
+                    if let pipelineTrace {
+                        self.log(pipelineTrace.message(stage: "async_persistence_recovered"))
+                    }
+                    if let backgroundRecoveryGeneration {
+                        self.updateBackgroundRecoveryStatus(
+                            "Pasted and saved",
+                            pipelineGeneration: backgroundRecoveryGeneration
+                        )
+                    }
+                case .backgroundFailed(let failure):
+                    if let backgroundRecoveryGeneration {
+                        self.updateBackgroundRecoveryStatus(
+                            "Pasted, but recording could not be saved: \(failure)",
+                            pipelineGeneration: backgroundRecoveryGeneration
+                        )
+                    }
+                }
             }
         }
     }

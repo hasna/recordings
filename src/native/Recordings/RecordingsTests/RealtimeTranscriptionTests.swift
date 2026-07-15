@@ -18,10 +18,15 @@ private final class RealtimeDeliveryProbe {
 }
 
 private actor BlockingRealtimePersistence {
+    private let result: RealtimeFastPathSaveResult
     private var started = false
     private var released = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(result: RealtimeFastPathSaveResult = RealtimeFastPathSaveResult(text: "stored text", error: nil)) {
+        self.result = result
+    }
 
     func run() async -> RealtimeFastPathSaveResult {
         started = true
@@ -31,7 +36,7 @@ private actor BlockingRealtimePersistence {
         if !released {
             await withCheckedContinuation { releaseWaiters.append($0) }
         }
-        return RealtimeFastPathSaveResult(text: "stored text", error: nil)
+        return result
     }
 
     func waitUntilStarted() async {
@@ -464,6 +469,137 @@ struct RealtimeTranscriptionTests {
         await persistence.release()
         await persistenceTask.value
         #expect(probe.persistedResult?.text == "stored text")
+    }
+
+    @Test("Async save failure starts recovery only after realtime text is delivered")
+    @MainActor
+    func asyncSaveFailureRecoversAfterDelivery() async {
+        let persistence = BlockingRealtimePersistence(
+            result: RealtimeFastPathSaveResult(text: nil, error: "synthetic save failure")
+        )
+        let probe = RealtimeDeliveryProbe()
+        var recoveryError: String?
+
+        let persistenceTask = RecordingEngine.deliverRealtimeBeforePersistence(
+            text: "settled realtime text",
+            persist: { await persistence.run() },
+            deliver: { probe.deliveredText = $0 },
+            persistenceCompleted: { result in
+                #expect(probe.deliveredText == "settled realtime text")
+                recoveryError = result.error
+                probe.persistedResult = result
+            }
+        )
+
+        await persistence.waitUntilStarted()
+        #expect(probe.deliveredText == "settled realtime text")
+        #expect(recoveryError == nil)
+
+        await persistence.release()
+        await persistenceTask.value
+        #expect(recoveryError == "synthetic save failure")
+        #expect(probe.persistedResult?.text == nil)
+    }
+
+    @Test("Background recovery never overwrites a newer recording pipeline or pastes twice")
+    func backgroundRecoveryRespectsPipelineGeneration() {
+        #expect(RecordingEngine.shouldApplyBackgroundRecoveryStatus(
+            recoveryGeneration: 4,
+            currentGeneration: 4,
+            isRecording: false,
+            isTranscribing: false
+        ))
+        #expect(!RecordingEngine.shouldApplyBackgroundRecoveryStatus(
+            recoveryGeneration: 4,
+            currentGeneration: 5,
+            isRecording: false,
+            isTranscribing: false
+        ))
+        #expect(!RecordingEngine.shouldApplyBackgroundRecoveryStatus(
+            recoveryGeneration: 4,
+            currentGeneration: 4,
+            isRecording: true,
+            isTranscribing: false
+        ))
+        #expect(!RecordingEngine.shouldApplyBackgroundRecoveryStatus(
+            recoveryGeneration: 4,
+            currentGeneration: 4,
+            isRecording: false,
+            isTranscribing: true
+        ))
+
+        #expect(RecordingEngine.fallbackCompletionAction(
+            cliText: "saved full-file transcript",
+            cliError: nil,
+            realtimeText: nil,
+            deliverResult: false
+        ) == .backgroundRecovered)
+        #expect(RecordingEngine.fallbackCompletionAction(
+            cliText: nil,
+            cliError: "synthetic fallback failure",
+            realtimeText: nil,
+            deliverResult: false
+        ) == .backgroundFailed("synthetic fallback failure"))
+        #expect(RecordingEngine.fallbackCompletionAction(
+            cliText: "foreground transcript",
+            cliError: nil,
+            realtimeText: nil,
+            deliverResult: true
+        ) == .deliver("foreground transcript"))
+    }
+
+    @Test("Background recovery reconstructs missing WAV without replacing an existing capture")
+    func backgroundRecoveryAudioReconstruction() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-recovery-\(UUID().uuidString)", isDirectory: true)
+        let audioURL = directory.appendingPathComponent("capture.wav")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let pcm = Data([0x01, 0x02, 0x03, 0x04])
+        #expect(RecordingEngine.ensureBackgroundRecoveryAudio(
+            audioPath: audioURL.path,
+            pcmData: pcm
+        ) == audioURL.path)
+        let reconstructed = try Data(contentsOf: audioURL)
+        #expect(reconstructed.count == 44 + pcm.count)
+        #expect(reconstructed.suffix(pcm.count) == pcm)
+
+        #expect(RecordingEngine.ensureBackgroundRecoveryAudio(
+            audioPath: audioURL.path,
+            pcmData: Data([0xFF, 0xFF])
+        ) == audioURL.path)
+        #expect(try Data(contentsOf: audioURL) == reconstructed)
+        #expect(RecordingEngine.ensureBackgroundRecoveryAudio(
+            audioPath: directory.appendingPathComponent("empty.wav").path,
+            pcmData: Data()
+        ) == nil)
+    }
+
+    @Test("Background recovery retains the failed recording's processing configuration")
+    func backgroundRecoveryUsesCapturedConfiguration() {
+        let recordingA = RecordingProcessingConfiguration(
+            transcriberPrompt: "Project A vocabulary",
+            postProcessingMode: PostProcessingMode.off.rawValue
+        )
+        var currentProject = recordingA
+        let capturedForRecovery = currentProject
+
+        currentProject = RecordingProcessingConfiguration(
+            transcriberPrompt: "Project B rewrite policy",
+            postProcessingMode: PostProcessingMode.always.rawValue
+        )
+        let recoveryArgs = RecordingEngine.transcribeCLIArgs(
+            audioPath: "/tmp/recording-a.wav",
+            activeProjectId: "project-a",
+            transcriberPrompt: capturedForRecovery.transcriberPrompt,
+            postProcessingMode: capturedForRecovery.postProcessingMode
+        )
+
+        #expect(capturedForRecovery != currentProject)
+        #expect(recoveryArgs.contains("Project A vocabulary"))
+        #expect(recoveryArgs.contains(PostProcessingMode.off.rawValue))
+        #expect(!recoveryArgs.contains("Project B rewrite policy"))
+        #expect(!recoveryArgs.contains(PostProcessingMode.always.rawValue))
     }
 
     @Test("Partial realtime text falls back for longer recordings")
