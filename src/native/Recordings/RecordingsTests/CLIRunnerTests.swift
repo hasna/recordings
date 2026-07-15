@@ -3,6 +3,53 @@ import Testing
 @testable import RecordingsLib
 
 struct CLIRunnerTests {
+    @Test("bundled CLI takes precedence over a stale user installation")
+    func bundledCLIIsPreferred() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-bundled-cli-\(UUID().uuidString)")
+        let app = root.appendingPathComponent("Recordings.app")
+        let helper = app.appendingPathComponent("Contents/Helpers/recordings")
+        let home = root.appendingPathComponent("home")
+        let external = home.appendingPathComponent(".bun/bin/recordings")
+        try FileManager.default.createDirectory(
+            at: helper.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: external.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "bundled".write(to: helper, atomically: true, encoding: .utf8)
+        try "stale".write(to: external, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let command = CLIRunner.resolveCommand(home: home.path, bundleURL: app)
+
+        #expect(command.executable == helper.path)
+        #expect(command.argumentsPrefix.isEmpty)
+    }
+
+    @Test("packaged app never falls back when its bundled CLI is missing")
+    func packagedAppDoesNotUseGlobalFallback() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-missing-companion-\(UUID().uuidString)")
+        let app = root.appendingPathComponent("Recordings.app")
+        let home = root.appendingPathComponent("home")
+        let external = home.appendingPathComponent(".bun/bin/recordings")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: external.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "stale".write(to: external, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let command = CLIRunner.resolveCommand(home: home.path, bundleURL: app)
+
+        #expect(command.executable == app.appendingPathComponent("Contents/Helpers/recordings").path)
+        #expect(command.executable != external.path)
+    }
+
     @Test("process runner drains more than one MiB from stdout and stderr without blocking")
     func drainsLargeConcurrentOutput() throws {
         let command = """

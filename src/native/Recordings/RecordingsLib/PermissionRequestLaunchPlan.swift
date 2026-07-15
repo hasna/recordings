@@ -6,6 +6,7 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
 
     public var installsGlobalHandlers: Bool { !isHelper }
     public var declaresMainWindow: Bool { !isHelper }
+    public var declaresMenuBar: Bool { !isHelper }
     public var terminatesAfterHandling: Bool { isHelper }
 
     public init(arguments: [String]) {

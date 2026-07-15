@@ -5,8 +5,8 @@ import KeyboardShortcuts
 import RecordingsLib
 
 /// Recordings — a full native macOS app. The main window is the Recordings workspace
-/// (record + library); global shortcuts and dictation/command modes still work while the
-/// window is in the background. (The former menu-bar-only surface has been removed.)
+/// (record + library); the menu-bar surface, global shortcuts, and dictation/command modes
+/// keep working while the window is in the background.
 /// Keeps the app (and therefore the RecordingEngine + global shortcuts) alive after the
 /// last window is closed, so background dictation/command shortcuts keep working.
 @MainActor
@@ -26,9 +26,11 @@ final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class RecordingsAppState: ObservableObject {
     let store: RecordingsStore?
+    let declaresMenuBar: Bool
     private var mainWindow: NSWindow?
 
     init(plan: PermissionRequestLaunchPlan) {
+        declaresMenuBar = plan.declaresMenuBar
         if plan.installsGlobalHandlers {
             let store = RecordingsStore()
             self.store = store
@@ -62,6 +64,7 @@ final class RecordingsAppState: ObservableObject {
         window.contentView = NSHostingView(rootView: ContentView(store: store))
         window.center()
         window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate()
         mainWindow = window
     }
 }
@@ -85,7 +88,16 @@ struct RecordingsApp: App {
         }
     }
 
-    var body: some Scene {
+    @SceneBuilder var body: some Scene {
+        if state.declaresMenuBar, let store = state.store {
+            MenuBarExtra {
+                MenuBarStatusView(store: store, showMainWindow: state.showMainWindow)
+            } label: {
+                MenuBarStatusLabel(store: store)
+            }
+            .menuBarExtraStyle(.window)
+        }
+
         Settings {
             if let store = state.store {
                 SettingsView(engine: store.engine, shortcuts: store.voiceShortcuts, projectStore: store.projectStore)

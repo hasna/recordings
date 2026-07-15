@@ -17,12 +17,18 @@ APP_DIR="$BUILD_DIR/Recordings.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
+HELPERS="$CONTENTS/Helpers"
+PACKAGE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS" "$RESOURCES"
+mkdir -p "$MACOS" "$RESOURCES" "$HELPERS"
 
 # Copy binary
 cp "$BUILD_DIR/App" "$MACOS/Recordings"
+
+# Embed an immutable, same-source CLI so the app cannot accidentally run an older
+# global `recordings` installation with a different command surface.
+"$PACKAGE_ROOT/scripts/build_companion_cli.sh" "$HELPERS/recordings"
 
 # Copy Info.plist
 cp RecordingsLib/Info.plist "$CONTENTS/Info.plist"

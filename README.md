@@ -13,10 +13,11 @@ npm install -g @hasna/recordings
 
 ## macOS App
 
-Recordings ships a **full native macOS app** (SwiftUI, macOS 26 / Liquid Glass) — not a
-menu-bar utility. It opens to a **Recordings workspace**: a narrow violet Liquid-Glass
-sidebar (Workspace · Library · Projects · Modes · Machines) beside one continuous canvas
-with the record hero, transcript library, and detail view.
+Recordings ships a **full native macOS app** (SwiftUI, macOS 26 / Liquid Glass) with a
+companion menu-bar control. It opens to a **Recordings workspace**: a narrow violet
+Liquid-Glass sidebar (Workspace · Library · Projects · Modes · Machines) beside one
+continuous canvas with the record hero, transcript library, and detail view. The menu bar
+provides recording controls and access to the main window while it is in the background.
 
 - **Record** — large push-to-talk / dictation / command hero with live transcription,
   duration, the active project, and a "just now" strip. Global shortcut (default F5, or
@@ -29,8 +30,8 @@ with the record hero, transcript library, and detail view.
 - **Settings** (⌘,) — OpenAI key, language, recording shortcut, permissions, projects,
   and voice shortcuts.
 
-The app reuses the `recordings` CLI as its data layer, so the CLI, MCP, and app all share
-one store.
+The app embeds a same-version `recordings` CLI as its data layer, so the CLI, MCP, and app
+share one store without depending on a possibly stale global CLI installation.
 
 ```bash
 # Build + install Recordings.app from the installed package (macOS 26, Swift toolchain):

@@ -1572,6 +1572,11 @@ private final class ProcessDataCapture: @unchecked Sendable {
 }
 
 enum CLIRunner: Sendable {
+    struct Command: Sendable {
+        let executable: String
+        let argumentsPrefix: [String]
+    }
+
     struct ProcessOutput: Sendable {
         let stdout: String
         let stderr: String
@@ -1579,21 +1584,13 @@ enum CLIRunner: Sendable {
     }
 
     static func run(_ args: [String], home: String) -> String {
-        let bin = "\(home)/.bun/bin/recordings"
-        let executable: String
-        let arguments: [String]
-        if FileManager.default.fileExists(atPath: bin) {
-            executable = bin
-            arguments = args
-        } else {
-            executable = "/usr/bin/env"
-            arguments = ["recordings"] + args
-        }
+        let command = resolveCommand(home: home)
+        let arguments = command.argumentsPrefix + args
         let environment = ProcessInfo.processInfo.environment.merging([
             "PATH": "\(home)/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         ]) { _, new in new }
         do {
-            let output = try runExecutable(executable, arguments: arguments, environment: environment)
+            let output = try runExecutable(command.executable, arguments: arguments, environment: environment)
             if output.terminationStatus != 0 {
                 let details = output.stderr.isEmpty ? output.stdout : output.stderr
                 return "ERROR: \(NativeErrorSanitizer.sanitize(details.trimmingCharacters(in: .whitespacesAndNewlines)))"
@@ -1604,6 +1601,26 @@ enum CLIRunner: Sendable {
         } catch {
             return "ERROR: \(NativeErrorSanitizer.sanitize(error.localizedDescription))"
         }
+    }
+
+    static func resolveCommand(
+        home: String,
+        bundleURL: URL = Bundle.main.bundleURL,
+        fileManager: FileManager = .default
+    ) -> Command {
+        let bundled = bundleURL.appendingPathComponent("Contents/Helpers/recordings")
+        let isPackagedApp = bundleURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame
+        if isPackagedApp || fileManager.fileExists(atPath: bundled.path) {
+            return Command(executable: bundled.path, argumentsPrefix: [])
+        }
+
+        // SwiftPM development and test runs do not have an app bundle. Retain an
+        // explicit local fallback there; packaged apps exclusively use their helper.
+        let userCLI = "\(home)/.bun/bin/recordings"
+        if fileManager.fileExists(atPath: userCLI) {
+            return Command(executable: userCLI, argumentsPrefix: [])
+        }
+        return Command(executable: "/usr/bin/env", argumentsPrefix: ["recordings"])
     }
 
     static func runExecutable(

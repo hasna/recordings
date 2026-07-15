@@ -15,6 +15,7 @@ struct RecordingStartGateTests {
         #expect(plan.opensPermissionSettings)
         #expect(!plan.installsGlobalHandlers)
         #expect(!plan.declaresMainWindow)
+        #expect(!plan.declaresMenuBar)
         #expect(plan.terminatesAfterHandling)
     }
 
@@ -25,6 +26,7 @@ struct RecordingStartGateTests {
         #expect(!plan.isHelper)
         #expect(plan.installsGlobalHandlers)
         #expect(plan.declaresMainWindow)
+        #expect(plan.declaresMenuBar)
         #expect(!plan.terminatesAfterHandling)
     }
 
