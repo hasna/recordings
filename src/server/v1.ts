@@ -101,7 +101,11 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
           if (!body || typeof body.raw_text !== "string" || !body.raw_text.trim()) {
             return error(400, "raw_text is required");
           }
-          const recording = await repo.createRecording(pg, body);
+          const recording = await repo.createRecording(
+            pg,
+            body,
+            req.headers.get("Idempotency-Key") ?? undefined,
+          );
           return json({ recording }, 201);
         }
         return error(405, `method ${method} not allowed on /v1/recordings`);

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 @testable import RecordingsLib
 
@@ -63,6 +64,222 @@ struct CLIRunnerTests {
         #expect(result.stderr.utf8.count == 2 * 1_048_576)
         #expect(result.stdout.first == "o")
         #expect(result.stderr.first == "e")
+    }
+
+    @Test("process runner observes immediate exits without false timeouts")
+    func observesImmediateExits() throws {
+        for _ in 0..<25 {
+            let result = try CLIRunner.runExecutable(
+                "/usr/bin/true",
+                arguments: [],
+                executionTimeout: 0.1,
+                terminationGracePeriod: 0,
+                forceKillGracePeriod: 0.1,
+                pipeDrainTimeout: 0.1
+            )
+            #expect(result.terminationStatus == 0)
+        }
+    }
+
+    @Test("process runner terminates an entire command process group after its deadline")
+    func forceKillsTimedOutProcessGroup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-cli-timeout-\(UUID().uuidString)")
+        let script = root.appendingPathComponent("ignore-term-parent.sh")
+        let childScript = root.appendingPathComponent("ignore-term-child.sh")
+        let parentPidFile = root.appendingPathComponent("parent-pid")
+        let childPidFile = root.appendingPathComponent("child-pid")
+        let termFile = root.appendingPathComponent("term-received")
+        let sideEffectFile = root.appendingPathComponent("server-side-effect")
+        let readinessFIFO = root.appendingPathComponent("ready")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try #require(Darwin.mkfifo(readinessFIFO.path, 0o600) == 0)
+        defer {
+            let runnerProcessGroup = Darwin.getpgrp()
+            if let parentPid = Self.readPID(from: parentPidFile) {
+                let childProcessGroup = Darwin.getpgid(parentPid)
+                if childProcessGroup == parentPid, childProcessGroup != runnerProcessGroup {
+                    _ = Darwin.kill(-childProcessGroup, SIGKILL)
+                } else {
+                    _ = Darwin.kill(parentPid, SIGKILL)
+                }
+            }
+            if let childPid = Self.readPID(from: childPidFile) {
+                _ = Darwin.kill(childPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+        try """
+        #!/bin/sh
+        trap 'printf term > "$2"' TERM
+        printf '%s' "$$" > "$1"
+        "$4" "$5" "$6" &
+        while [ ! -s "$5" ] || [ ! -s "$6" ]; do /bin/sleep 0.01; done
+        printf parent-output
+        printf parent-error >&2
+        printf ready > "$3"
+        while :; do /bin/sleep 0.05; done
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try """
+        #!/bin/sh
+        trap '' TERM HUP
+        printf '%s' "$$" > "$1"
+        printf child-output
+        printf child-error >&2
+        while :; do
+          printf tick >> "$2"
+          /bin/sleep 0.02
+        done
+        """.write(to: childScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: childScript.path)
+
+        let startedAt = ContinuousClock.now
+        var observedReadiness = false
+        var lifecycleEvents: [CLIRunner.ProcessLifecycleEvent] = []
+        do {
+            _ = try CLIRunner.runExecutable(
+                script.path,
+                arguments: [
+                    parentPidFile.path,
+                    termFile.path,
+                    readinessFIFO.path,
+                    childScript.path,
+                    childPidFile.path,
+                    sideEffectFile.path,
+                ],
+                executionTimeout: 0.2,
+                terminationGracePeriod: 0.5,
+                forceKillGracePeriod: 0.5,
+                pipeDrainTimeout: 0.2,
+                beforeExecutionDeadline: {
+                    guard let handle = FileHandle(forReadingAtPath: readinessFIFO.path) else { return }
+                    defer { try? handle.close() }
+                    observedReadiness = handle.readDataToEndOfFile() == Data("ready".utf8)
+                    guard let parentPid = Self.readPID(from: parentPidFile),
+                          let childPid = Self.readPID(from: childPidFile) else {
+                        Issue.record("ready process group did not publish both process identifiers")
+                        return
+                    }
+                    let processGroup = Darwin.getpgid(parentPid)
+                    #expect(processGroup == parentPid)
+                    #expect(Darwin.getpgid(childPid) == parentPid)
+                    #expect(processGroup != Darwin.getpgrp())
+                },
+                lifecycleObserver: { lifecycleEvents.append($0) }
+            )
+            Issue.record("command unexpectedly completed before its deadline")
+        } catch let error as CLIRunner.ExecutionError {
+            guard case let .timedOut(executable, seconds) = error else {
+                Issue.record("command returned the wrong execution error: \(error)")
+                return
+            }
+            #expect(executable == script.path)
+            #expect(seconds == 0.2)
+            #expect(error.localizedDescription.contains("timed out"))
+        }
+
+        #expect(ContinuousClock.now - startedAt < .seconds(2.5))
+        #expect(observedReadiness)
+        #expect(try String(contentsOf: termFile, encoding: .utf8) == "term")
+        #expect(lifecycleEvents == [
+            .processGroupSignaled(SIGTERM),
+            .processGroupSignaled(SIGKILL),
+            .leaderExitObserved,
+            .leaderReaped(128 + SIGKILL),
+        ])
+        let parentPid = try #require(Self.readPID(from: parentPidFile))
+        let childPid = try #require(Self.readPID(from: childPidFile))
+        let processGroup = parentPid
+        expectProcessIsGone(parentPid)
+        expectProcessIsGone(childPid)
+        expectProcessGroupIsGone(processGroup)
+
+        let sideEffectSize = try Data(contentsOf: sideEffectFile).count
+        Thread.sleep(forTimeInterval: 0.15)
+        #expect(try Data(contentsOf: sideEffectFile).count == sideEffectSize)
+    }
+
+    private static func readPID(from file: URL) -> pid_t? {
+        guard let value = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return pid_t(value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func expectProcessIsGone(_ pid: pid_t, sourceLocation: SourceLocation = #_sourceLocation) {
+        let (result, error) = pollForMissingProcess(pid)
+        #expect(result == -1, sourceLocation: sourceLocation)
+        #expect(error == ESRCH, sourceLocation: sourceLocation)
+    }
+
+    private func expectProcessGroupIsGone(
+        _ processGroup: pid_t,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let (result, error) = pollForMissingProcess(-processGroup)
+        #expect(result == -1, sourceLocation: sourceLocation)
+        #expect(error == ESRCH, sourceLocation: sourceLocation)
+    }
+
+    private func pollForMissingProcess(_ processOrNegativeGroup: pid_t) -> (Int32, Int32) {
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        var result: Int32 = 0
+        var error: Int32 = 0
+        repeat {
+            errno = 0
+            result = Darwin.kill(processOrNegativeGroup, 0)
+            error = errno
+            if result == -1, error == ESRCH { return (result, error) }
+            Thread.sleep(forTimeInterval: 0.01)
+        } while ContinuousClock.now < deadline
+        errno = 0
+        result = Darwin.kill(processOrNegativeGroup, 0)
+        error = errno
+        return (result, error)
+    }
+
+    @Test("process runner cleans up a background descendant after its leader exits")
+    func cleansUpInheritedPipeDescendant() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-cli-background-\(UUID().uuidString)")
+        let childPidFile = root.appendingPathComponent("child-pid")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            if let childPid = Self.readPID(from: childPidFile) {
+                _ = Darwin.kill(childPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+        let command = """
+        /bin/sh -c 'printf "%s" "$$" > "$1"; trap "" TERM HUP; while :; do /bin/sleep 1; done' child '\(childPidFile.path)' &
+        while [ ! -s '\(childPidFile.path)' ]; do /bin/sleep 0.01; done
+        printf 'complete'
+        printf 'warning' >&2
+        exit 23
+        """
+        let startedAt = ContinuousClock.now
+        var lifecycleEvents: [CLIRunner.ProcessLifecycleEvent] = []
+
+        let result = try CLIRunner.runExecutable(
+            "/bin/sh",
+            arguments: ["-c", command],
+            executionTimeout: 1,
+            terminationGracePeriod: 0.2,
+            forceKillGracePeriod: 0.2,
+            pipeDrainTimeout: 0.3,
+            lifecycleObserver: { lifecycleEvents.append($0) }
+        )
+
+        #expect(ContinuousClock.now - startedAt < .seconds(1.5))
+        #expect(result.terminationStatus == 23)
+        #expect(result.stdout == "complete")
+        #expect(result.stderr == "warning")
+        #expect(lifecycleEvents == [
+            .leaderExitObserved,
+            .processGroupSignaled(SIGTERM),
+            .processGroupSignaled(SIGKILL),
+            .leaderReaped(23),
+        ])
+        expectProcessIsGone(try #require(Self.readPID(from: childPidFile)))
     }
 
     @Test("transcribeCLIArgs passes project, cleanup mode, and transcriber prompt")

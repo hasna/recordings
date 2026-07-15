@@ -6,6 +6,7 @@ import type {
   RecordingFilter,
 } from "../types/index.js";
 import { RecordingNotFoundError } from "../types/index.js";
+import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 
 function parseRow(row: Record<string, unknown>): Recording {
   return {
@@ -33,9 +34,11 @@ function parseRow(row: Record<string, unknown>): Recording {
 
 export function createRecording(
   input: CreateRecordingInput,
-  db?: Database
+  db?: Database,
+  idempotencyKey?: string,
 ): Recording {
   const d = db || getDatabase();
+  input = recordingCreateIdentity(input, idempotencyKey).input;
   const id = input.id || shortUuid();
   const create = d.transaction(() => {
     if (input.id) {

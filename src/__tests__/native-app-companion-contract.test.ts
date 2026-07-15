@@ -1,9 +1,51 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import type { Subprocess } from "bun";
 import packageJson from "../../package.json";
+
+let compiledCompanionDirectory = "";
+let compiledCompanion = "";
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function stopAndReap(process: Subprocess | undefined, label: string): Promise<void> {
+  if (!process) return;
+  if (process.exitCode === null) process.kill("SIGTERM");
+  try {
+    await withTimeout(process.exited, 2_000, `${label} termination`);
+  } catch {
+    if (process.exitCode === null) process.kill("SIGKILL");
+    await withTimeout(process.exited, 2_000, `${label} forced termination`);
+  }
+}
+
+beforeAll(() => {
+  compiledCompanionDirectory = mkdtempSync(join(tmpdir(), "recordings-companion-fixture-"));
+  compiledCompanion = join(compiledCompanionDirectory, "recordings");
+  const build = spawnSync("bash", ["scripts/build_companion_cli.sh", compiledCompanion], {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  expect(build.error, build.stderr).toBeUndefined();
+  expect(build.status, build.stderr).toBe(0);
+}, 60_000);
+
+afterAll(() => {
+  if (compiledCompanionDirectory) {
+    rmSync(compiledCompanionDirectory, { recursive: true, force: true });
+  }
+});
 
 describe("native app companion contract", () => {
   test("build embeds a self-contained recordings CLI and runtime prefers it", () => {
@@ -23,16 +65,10 @@ describe("native app companion contract", () => {
   });
 
   test("compiled companion exposes the app-required version and commands", () => {
-    const directory = mkdtempSync(join(tmpdir(), "recordings-companion-"));
-    const executable = join(directory, "recordings");
+    const directory = mkdtempSync(join(tmpdir(), "recordings-companion-runtime-"));
     try {
-      const build = spawnSync("bash", ["scripts/build_companion_cli.sh", executable], {
-        encoding: "utf8",
-      });
-      expect(build.status, build.stderr).toBe(0);
-
       const run = (...args: string[]) =>
-        spawnSync(executable, args, { encoding: "utf8" });
+        spawnSync(compiledCompanion, args, { encoding: "utf8", timeout: 10_000 });
       expect(run("--version").stdout.trim()).toBe(packageJson.version);
       expect(run("project", "register", "--help").status).toBe(0);
       expect(run("save-text", "--help").status).toBe(0);
@@ -80,7 +116,7 @@ describe("native app companion contract", () => {
       expect(run("rewrite", "--help").stdout).toContain("--instruction");
 
       const registration = spawnSync(
-        executable,
+        compiledCompanion,
         [
           "--json",
           "project",
@@ -93,6 +129,7 @@ describe("native app companion contract", () => {
         {
           cwd: directory,
           encoding: "utf8",
+          timeout: 10_000,
           env: {
             HOME: join(directory, "home"),
             PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -116,15 +153,11 @@ describe("native app companion contract", () => {
 
   test("compiled rewrite keeps frozen A config and option-like text over ambient B config", async () => {
     const directory = mkdtempSync(join(tmpdir(), "recordings-rewrite-contract-"));
-    const executable = join(directory, "recordings");
     const requestPath = join(directory, "request.json");
     const home = join(directory, "home");
+    let server: Subprocess | undefined;
+    let rewrite: Subprocess | undefined;
     try {
-      const build = spawnSync("bash", ["scripts/build_companion_cli.sh", executable], {
-        encoding: "utf8",
-      });
-      expect(build.status, build.stderr).toBe(0);
-
       const configDirectory = join(home, ".hasna", "recordings");
       mkdirSync(configDirectory, { recursive: true });
       writeFileSync(join(configDirectory, "config.json"), JSON.stringify({
@@ -140,7 +173,7 @@ describe("native app companion contract", () => {
         keyword_transforms: { "open ai": "OpenAI B" },
       }));
 
-      const server = Bun.spawn([
+      server = Bun.spawn([
         process.execPath,
         "-e",
         `
@@ -161,12 +194,13 @@ describe("native app companion contract", () => {
         requestPath,
       ], { stdout: "pipe", stderr: "pipe" });
       const portReader = server.stdout.getReader();
-      const portChunk = await portReader.read();
+      const portChunk = await withTimeout(portReader.read(), 5_000, "rewrite fixture server startup");
+      portReader.releaseLock();
       const port = Number(new TextDecoder().decode(portChunk.value).trim());
       expect(port).toBeGreaterThan(0);
 
-      const rewrite = Bun.spawn([
-        executable,
+      rewrite = Bun.spawn([
+        compiledCompanion,
         "rewrite",
         "--instruction", "instruction A",
         "--post-processing", "always",
@@ -190,14 +224,14 @@ describe("native app companion contract", () => {
           OPENAI_BASE_URL: `http://127.0.0.1:${port}`,
         },
       });
-      const [status, stdout, stderr] = await Promise.all([
+      const [status, stdout, stderr] = await withTimeout(Promise.all([
         rewrite.exited,
         new Response(rewrite.stdout).text(),
         new Response(rewrite.stderr).text(),
-      ]);
+      ]), 10_000, "compiled rewrite");
       expect(status, stderr).toBe(0);
       expect(stdout.trim()).toBe("Frozen A result");
-      await server.exited;
+      await withTimeout(server.exited, 2_000, "rewrite fixture server shutdown");
 
       const request = JSON.parse(readFileSync(requestPath, "utf8"));
       expect(request.model).toBe("gpt-command-a");
@@ -218,7 +252,13 @@ describe("native app companion contract", () => {
         expect(messages).not.toContain(forbidden);
       }
     } finally {
+      const cleanup = await Promise.allSettled([
+        stopAndReap(rewrite, "compiled rewrite"),
+        stopAndReap(server, "rewrite fixture server"),
+      ]);
       rmSync(directory, { recursive: true, force: true });
+      const failedCleanup = cleanup.find((result) => result.status === "rejected");
+      if (failedCleanup?.status === "rejected") throw failedCleanup.reason;
     }
   }, 20_000);
 
@@ -257,6 +297,20 @@ describe("native app companion contract", () => {
     expect(engine).not.toContain("lastAccessibilityPromptAt");
     expect(engine).not.toContain("timeIntervalSince(lastAccessibilityPromptAt)");
     expect(gate.match(/AXIsProcessTrustedWithOptions/g)).toHaveLength(1);
+  });
+
+  test("command rewrite retains and revalidates the exact AX element and selection", () => {
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+
+    expect(engine).toContain("AccessibilitySelectionToken");
+    expect(engine).toContain("CFEqual(element, currentElement)");
+    expect(engine).toContain("matchesCurrentSelection(for: app.processIdentifier)");
+    expect(engine).toContain("commandSelectionToken:");
+    expect(engine.match(/targetIsReady\(\)/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(engine).not.toContain("activateIgnoringOtherApps");
   });
 
   test("recording capture is not gated on project synchronization readiness", () => {

@@ -20,6 +20,7 @@ function makeFakePg() {
   const projects: Row[] = [];
   const recordings: Row[] = [];
   const recordingTags: Row[] = [];
+  const advisoryLockRefs: string[] = [];
   let seq = 0;
   let transactionTail = Promise.resolve();
 
@@ -84,6 +85,10 @@ function makeFakePg() {
     },
     async get(sql: string, ...params: unknown[]) {
       const ref = params[0] as string;
+      if (/pg_advisory_xact_lock/i.test(sql)) {
+        advisoryLockRefs.push(ref);
+        return null;
+      }
       if (/from\s+agents/i.test(sql)) {
         if (/where\s+id\s*=/i.test(sql)) return agents.find((a) => a["id"] === ref) ?? null;
         if (/where\s+name\s*=/i.test(sql)) return agents.find((a) => a["name"] === ref) ?? null;
@@ -111,12 +116,14 @@ function makeFakePg() {
     projects,
     recordings,
     recordingTags,
+    advisoryLockRefs,
   };
   return pg as unknown as PgAdapterAsync & {
     agents: Row[];
     projects: Row[];
     recordings: Row[];
     recordingTags: Row[];
+    advisoryLockRefs: string[];
   };
 }
 
@@ -166,6 +173,74 @@ describe("repo.createRecording reference resolution", () => {
     expect(first.id).toBe("pipeline-ambiguous-save");
     expect(retry.raw_text).toBe("settled realtime text");
     expect(pg.recordings).toHaveLength(1);
+    expect(pg.advisoryLockRefs).toEqual(["pipeline-ambiguous-save", "pipeline-ambiguous-save"]);
+  });
+
+  test("an idempotency key without an input id creates one stable Postgres row", async () => {
+    const pg = makeFakePg();
+    const first = await repo.createRecording(pg, {
+      raw_text: "settled realtime text",
+    }, "logical-save-a");
+    const retry = await repo.createRecording(pg, {
+      raw_text: "batch fallback transcript",
+    }, "logical-save-a");
+
+    expect(first.id).toBe("logical-save-a");
+    expect(retry.id).toBe(first.id);
+    expect(retry.raw_text).toBe("settled realtime text");
+    expect(pg.recordings).toHaveLength(1);
+    expect(pg.advisoryLockRefs).toEqual(["logical-save-a", "logical-save-a"]);
+  });
+
+  test("a null body id lets a nonempty key define the Postgres identity", async () => {
+    const pg = makeFakePg();
+    const recording = await repo.createRecording(
+      pg,
+      JSON.parse('{"id":null,"raw_text":"settled realtime text"}'),
+      "logical-save-null",
+    );
+
+    expect(recording.id).toBe("logical-save-null");
+    expect(pg.recordings).toHaveLength(1);
+    expect(pg.advisoryLockRefs).toEqual(["logical-save-null"]);
+  });
+
+  test("a conflicting explicit id and idempotency key fail before a Postgres write", async () => {
+    const pg = makeFakePg();
+    await expect(repo.createRecording(pg, {
+      id: "recording-a",
+      raw_text: "must not persist",
+    }, "logical-save-b")).rejects.toThrow("recording id conflicts with idempotency key");
+    expect(pg.recordings).toHaveLength(0);
+  });
+
+  test("invalid runtime ids and keys fail before a Postgres transaction", async () => {
+    const pg = makeFakePg();
+    const invalidInputs = [
+      [JSON.parse('{"id":"","raw_text":"must not persist"}'), "recording id must not be empty"],
+      [JSON.parse('{"id":17,"raw_text":"must not persist"}'), "recording id must be a string"],
+      [JSON.parse('{"id":"bad\\u0000id","raw_text":"must not persist"}'), "recording id must not contain control characters"],
+    ] as const;
+    for (const [input, message] of invalidInputs) {
+      await expect(Reflect.apply(repo.createRecording, repo, [pg, input])).rejects.toThrow(message);
+    }
+    const invalidKeys: ReadonlyArray<readonly [unknown, string]> = [
+      ["", "idempotency key must not be empty"],
+      [null, "idempotency key must be a string"],
+      [17, "idempotency key must be a string"],
+      ["bad\u0000key", "idempotency key must not contain control characters"],
+      ["logical-save-\u00e9", "idempotency key must contain only printable ASCII characters"],
+      ["x".repeat(256), "idempotency key must not exceed 255 characters"],
+    ];
+    for (const [key, message] of invalidKeys) {
+      await expect(Reflect.apply(repo.createRecording, repo, [
+        pg,
+        { raw_text: "must not persist" },
+        key,
+      ])).rejects.toThrow(message);
+    }
+    expect(pg.recordings).toHaveLength(0);
+    expect(pg.advisoryLockRefs).toHaveLength(0);
   });
 
   test("concurrent same-id retry observes the winner before resolving changed refs", async () => {
@@ -192,6 +267,7 @@ describe("repo.createRecording reference resolution", () => {
       { recording_id: "pipeline-concurrent-save", tag: "winner" },
     ]);
     expect(pg.agents).toHaveLength(0);
+    expect(pg.advisoryLockRefs).toEqual(["pipeline-concurrent-save", "pipeline-concurrent-save"]);
   });
 
   test("recording and normalized tags roll back together", async () => {

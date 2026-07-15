@@ -1,5 +1,6 @@
 import AVFoundation
 @preconcurrency import ApplicationServices
+import Darwin
 import SwiftUI
 @preconcurrency import KeyboardShortcuts
 
@@ -92,6 +93,133 @@ struct RecordingCaptureConfiguration: Sendable {
     let displayProjectId: String?
     let activeProjectName: String?
     let processing: RecordingProcessingConfiguration
+}
+
+struct AccessibilitySelectionIdentity<Element: Equatable & Sendable>: Equatable, Sendable {
+    let element: Element
+    let rangeLocation: Int
+    let rangeLength: Int
+    let selectedText: String
+
+    func matches(
+        element currentElement: Element,
+        rangeLocation currentRangeLocation: Int,
+        rangeLength currentRangeLength: Int,
+        selectedText currentSelectedText: String
+    ) -> Bool {
+        element == currentElement
+            && rangeLocation == currentRangeLocation
+            && rangeLength == currentRangeLength
+            && selectedText == currentSelectedText
+    }
+}
+
+private struct AXElementIdentity: Equatable, @unchecked Sendable {
+    let element: AXUIElement
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        let element = lhs.element
+        let currentElement = rhs.element
+        return CFEqual(element, currentElement)
+    }
+}
+
+@MainActor
+private final class AccessibilitySelectionToken {
+    private let identity: AccessibilitySelectionIdentity<AXElementIdentity>
+
+    var selectedText: String { identity.selectedText }
+
+    private init(
+        element: AXUIElement,
+        range: CFRange,
+        selectedText: String
+    ) {
+        identity = AccessibilitySelectionIdentity(
+            element: AXElementIdentity(element: element),
+            rangeLocation: range.location,
+            rangeLength: range.length,
+            selectedText: selectedText
+        )
+    }
+
+    static func capture(for pid: pid_t) -> AccessibilitySelectionToken? {
+        let application = AXUIElementCreateApplication(pid)
+        var focusedElementRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElementRef
+        ) == .success,
+        let focusedElementRef,
+        CFGetTypeID(focusedElementRef) == AXUIElementGetTypeID() else { return nil }
+        let focusedElement = focusedElementRef as! AXUIElement
+
+        guard let selectedRange = selectedRange(for: focusedElement),
+              let selectedText = selectedText(for: focusedElement, range: selectedRange) else {
+            return nil
+        }
+        return AccessibilitySelectionToken(
+            element: focusedElement,
+            range: selectedRange,
+            selectedText: selectedText
+        )
+    }
+
+    func matchesCurrentSelection(for pid: pid_t) -> Bool {
+        guard let current = Self.capture(for: pid) else { return false }
+        return identity.matches(
+            element: current.identity.element,
+            rangeLocation: current.identity.rangeLocation,
+            rangeLength: current.identity.rangeLength,
+            selectedText: current.identity.selectedText
+        )
+    }
+
+    private static func selectedRange(for element: AXUIElement) -> CFRange? {
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &rangeRef
+        ) == .success,
+        let rangeRef,
+        CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return nil }
+
+        let rangeValue = rangeRef as! AXValue
+        var selectedRange = CFRange()
+        guard AXValueGetType(rangeValue) == .cfRange,
+              AXValueGetValue(rangeValue, .cfRange, &selectedRange),
+              selectedRange.location >= 0,
+              selectedRange.length > 0 else { return nil }
+        return selectedRange
+    }
+
+    private static func selectedText(for element: AXUIElement, range: CFRange) -> String? {
+        var selectedTextRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            &selectedTextRef
+        ) == .success,
+        let selectedText = selectedTextRef as? String {
+            return (selectedText as NSString).length == range.length ? selectedText : nil
+        }
+
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            &valueRef
+        ) == .success,
+        let value = valueRef as? String else { return nil }
+        let valueLength = (value as NSString).length
+        guard range.location <= valueLength,
+              range.length <= valueLength - range.location else { return nil }
+        return (value as NSString).substring(
+            with: NSRange(location: range.location, length: range.length)
+        )
+    }
 }
 
 struct PasteDeliveryTransaction: Equatable, Sendable {
@@ -2120,11 +2248,11 @@ public final class RecordingEngine: ObservableObject {
         }
         let alreadyFrontmost = targetApp.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier
         if !alreadyFrontmost {
-            targetApp.activate(options: [.activateIgnoringOtherApps])
+            targetApp.activate()
         }
 
         let homePath = home
-        Task {
+        Task { @MainActor in
             let focusDelay: TimeInterval = alreadyFrontmost ? 0.05 : 0.35
             try? await Task.sleep(for: .milliseconds(Int(focusDelay * 1_000)))
             let frontmostBeforeRead = NSWorkspace.shared.frontmostApplication
@@ -2139,10 +2267,10 @@ public final class RecordingEngine: ObservableObject {
                 finishCommandDelivery()
                 return
             }
-            let selectedText = Self.accessibilitySelectedText(for: targetApp.processIdentifier)
+            let selectionToken = AccessibilitySelectionToken.capture(for: targetApp.processIdentifier)
             let frontmostAfterRead = NSWorkspace.shared.frontmostApplication
             let selected = Self.validAccessibilitySelection(
-                selectedText,
+                selectionToken?.selectedText,
                 targetStillFrontmost: Self.pasteTargetIsReady(
                     expectedPid: targetApp.processIdentifier,
                     expectedBundleIdentifier: targetApp.bundleIdentifier,
@@ -2161,37 +2289,37 @@ public final class RecordingEngine: ObservableObject {
                 self.isTranscribing = true
             }
 
-            Task.detached {
-                let rewriteArguments = Self.rewriteCLIArgs(
-                    selectedText: selected,
-                    instruction: instruction,
-                    activeProjectId: canonicalProjectId,
-                    processingConfiguration: processingConfiguration
-                )
+            let rewriteArguments = Self.rewriteCLIArgs(
+                selectedText: selected,
+                instruction: instruction,
+                activeProjectId: canonicalProjectId,
+                processingConfiguration: processingConfiguration
+            )
+            let result = await Task.detached {
                 let result = CLIRunner.run(rewriteArguments, home: homePath)
-                await MainActor.run {
-                    if self.canOwnBusyState(pipelineGeneration: pipelineGeneration) {
-                        self.isTranscribing = false
-                        self.liveTranscriptionText = ""
-                    }
-                    if CLIRunner.parseError(result) == nil, !result.isEmpty {
-                        self.pasteIntoFrontApp(
-                            result,
-                            targetAppBundleIdentifier: targetAppBundleIdentifier,
-                            targetAppPid: targetAppPid,
-                            restoreClipboard: true,
-                            pipelineTrace: pipelineTrace,
-                            pipelineGeneration: pipelineGeneration,
-                            deliveryCompleted: finishCommandDelivery
-                        )
-                    } else {
-                        self.updateDeliveryStatus(
-                            CLIRunner.parseError(result) ?? "Rewrite failed",
-                            pipelineGeneration: pipelineGeneration
-                        )
-                        finishCommandDelivery()
-                    }
-                }
+                return result
+            }.value
+            if self.canOwnBusyState(pipelineGeneration: pipelineGeneration) {
+                self.isTranscribing = false
+                self.liveTranscriptionText = ""
+            }
+            if CLIRunner.parseError(result) == nil, !result.isEmpty {
+                self.pasteIntoFrontApp(
+                    result,
+                    targetAppBundleIdentifier: targetAppBundleIdentifier,
+                    targetAppPid: targetAppPid,
+                    restoreClipboard: true,
+                    commandSelectionToken: selectionToken,
+                    pipelineTrace: pipelineTrace,
+                    pipelineGeneration: pipelineGeneration,
+                    deliveryCompleted: finishCommandDelivery
+                )
+            } else {
+                self.updateDeliveryStatus(
+                    CLIRunner.parseError(result) ?? "Rewrite failed",
+                    pipelineGeneration: pipelineGeneration
+                )
+                finishCommandDelivery()
             }
         }
     }
@@ -2204,58 +2332,6 @@ public final class RecordingEngine: ObservableObject {
         guard targetStillFrontmost,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return text
-    }
-
-    private nonisolated static func accessibilitySelectedText(for pid: pid_t) -> String? {
-        let application = AXUIElementCreateApplication(pid)
-        var focusedElementRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            application,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedElementRef
-        ) == .success,
-        let focusedElementRef,
-        CFGetTypeID(focusedElementRef) == AXUIElementGetTypeID() else { return nil }
-        let focusedElement = focusedElementRef as! AXUIElement
-
-        var selectedTextRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            focusedElement,
-            kAXSelectedTextAttribute as CFString,
-            &selectedTextRef
-        ) == .success,
-        let selectedText = selectedTextRef as? String {
-            return selectedText
-        }
-
-        var valueRef: CFTypeRef?
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            focusedElement,
-            kAXValueAttribute as CFString,
-            &valueRef
-        ) == .success,
-        let value = valueRef as? String,
-        AXUIElementCopyAttributeValue(
-            focusedElement,
-            kAXSelectedTextRangeAttribute as CFString,
-            &rangeRef
-        ) == .success,
-        let rangeRef,
-        CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return nil }
-
-        let rangeValue = rangeRef as! AXValue
-        var selectedRange = CFRange()
-        guard AXValueGetType(rangeValue) == .cfRange,
-              AXValueGetValue(rangeValue, .cfRange, &selectedRange),
-              selectedRange.location >= 0,
-              selectedRange.length > 0 else { return nil }
-        let valueLength = (value as NSString).length
-        guard selectedRange.location <= valueLength,
-              selectedRange.length <= valueLength - selectedRange.location else { return nil }
-        return (value as NSString).substring(
-            with: NSRange(location: selectedRange.location, length: selectedRange.length)
-        )
     }
 
     private func canOwnBusyState(pipelineGeneration: UInt64?) -> Bool {
@@ -2302,6 +2378,7 @@ public final class RecordingEngine: ObservableObject {
         targetAppBundleIdentifier: String? = nil,
         targetAppPid: pid_t? = nil,
         restoreClipboard: Bool = false,
+        commandSelectionToken: AccessibilitySelectionToken? = nil,
         pipelineTrace: RecordingPipelineTrace?,
         pipelineGeneration: UInt64?,
         deliveryCompleted: (@MainActor @Sendable () -> Void)?
@@ -2352,7 +2429,7 @@ public final class RecordingEngine: ObservableObject {
         // Activate the exact app that owned focus when recording started, then paste after focus settles.
         let alreadyFrontmost = app.processIdentifier == frontmostPid
         if !alreadyFrontmost {
-            app.activate(options: [.activateIgnoringOtherApps])
+            app.activate()
         }
 
         let pasteDelay: TimeInterval = alreadyFrontmost ? 0.15 : 0.5
@@ -2365,13 +2442,15 @@ public final class RecordingEngine: ObservableObject {
             settlementDelay: restoreClipboard ? 0.6 : 0,
             targetIsReady: {
                 let frontmost = NSWorkspace.shared.frontmostApplication
-                return Self.pasteTargetIsReady(
+                let appIsReady = Self.pasteTargetIsReady(
                     expectedPid: app.processIdentifier,
                     expectedBundleIdentifier: app.bundleIdentifier,
                     frontmostPid: frontmost?.processIdentifier,
                     frontmostBundleIdentifier: frontmost?.bundleIdentifier,
                     accessibilityTrusted: AXIsProcessTrusted()
                 )
+                guard appIsReady else { return false }
+                return commandSelectionToken?.matchesCurrentSelection(for: app.processIdentifier) ?? true
             },
             payloadIsReady: {
                 guard let ownedPasteboardChangeCount else { return false }
@@ -2615,11 +2694,21 @@ private struct ClipboardSnapshot {
 private final class ProcessDataCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = Data()
+    private var finished = false
 
-    func store(_ data: Data) {
+    func append(_ data: Data) {
         lock.lock()
-        storage = data
-        lock.unlock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        storage.append(data)
+    }
+
+    func finish() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return false }
+        finished = true
+        return true
     }
 
     var data: Data {
@@ -2630,6 +2719,17 @@ private final class ProcessDataCapture: @unchecked Sendable {
 }
 
 enum CLIRunner: Sendable {
+    enum ExecutionError: Error, LocalizedError, Equatable {
+        case timedOut(executable: String, seconds: TimeInterval)
+
+        var errorDescription: String? {
+            switch self {
+            case let .timedOut(executable, seconds):
+                return "Command timed out after \(seconds.formatted()) seconds: \(executable)"
+            }
+        }
+    }
+
     struct Command: Sendable {
         let executable: String
         let argumentsPrefix: [String]
@@ -2639,6 +2739,12 @@ enum CLIRunner: Sendable {
         let stdout: String
         let stderr: String
         let terminationStatus: Int32
+    }
+
+    enum ProcessLifecycleEvent: Equatable, Sendable {
+        case leaderExitObserved
+        case processGroupSignaled(Int32)
+        case leaderReaped(Int32)
     }
 
     static func run(_ args: [String], home: String) -> String {
@@ -2684,40 +2790,430 @@ enum CLIRunner: Sendable {
     static func runExecutable(
         _ executable: String,
         arguments: [String],
-        environment: [String: String]? = nil
+        environment: [String: String]? = nil,
+        executionTimeout: TimeInterval = 120,
+        terminationGracePeriod: TimeInterval = 0.5,
+        forceKillGracePeriod: TimeInterval = 1,
+        pipeDrainTimeout: TimeInterval = 2,
+        beforeExecutionDeadline: (() -> Void)? = nil,
+        lifecycleObserver: ((ProcessLifecycleEvent) -> Void)? = nil
     ) throws -> ProcessOutput {
-        let process = Process()
+        precondition(executionTimeout.isFinite && executionTimeout > 0)
+        precondition(terminationGracePeriod.isFinite && terminationGracePeriod >= 0)
+        precondition(forceKillGracePeriod.isFinite && forceKillGracePeriod >= 0)
+        precondition(pipeDrainTimeout.isFinite && pipeDrainTimeout >= 0)
+
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.environment = environment
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        try process.run()
 
         let stdoutCapture = ProcessDataCapture()
         let stderrCapture = ProcessDataCapture()
         let readers = DispatchGroup()
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stdoutCapture.store(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-            readers.leave()
+        startCapture(stdoutPipe.fileHandleForReading, into: stdoutCapture, readers: readers)
+        startCapture(stderrPipe.fileHandleForReading, into: stderrCapture, readers: readers)
+
+        let processIdentifier: pid_t
+        do {
+            processIdentifier = try spawnProcessGroup(
+                executable,
+                arguments: arguments,
+                environment: environment,
+                stdoutDescriptor: stdoutPipe.fileHandleForWriting.fileDescriptor,
+                stderrDescriptor: stderrPipe.fileHandleForWriting.fileDescriptor,
+                stdoutReadDescriptor: stdoutPipe.fileHandleForReading.fileDescriptor,
+                stderrReadDescriptor: stderrPipe.fileHandleForReading.fileDescriptor
+            )
+        } catch {
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            stopCapture(stdoutPipe.fileHandleForReading, capture: stdoutCapture, readers: readers)
+            stopCapture(stderrPipe.fileHandleForReading, capture: stderrCapture, readers: readers)
+            throw error
         }
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderrCapture.store(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-            readers.leave()
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+
+        beforeExecutionDeadline?()
+        let leaderExitWasObserved: Bool
+        let didTimeOut: Bool
+        do {
+            leaderExitWasObserved = try waitForUnreapedLeaderExit(
+                processIdentifier,
+                timeout: executionTimeout,
+                lifecycleObserver: lifecycleObserver
+            )
+            didTimeOut = !leaderExitWasObserved
+        } catch {
+            signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
+            reapLeaderInBackground(processIdentifier)
+            finishCaptures(
+                stdoutPipe: stdoutPipe,
+                stderrPipe: stderrPipe,
+                stdoutCapture: stdoutCapture,
+                stderrCapture: stderrCapture,
+                readers: readers,
+                pipeDrainTimeout: pipeDrainTimeout
+            )
+            throw error
         }
 
-        process.waitUntilExit()
-        readers.wait()
+        // Keep the direct child unreaped until every group-directed signal has
+        // been sent. Its zombie reserves the process-group identifier, so a PID
+        // reuse cannot redirect cleanup to an unrelated process group.
+        signalProcessGroup(processIdentifier, signal: SIGTERM, lifecycleObserver: lifecycleObserver)
+        var confirmedExit = leaderExitWasObserved
+        if didTimeOut {
+            do {
+                confirmedExit = try waitForUnreapedLeaderExit(
+                    processIdentifier,
+                    timeout: terminationGracePeriod,
+                    lifecycleObserver: lifecycleObserver
+                )
+            } catch {
+                signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
+                reapLeaderInBackground(processIdentifier)
+                finishCaptures(
+                    stdoutPipe: stdoutPipe,
+                    stderrPipe: stderrPipe,
+                    stdoutCapture: stdoutCapture,
+                    stderrCapture: stderrCapture,
+                    readers: readers,
+                    pipeDrainTimeout: pipeDrainTimeout
+                )
+                throw error
+            }
+        } else {
+            _ = readers.wait(timeout: monotonicDispatchDeadline(after: terminationGracePeriod))
+        }
+        signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
+        if !confirmedExit {
+            do {
+                confirmedExit = try waitForUnreapedLeaderExit(
+                    processIdentifier,
+                    timeout: forceKillGracePeriod,
+                    lifecycleObserver: lifecycleObserver
+                )
+            } catch {
+                reapLeaderInBackground(processIdentifier)
+                finishCaptures(
+                    stdoutPipe: stdoutPipe,
+                    stderrPipe: stderrPipe,
+                    stdoutCapture: stdoutCapture,
+                    stderrCapture: stderrCapture,
+                    readers: readers,
+                    pipeDrainTimeout: pipeDrainTimeout
+                )
+                throw error
+            }
+        }
+        let terminationStatus: Int32?
+        if confirmedExit {
+            terminationStatus = try reapLeader(
+                processIdentifier,
+                lifecycleObserver: lifecycleObserver
+            )
+        } else {
+            reapLeaderInBackground(processIdentifier)
+            terminationStatus = nil
+        }
+
+        finishCaptures(
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            stdoutCapture: stdoutCapture,
+            stderrCapture: stderrCapture,
+            readers: readers,
+            pipeDrainTimeout: pipeDrainTimeout
+        )
+
+        if didTimeOut {
+            throw ExecutionError.timedOut(executable: executable, seconds: executionTimeout)
+        }
+
         return ProcessOutput(
             stdout: String(decoding: stdoutCapture.data, as: UTF8.self),
             stderr: String(decoding: stderrCapture.data, as: UTF8.self),
-            terminationStatus: process.terminationStatus
+            terminationStatus: terminationStatus ?? 1
         )
+    }
+
+    private static func spawnProcessGroup(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        stdoutDescriptor: Int32,
+        stderrDescriptor: Int32,
+        stdoutReadDescriptor: Int32,
+        stderrReadDescriptor: Int32
+    ) throws -> pid_t {
+        var duplicatedDescriptors: [Int32] = []
+        defer {
+            for descriptor in duplicatedDescriptors {
+                Darwin.close(descriptor)
+            }
+        }
+        let childStdoutDescriptor = try nonStandardDescriptor(
+            stdoutDescriptor,
+            duplicates: &duplicatedDescriptors
+        )
+        let childStderrDescriptor = try nonStandardDescriptor(
+            stderrDescriptor,
+            duplicates: &duplicatedDescriptors
+        )
+
+        var fileActions: posix_spawn_file_actions_t?
+        try checkPOSIX(posix_spawn_file_actions_init(&fileActions), operation: "initialize spawn file actions")
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        try checkPOSIX(
+            posix_spawn_file_actions_adddup2(&fileActions, childStdoutDescriptor, STDOUT_FILENO),
+            operation: "configure command stdout"
+        )
+        try checkPOSIX(
+            posix_spawn_file_actions_adddup2(&fileActions, childStderrDescriptor, STDERR_FILENO),
+            operation: "configure command stderr"
+        )
+        let inheritedDescriptors = Set([
+            stdoutReadDescriptor,
+            stderrReadDescriptor,
+            stdoutDescriptor,
+            stderrDescriptor,
+            childStdoutDescriptor,
+            childStderrDescriptor,
+        ]).filter { $0 != STDOUT_FILENO && $0 != STDERR_FILENO }
+        for descriptor in inheritedDescriptors {
+            try checkPOSIX(
+                posix_spawn_file_actions_addclose(&fileActions, descriptor),
+                operation: "close inherited command descriptor"
+            )
+        }
+
+        var attributes: posix_spawnattr_t?
+        try checkPOSIX(posix_spawnattr_init(&attributes), operation: "initialize spawn attributes")
+        defer { posix_spawnattr_destroy(&attributes) }
+        var defaultSignals = sigset_t()
+        Darwin.sigemptyset(&defaultSignals)
+        Darwin.sigaddset(&defaultSignals, SIGTERM)
+        try checkPOSIX(
+            posix_spawnattr_setsigdefault(&attributes, &defaultSignals),
+            operation: "reset command termination signal"
+        )
+        var unblockedSignals = sigset_t()
+        Darwin.sigemptyset(&unblockedSignals)
+        try checkPOSIX(
+            posix_spawnattr_setsigmask(&attributes, &unblockedSignals),
+            operation: "unblock command signals"
+        )
+        let spawnFlags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+        try checkPOSIX(
+            posix_spawnattr_setflags(&attributes, Int16(spawnFlags)),
+            operation: "configure command process group"
+        )
+        try checkPOSIX(
+            posix_spawnattr_setpgroup(&attributes, 0),
+            operation: "configure command process group leader"
+        )
+
+        let environmentValues = (environment ?? ProcessInfo.processInfo.environment)
+            .map { "\($0.key)=\($0.value)" }
+        var processIdentifier: pid_t = 0
+        let spawnResult = withMutableCStringArray([executable] + arguments) { argumentVector in
+            withMutableCStringArray(environmentValues) { environmentVector in
+                posix_spawn(
+                    &processIdentifier,
+                    executable,
+                    &fileActions,
+                    &attributes,
+                    argumentVector,
+                    environmentVector
+                )
+            }
+        }
+        try checkPOSIX(spawnResult, operation: "launch command")
+        return processIdentifier
+    }
+
+    private static func nonStandardDescriptor(
+        _ descriptor: Int32,
+        duplicates: inout [Int32]
+    ) throws -> Int32 {
+        guard descriptor == STDOUT_FILENO || descriptor == STDERR_FILENO else {
+            return descriptor
+        }
+        let duplicate = Darwin.fcntl(descriptor, F_DUPFD_CLOEXEC, 3)
+        guard duplicate != -1 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to duplicate command descriptor: \(String(cString: strerror(errno)))"]
+            )
+        }
+        duplicates.append(duplicate)
+        return duplicate
+    }
+
+    private static func withMutableCStringArray<Result>(
+        _ strings: [String],
+        body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) throws -> Result
+    ) rethrows -> Result {
+        var pointers = strings.map { strdup($0) }
+        pointers.append(nil)
+        defer {
+            for pointer in pointers where pointer != nil {
+                free(pointer)
+            }
+        }
+        return try pointers.withUnsafeMutableBufferPointer { buffer in
+            try body(buffer.baseAddress!)
+        }
+    }
+
+    private static func checkPOSIX(_ result: Int32, operation: String) throws {
+        guard result == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(result),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to \(operation): \(String(cString: strerror(result)))"]
+            )
+        }
+    }
+
+    private static func waitForUnreapedLeaderExit(
+        _ processIdentifier: pid_t,
+        timeout: TimeInterval,
+        lifecycleObserver: ((ProcessLifecycleEvent) -> Void)?
+    ) throws -> Bool {
+        let deadline = monotonicUptimeDeadline(after: timeout)
+        repeat {
+            var information = siginfo_t()
+            var result: Int32
+            repeat {
+                result = Darwin.waitid(
+                    P_PID,
+                    id_t(processIdentifier),
+                    &information,
+                    WEXITED | WNOHANG | WNOWAIT
+                )
+            } while result == -1 && errno == EINTR
+            guard result == 0 else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(errno),
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to observe command exit: \(String(cString: strerror(errno)))"]
+                )
+            }
+            if information.si_pid == processIdentifier {
+                lifecycleObserver?(.leaderExitObserved)
+                return true
+            }
+            if DispatchTime.now().uptimeNanoseconds >= deadline { return false }
+            usleep(10_000)
+        } while true
+    }
+
+    private static func signalProcessGroup(
+        _ processGroup: pid_t,
+        signal: Int32,
+        lifecycleObserver: ((ProcessLifecycleEvent) -> Void)?
+    ) {
+        lifecycleObserver?(.processGroupSignaled(signal))
+        _ = Darwin.kill(-processGroup, signal)
+    }
+
+    private static func reapLeader(
+        _ processIdentifier: pid_t,
+        lifecycleObserver: ((ProcessLifecycleEvent) -> Void)?
+    ) throws -> Int32 {
+        var waitStatus: Int32 = 0
+        var waitResult: pid_t
+        repeat {
+            waitResult = Darwin.waitpid(processIdentifier, &waitStatus, 0)
+        } while waitResult == -1 && errno == EINTR
+        guard waitResult == processIdentifier else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to reap command: \(String(cString: strerror(errno)))"]
+            )
+        }
+        let terminationStatus = decode(waitStatus: waitStatus)
+        lifecycleObserver?(.leaderReaped(terminationStatus))
+        return terminationStatus
+    }
+
+    private static func reapLeaderInBackground(_ processIdentifier: pid_t) {
+        DispatchQueue.global(qos: .utility).async {
+            var waitStatus: Int32 = 0
+            var waitResult: pid_t
+            repeat {
+                waitResult = Darwin.waitpid(processIdentifier, &waitStatus, 0)
+            } while waitResult == -1 && errno == EINTR
+        }
+    }
+
+    private static func decode(waitStatus: Int32) -> Int32 {
+        let signal = waitStatus & 0x7f
+        if signal == 0 {
+            return (waitStatus >> 8) & 0xff
+        }
+        return 128 + signal
+    }
+
+    private static func monotonicDispatchDeadline(after timeout: TimeInterval) -> DispatchTime {
+        DispatchTime(uptimeNanoseconds: monotonicUptimeDeadline(after: timeout))
+    }
+
+    private static func monotonicUptimeDeadline(after timeout: TimeInterval) -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let maximumDelay = min(UInt64(Int64.max), UInt64.max - now)
+        let requestedNanoseconds = timeout * 1_000_000_000
+        let nanoseconds = requestedNanoseconds >= Double(maximumDelay)
+            ? maximumDelay
+            : UInt64(requestedNanoseconds.rounded(.up))
+        return now + nanoseconds
+    }
+
+    private static func finishCaptures(
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe,
+        stdoutCapture: ProcessDataCapture,
+        stderrCapture: ProcessDataCapture,
+        readers: DispatchGroup,
+        pipeDrainTimeout: TimeInterval
+    ) {
+        _ = readers.wait(timeout: monotonicDispatchDeadline(after: pipeDrainTimeout))
+        stopCapture(stdoutPipe.fileHandleForReading, capture: stdoutCapture, readers: readers)
+        stopCapture(stderrPipe.fileHandleForReading, capture: stderrCapture, readers: readers)
+    }
+
+    private static func startCapture(
+        _ handle: FileHandle,
+        into capture: ProcessDataCapture,
+        readers: DispatchGroup
+    ) {
+        readers.enter()
+        handle.readabilityHandler = { readableHandle in
+            let data = readableHandle.availableData
+            if data.isEmpty {
+                if capture.finish() {
+                    readers.leave()
+                }
+            } else {
+                capture.append(data)
+            }
+        }
+    }
+
+    private static func stopCapture(
+        _ handle: FileHandle,
+        capture: ProcessDataCapture,
+        readers: DispatchGroup
+    ) {
+        handle.readabilityHandler = nil
+        try? handle.close()
+        if capture.finish() {
+            readers.leave()
+        }
     }
 
     static func parseError(_ output: String) -> String? {

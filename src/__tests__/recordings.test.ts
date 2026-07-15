@@ -80,6 +80,75 @@ describe("createRecording", () => {
     expect(listRecordings({}, db).filter((recording) => recording.id === recordingId)).toHaveLength(1);
   });
 
+  test("an idempotency key without an input id creates one stable local row", () => {
+    const first = createRecording({ raw_text: "settled realtime text" }, db, "logical-save-a");
+    const retry = createRecording({ raw_text: "batch fallback transcript" }, db, "logical-save-a");
+
+    expect(first.id).toBe("logical-save-a");
+    expect(retry.id).toBe(first.id);
+    expect(retry.raw_text).toBe("settled realtime text");
+    expect(listRecordings({}, db).filter((recording) => recording.id === first.id)).toHaveLength(1);
+  });
+
+  test("a null body id lets a nonempty idempotency key define the local identity", () => {
+    const input = JSON.parse('{"id":null,"raw_text":"settled realtime text"}');
+    const recording = createRecording(input, db, "logical-save-null");
+
+    expect(recording.id).toBe("logical-save-null");
+    expect(listRecordings({}, db)).toHaveLength(1);
+  });
+
+  test("a conflicting explicit id and idempotency key fail before a local write", () => {
+    expect(() => createRecording(
+      { id: "recording-a", raw_text: "must not persist" },
+      db,
+      "logical-save-b",
+    )).toThrow("recording id conflicts with idempotency key");
+    expect(listRecordings({}, db)).toHaveLength(0);
+  });
+
+  test("header-unsafe idempotency keys fail consistently before a local write", () => {
+    expect(() => createRecording(
+      { raw_text: "must not persist" },
+      db,
+      " logical-save-a ",
+    )).toThrow("idempotency key must not contain leading or trailing whitespace");
+    expect(() => createRecording(
+      { id: " explicit-id ", raw_text: "must not persist" },
+      db,
+    )).toThrow("recording id must not contain leading or trailing whitespace");
+    expect(listRecordings({}, db)).toHaveLength(0);
+  });
+
+  test("invalid runtime recording ids and idempotency keys fail before a local write", () => {
+    const invalidBodyIds = [
+      [JSON.parse('{"id":"","raw_text":"must not persist"}'), "recording id must not be empty"],
+      [JSON.parse('{"id":17,"raw_text":"must not persist"}'), "recording id must be a string"],
+      [JSON.parse('{"id":"bad\\u0000id","raw_text":"must not persist"}'), "recording id must not contain control characters"],
+      [{ id: "x".repeat(256), raw_text: "must not persist" }, "recording id must not exceed 255 characters"],
+    ] as const;
+    for (const [input, message] of invalidBodyIds) {
+      expect(() => Reflect.apply(createRecording, undefined, [input, db])).toThrow(message);
+    }
+
+    const invalidKeys: ReadonlyArray<readonly [unknown, string]> = [
+      ["", "idempotency key must not be empty"],
+      [null, "idempotency key must be a string"],
+      [17, "idempotency key must be a string"],
+      ["bad\u0000key", "idempotency key must not contain control characters"],
+      ["logical-save-\u00e9", "idempotency key must contain only printable ASCII characters"],
+      ["x".repeat(256), "idempotency key must not exceed 255 characters"],
+    ];
+    for (const [key, message] of invalidKeys) {
+      expect(() => Reflect.apply(createRecording, undefined, [
+        { raw_text: "must not persist" },
+        db,
+        key,
+      ])).toThrow(message);
+    }
+    expect(listRecordings({}, db)).toHaveLength(0);
+  });
+
   test("creates a recording with all fields", () => {
     const rec = createRecording(
       {

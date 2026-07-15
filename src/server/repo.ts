@@ -20,6 +20,7 @@ import type {
   Agent,
   Project,
 } from "../types/index.js";
+import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 
 // Re-exported so `/v1` route code can `import * as repo` and reference
 // `repo.ProjectNotFoundError` when mapping a bad focus ref to a clean 400.
@@ -91,10 +92,12 @@ function parseProject(row: Record<string, unknown>): Project {
 export async function createRecording(
   pg: PgAdapterAsync,
   input: CreateRecordingInput,
+  idempotencyKey?: string,
 ): Promise<Recording> {
   if (typeof input.raw_text !== "string" || !input.raw_text) {
     throw new ValidationError("raw_text is required");
   }
+  input = recordingCreateIdentity(input, idempotencyKey).input;
   const id = input.id || shortUuid();
 
   return pg.transaction(async (transaction) => {

@@ -280,6 +280,52 @@ struct PasteTargetTests {
         ) == " fresh\nselection\t ")
     }
 
+    @Test("command rewrite rejects a different focused field in the same app")
+    func commandSelectionRejectsDifferentFocusedElement() {
+        let captured = AccessibilitySelectionIdentity(
+            element: "field-a",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        )
+
+        #expect(!captured.matches(
+            element: "field-b",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        ))
+    }
+
+    @Test("command rewrite rejects a changed selection in the same focused field")
+    func commandSelectionRejectsChangedRangeOrText() {
+        let captured = AccessibilitySelectionIdentity(
+            element: "field-a",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        )
+
+        #expect(!captured.matches(
+            element: "field-a",
+            rangeLocation: 5,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        ))
+        #expect(!captured.matches(
+            element: "field-a",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "changed"
+        ))
+        #expect(captured.matches(
+            element: "field-a",
+            rangeLocation: 4,
+            rangeLength: 7,
+            selectedText: "rewrite"
+        ))
+    }
+
     @Test("paste readiness requires the exact frontmost pid and current Accessibility trust")
     func pasteReadinessIncludesAccessibility() {
         #expect(RecordingEngine.pasteTargetIsReady(
