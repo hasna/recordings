@@ -203,7 +203,7 @@ describe("recordings CLI", () => {
     expect(status.signature_authorities).toEqual([]);
   });
 
-  test("app install exposes prebuilt artifact, identity migration, and launch controls", async () => {
+  test("app install requires finalized artifact, manifest, Team ID, and launch controls", async () => {
     const proc = Bun.spawn(
       [process.execPath, "src/cli/index.ts", "app", "install", "--help"],
       {
@@ -221,9 +221,13 @@ describe("recordings CLI", () => {
 
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
-    expect(stdout).toContain("--app-source");
+    expect(stdout).toContain("--artifact");
+    expect(stdout).toContain("--manifest");
+    expect(stdout).toContain("--expected-team-id");
     expect(stdout).toContain("--allow-signing-identity-migration");
     expect(stdout).toContain("--launch");
+    expect(stdout).not.toContain("--app-source");
+    expect(stdout).not.toContain("--mode");
   });
 
   test("app status inspects the canonical app and reports legacy duplicates", async () => {

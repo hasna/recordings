@@ -693,19 +693,23 @@ const appCommand = program
 
 appCommand
   .command("install")
-  .description("Install a verified Recordings.app or build one from the installed package")
-  .option("--mode <mode>", "Swift build mode: debug or release", "release")
-  .option("--app-source <path>", "Install an exact prebuilt signed Recordings.app bundle")
+  .description("Install a finalized, verified Recordings.app ZIP and provenance manifest")
+  .requiredOption("--artifact <path>", "Finalized Recordings.app ZIP artifact")
+  .requiredOption("--manifest <path>", "Artifact provenance manifest")
+  .requiredOption("--expected-team-id <team>", "Required Developer ID TeamIdentifier")
   .option(
     "--allow-signing-identity-migration",
     "Allow one reviewed signer change that requires new macOS permission approval",
   )
   .option("--launch", "Launch and verify the canonical app after installation")
+  .option("--launch-timeout <seconds>", "Canonical process launch timeout", "10")
   .action((opts: {
-    mode: string;
-    appSource?: string;
+    artifact: string;
+    manifest: string;
+    expectedTeamId: string;
     allowSigningIdentityMigration?: boolean;
     launch?: boolean;
+    launchTimeout: string;
   }) => {
     const status = getMacOSAppStatus();
     if (!status.installer_available) {
@@ -713,8 +717,17 @@ appCommand
       process.exit(1);
     }
 
-    const installerArgs = [status.installer_path, "--mode", opts.mode];
-    if (opts.appSource) installerArgs.push("--app-source", opts.appSource);
+    const installerArgs = [
+      status.installer_path,
+      "--artifact",
+      opts.artifact,
+      "--manifest",
+      opts.manifest,
+      "--expected-team-id",
+      opts.expectedTeamId,
+      "--launch-timeout",
+      opts.launchTimeout,
+    ];
     if (opts.allowSigningIdentityMigration) {
       installerArgs.push("--allow-signing-identity-migration");
     }

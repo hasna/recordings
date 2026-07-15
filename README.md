@@ -34,31 +34,40 @@ The app embeds a same-version `recordings` CLI as its data layer, so the CLI, MC
 share one store without depending on a possibly stale global CLI installation.
 
 ```bash
-# Install an already signed and notarized artifact without changing its signature:
-recordings app install --app-source /path/to/Recordings.app --launch
+# Install the finalized ZIP and matching provenance manifest without changing the app:
+recordings app install \
+  --artifact /path/to/Recordings-0.2.11-macos.zip \
+  --manifest /path/to/Recordings-0.2.11-macos.manifest.json \
+  --expected-team-id TEAMID1234 \
+  --launch
 
 # The first migration from an ad-hoc or different signing identity is explicit:
-recordings app install --app-source /path/to/Recordings.app \
+recordings app install \
+  --artifact /path/to/Recordings-0.2.11-macos.zip \
+  --manifest /path/to/Recordings-0.2.11-macos.manifest.json \
+  --expected-team-id TEAMID1234 \
   --allow-signing-identity-migration --launch
 
 recordings app open           # launch it
 recordings app status         # show install state
 
-# Local debug builds are ad-hoc signed and do not preserve TCC grants across replacements:
-recordings app install --mode debug
-
-# Production release builds require a Developer ID identity and a notarytool keychain profile:
+# All distributable builds require a pinned Developer ID team and notarytool profile:
 cd src/native/Recordings
 RECORDINGS_CODESIGN_IDENTITY="Developer ID Application: ..." \
+RECORDINGS_EXPECTED_TEAM_IDENTIFIER="TEAMID1234" \
 RECORDINGS_NOTARY_KEYCHAIN_PROFILE="recordings-notary" ./build.sh release
 swift test                    # run the native test suite
 ```
 
 The canonical install location is `~/Applications/Recordings.app`. Release installation
-verifies the bundle identifier, Developer ID signature, Gatekeeper assessment, and signing
-compatibility with the installed app. Migrating once from an ad-hoc build to the stable release
-identity requires approving Microphone and Accessibility again; compatible signed updates do not
-reset those permissions. The installer never calls `tccutil reset` automatically.
+accepts only a finalized ZIP plus its manifest. The manifest binds the bundle identifier, version,
+source commit, architectures, pinned Team ID, designated-requirement digest, companion version and
+hash, app executable hash, archive hash, and trusted signing timestamps. Installation verifies the
+signed embedded provenance, notarization, Gatekeeper, and bidirectional signing compatibility with
+every discovered app copy before mutation. Migrating once from an ad-hoc build to the stable
+release identity requires approving Microphone and Accessibility again; compatible signed updates
+do not reset those permissions. The installer never calls `tccutil reset`, clears quarantine,
+re-signs an artifact, or builds on the target machine.
 
 Requires macOS 26+; source builds also require a Swift toolchain (Xcode or Command Line Tools).
 Set the OpenAI API key in **Settings** or via `recordings` config;

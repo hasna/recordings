@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build, sign, and optionally notarize Recordings.app.
+# Build, sign, notarize, and finalize a Recordings.app artifact.
 # Usage: ./build.sh [debug|release]
 
 set -euo pipefail
 
 MODE="${1:-release}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PACKAGE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$SCRIPT_DIR"
 
 case "$MODE" in
@@ -17,19 +18,21 @@ case "$MODE" in
 esac
 
 CODESIGN_IDENTITY="${RECORDINGS_CODESIGN_IDENTITY:-}"
+EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
 NOTARY_PROFILE="${RECORDINGS_NOTARY_KEYCHAIN_PROFILE:-}"
+PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 
-if [ "$MODE" = "release" ]; then
-    if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
-        echo "Release builds require RECORDINGS_CODESIGN_IDENTITY for a stable Developer ID Application identity." >&2
-        exit 1
-    fi
-    if [ -z "$NOTARY_PROFILE" ]; then
-        echo "Release builds require RECORDINGS_NOTARY_KEYCHAIN_PROFILE for notarization." >&2
-        exit 1
-    fi
-else
-    CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
+    echo "Builds require RECORDINGS_CODESIGN_IDENTITY for a Developer ID Application identity." >&2
+    exit 1
+fi
+if [ -z "$EXPECTED_TEAM_ID" ]; then
+    echo "Builds require RECORDINGS_EXPECTED_TEAM_IDENTIFIER to pin the Developer ID team." >&2
+    exit 1
+fi
+if [ -z "$NOTARY_PROFILE" ]; then
+    echo "Builds require RECORDINGS_NOTARY_KEYCHAIN_PROFILE for notarization." >&2
+    exit 1
 fi
 
 echo "Building Recordings.app ($MODE)..."
@@ -41,19 +44,11 @@ CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 HELPERS="$CONTENTS/Helpers"
-PACKAGE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES" "$HELPERS"
-
-# Copy binary
 cp "$BUILD_DIR/App" "$MACOS/Recordings"
-
-# Embed an immutable, same-source CLI so the app cannot accidentally run an older
-# global `recordings` installation with a different command surface.
 "$PACKAGE_ROOT/scripts/build_companion_cli.sh" "$HELPERS/recordings"
-
-# Copy Info.plist
 cp RecordingsLib/Info.plist "$CONTENTS/Info.plist"
 
 for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.resources .build/*/"$MODE"/*.bundle; do
@@ -65,31 +60,83 @@ done
 SIGN_ARGUMENTS=(
     --force
     --sign "$CODESIGN_IDENTITY"
+    --options runtime
+    --timestamp
 )
-if [ "$MODE" = "release" ]; then
-    SIGN_ARGUMENTS+=(--options runtime --timestamp)
-fi
-
 codesign "${SIGN_ARGUMENTS[@]}" "$HELPERS/recordings"
+bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" provenance \
+    --app "$APP_DIR" \
+    --team-id "$EXPECTED_TEAM_ID" \
+    --package-root "$PACKAGE_ROOT"
 codesign "${SIGN_ARGUMENTS[@]}" \
     --entitlements RecordingsLib/Recordings.entitlements \
     "$APP_DIR"
+
+verify_signed_code() {
+    local code_path="$1"
+    local label="$2"
+    local details
+    local authority
+    local team_id
+    local timestamp
+    codesign --verify --strict --verbose=2 "$code_path"
+    details="$(codesign -d --verbose=4 "$code_path" 2>&1)"
+    authority="$(printf '%s\n' "$details" | awk -F= '/^Authority=/ { print $2; exit }')"
+    team_id="$(printf '%s\n' "$details" | awk -F= '/^TeamIdentifier=/ { print $2; exit }')"
+    timestamp="$(printf '%s\n' "$details" | awk -F= '/^Timestamp=/ { print $2; exit }')"
+    if [[ "$authority" != "Developer ID Application:"* ]]; then
+        echo "$label is not signed by a Developer ID Application authority." >&2
+        exit 1
+    fi
+    if [ "$team_id" != "$EXPECTED_TEAM_ID" ]; then
+        echo "$label TeamIdentifier ${team_id:-missing} does not match ${EXPECTED_TEAM_ID}." >&2
+        exit 1
+    fi
+    if [[ "$details" != *"(runtime)"* ]]; then
+        echo "$label is missing hardened runtime signing." >&2
+        exit 1
+    fi
+    case "$timestamp" in
+        ''|none|None|NONE)
+            echo "$label is missing a trusted signing timestamp." >&2
+            exit 1
+            ;;
+    esac
+}
+
+verify_signed_code "$HELPERS/recordings" "Companion CLI"
+verify_signed_code "$APP_DIR" "Recordings.app"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
+VERSION="$("$PLIST_BUDDY" -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
 if [ "$MODE" = "release" ]; then
-    NOTARY_ARCHIVE="$BUILD_DIR/Recordings-notarization.zip"
-    rm -f "$NOTARY_ARCHIVE"
-    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$NOTARY_ARCHIVE"
-    xcrun notarytool submit "$NOTARY_ARCHIVE" \
-        --keychain-profile "$NOTARY_PROFILE" \
-        --wait
-    rm -f "$NOTARY_ARCHIVE"
-    xcrun stapler staple "$APP_DIR"
-    xcrun stapler validate "$APP_DIR"
-    spctl --assess --type execute --verbose=2 "$APP_DIR"
+    ARTIFACT_BASENAME="Recordings-${VERSION}-macos"
+else
+    ARTIFACT_BASENAME="Recordings-${VERSION}-macos-debug"
 fi
+NOTARY_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}-notarization.zip"
+FINAL_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}.zip"
+FINAL_MANIFEST="$BUILD_DIR/${ARTIFACT_BASENAME}.manifest.json"
 
-echo "Built $APP_DIR"
-if [ "$MODE" = "debug" ] && [ "$CODESIGN_IDENTITY" = "-" ]; then
-    echo "Debug build uses an ad-hoc signature; macOS permissions may not survive replacement."
-fi
+rm -f "$NOTARY_ARCHIVE" "$FINAL_ARCHIVE" "$FINAL_MANIFEST"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$NOTARY_ARCHIVE"
+xcrun notarytool submit "$NOTARY_ARCHIVE" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+rm -f "$NOTARY_ARCHIVE"
+xcrun stapler staple "$APP_DIR"
+xcrun stapler validate "$APP_DIR"
+spctl --assess --type execute --verbose=2 "$APP_DIR"
+verify_signed_code "$HELPERS/recordings" "Companion CLI"
+verify_signed_code "$APP_DIR" "Recordings.app"
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$FINAL_ARCHIVE"
+bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" finalize \
+    --app "$APP_DIR" \
+    --archive "$FINAL_ARCHIVE" \
+    --manifest "$FINAL_MANIFEST" \
+    --team-id "$EXPECTED_TEAM_ID"
+
+echo "Built immutable app artifact: $FINAL_ARCHIVE"
+echo "Built artifact manifest: $FINAL_MANIFEST"

@@ -44,8 +44,7 @@
     "dev:mcp": "bun run src/mcp/index.ts",
     "verify:release": "bun run scripts/release-guard.ts",
     "prepack": "bun run build && bun run verify:release",
-    "prepublishOnly": "bun run typecheck && bun run test",
-    "postinstall": "bash scripts/install_macos_app.sh --postinstall"
+    "prepublishOnly": "bun run typecheck && bun run test"
   },
   "files": [
     "dist/",
