@@ -141,5 +141,7 @@ describe("native app companion contract", () => {
 
     expect(showMainWindow.indexOf("NSApplication.shared.activate()"))
       .toBeLessThan(showMainWindow.indexOf("if let mainWindow"));
+    expect(showMainWindow.indexOf("NSApplication.shared.setActivationPolicy(.regular)"))
+      .toBeLessThan(showMainWindow.indexOf("NSApplication.shared.activate()"));
   });
 });

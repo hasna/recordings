@@ -67,6 +67,7 @@ final class RecordingsAppState: ObservableObject {
 
     private func showWindow(contentView: NSView) {
         windowActivationCount += 1
+        NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate()
         if let mainWindow {
             mainWindow.makeKeyAndOrderFront(nil)
@@ -118,7 +119,7 @@ final class RecordingsAppState: ObservableObject {
             self.showRuntimeSmokeWindow()
             let firstWindow = self.mainWindow
             self.showRuntimeSmokeWindow()
-            self.finishRuntimeSmoke(
+            self.finishRuntimeSmokeWhenWindowSettles(
                 mode: mode,
                 surfaceCount: runtimeSmokeProbe.surfaceAppearances,
                 labels: runtimeSmokeProbe.renderedLabels,
@@ -126,6 +127,37 @@ final class RecordingsAppState: ObservableObject {
                 retainedWindowReused: firstWindow === self.mainWindow
             )
         }
+    }
+
+    private func finishRuntimeSmokeWhenWindowSettles(
+        mode: String,
+        surfaceCount: Int,
+        labels: [String],
+        accessibility: RuntimeSmokeAccessibilitySnapshot,
+        retainedWindowReused: Bool,
+        attempt: Int = 0
+    ) {
+        let windowSettled = NSApplication.shared.isActive && (mainWindow?.isKeyWindow ?? false)
+        guard windowSettled || attempt >= 20 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.finishRuntimeSmokeWhenWindowSettles(
+                    mode: mode,
+                    surfaceCount: surfaceCount,
+                    labels: labels,
+                    accessibility: accessibility,
+                    retainedWindowReused: retainedWindowReused,
+                    attempt: attempt + 1
+                )
+            }
+            return
+        }
+        finishRuntimeSmoke(
+            mode: mode,
+            surfaceCount: surfaceCount,
+            labels: labels,
+            accessibility: accessibility,
+            retainedWindowReused: retainedWindowReused
+        )
     }
 
     private func finishRuntimeSmoke(
