@@ -693,16 +693,34 @@ const appCommand = program
 
 appCommand
   .command("install")
-  .description("Build and install Recordings.app from the installed package")
+  .description("Install a verified Recordings.app or build one from the installed package")
   .option("--mode <mode>", "Swift build mode: debug or release", "release")
-  .action((opts: { mode: string }) => {
+  .option("--app-source <path>", "Install an exact prebuilt signed Recordings.app bundle")
+  .option(
+    "--allow-signing-identity-migration",
+    "Allow one reviewed signer change that requires new macOS permission approval",
+  )
+  .option("--launch", "Launch and verify the canonical app after installation")
+  .action((opts: {
+    mode: string;
+    appSource?: string;
+    allowSigningIdentityMigration?: boolean;
+    launch?: boolean;
+  }) => {
     const status = getMacOSAppStatus();
     if (!status.installer_available) {
       console.error(chalk.red(`App installer missing from package: ${status.installer_path}`));
       process.exit(1);
     }
 
-    const result = spawnSync("bash", [status.installer_path, "--mode", opts.mode], {
+    const installerArgs = [status.installer_path, "--mode", opts.mode];
+    if (opts.appSource) installerArgs.push("--app-source", opts.appSource);
+    if (opts.allowSigningIdentityMigration) {
+      installerArgs.push("--allow-signing-identity-migration");
+    }
+    if (opts.launch) installerArgs.push("--launch");
+
+    const result = spawnSync("bash", installerArgs, {
       stdio: "inherit",
       env: process.env,
     });

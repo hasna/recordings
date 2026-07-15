@@ -34,18 +34,35 @@ The app embeds a same-version `recordings` CLI as its data layer, so the CLI, MC
 share one store without depending on a possibly stale global CLI installation.
 
 ```bash
-# Build + install Recordings.app from the installed package (macOS 26, Swift toolchain):
-recordings app install        # builds and installs to ~/.hasna/recordings/Recordings.app
+# Install an already signed and notarized artifact without changing its signature:
+recordings app install --app-source /path/to/Recordings.app --launch
+
+# The first migration from an ad-hoc or different signing identity is explicit:
+recordings app install --app-source /path/to/Recordings.app \
+  --allow-signing-identity-migration --launch
+
 recordings app open           # launch it
 recordings app status         # show install state
 
-# From a source checkout:
-cd src/native/Recordings && ./build.sh release && open .build/release/Recordings.app
+# Local debug builds are ad-hoc signed and do not preserve TCC grants across replacements:
+recordings app install --mode debug
+
+# Production release builds require a Developer ID identity and a notarytool keychain profile:
+cd src/native/Recordings
+RECORDINGS_CODESIGN_IDENTITY="Developer ID Application: ..." \
+RECORDINGS_NOTARY_KEYCHAIN_PROFILE="recordings-notary" ./build.sh release
 swift test                    # run the native test suite
 ```
 
-Requires macOS 26+ and a Swift toolchain (Xcode or Command Line Tools). Set the OpenAI API
-key in **Settings** or via `recordings` config; transcription/enhancement use it.
+The canonical install location is `~/Applications/Recordings.app`. Release installation
+verifies the bundle identifier, Developer ID signature, Gatekeeper assessment, and signing
+compatibility with the installed app. Migrating once from an ad-hoc build to the stable release
+identity requires approving Microphone and Accessibility again; compatible signed updates do not
+reset those permissions. The installer never calls `tccutil reset` automatically.
+
+Requires macOS 26+; source builds also require a Swift toolchain (Xcode or Command Line Tools).
+Set the OpenAI API key in **Settings** or via `recordings` config;
+transcription/enhancement use it.
 
 The app's **Transcription Cleanup** setting controls the same post-processing pipeline as
 the CLI and MCP server. Use **Raw** to keep verbatim text only, **Auto** to clean up only

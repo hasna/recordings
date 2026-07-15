@@ -203,6 +203,29 @@ describe("recordings CLI", () => {
     expect(status.signature_authorities).toEqual([]);
   });
 
+  test("app install exposes prebuilt artifact, identity migration, and launch controls", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "app", "install", "--help"],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("--app-source");
+    expect(stdout).toContain("--allow-signing-identity-migration");
+    expect(stdout).toContain("--launch");
+  });
+
   test("app status inspects the canonical app and reports legacy duplicates", async () => {
     const home = join(tmpdir(), `open-recordings-cli-app-layout-${Date.now()}`);
     tempDirs.push(home);
