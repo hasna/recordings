@@ -141,13 +141,14 @@ describe("Tailscale CLI resolution", () => {
   });
 
   test.each([
-    ["relative", "relative/Tailscale"],
-    ["multi-line", "/tmp/one\\n/tmp/two"],
-    ["carriage-return", "/tmp/one\\r/tmp/two"],
-  ])("rejects an ambiguous or unsafe %s path", async (_label, fallback) => {
+    ["relative", "relative/Tailscale", "must be absolute"],
+    ["multi-line", "/tmp/one\n/tmp/two", "malformed"],
+    ["carriage-return", "/tmp/one\r/tmp/two", "malformed"],
+  ])("rejects an ambiguous or unsafe %s path", async (_label, fallback, expectedError) => {
     const root = temporaryDirectory();
     const result = await resolveWith({ path: join(root, "empty-bin"), fallback });
     expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(expectedError);
   });
 
   test("quotes a resolved path instead of evaluating shell metacharacters", async () => {
