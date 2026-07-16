@@ -23,10 +23,10 @@ private final class PermissionRequestResultBox: @unchecked Sendable {
 }
 
 /// Recordings — a full native macOS app. The main window is the Recordings workspace
-/// (record + library); the menu-bar surface, global shortcuts, and dictation/command modes
-/// keep working while the window is in the background.
+/// (record + library); the menu-bar surface, global shortcuts, and the intent-routed
+/// recording flow keep working while the window is in the background.
 /// Keeps the app (and therefore the RecordingEngine + global shortcuts) alive after the
-/// last window is closed, so background dictation/command shortcuts keep working.
+/// last window is closed, so background recording shortcuts keep working.
 @MainActor
 final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
     weak var state: RecordingsAppState?

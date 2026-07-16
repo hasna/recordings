@@ -557,27 +557,18 @@ struct RealtimeTranscriptionTests {
         await persistenceTask.value
         #expect(probe.persistedResult?.text == "stored text")
         #expect(RecordingEngine.shouldPasteBeforePersistence(
-            recordingMode: .pushToTalk,
             postProcessingMode: PostProcessingMode.off.rawValue
         ))
         #expect(RecordingEngine.shouldPasteBeforePersistence(
-            recordingMode: .command,
-            postProcessingMode: PostProcessingMode.off.rawValue
-        ) == false)
-        #expect(RecordingEngine.shouldPasteBeforePersistence(
-            recordingMode: .pushToTalk,
             postProcessingMode: PostProcessingMode.always.rawValue
         ) == false)
         #expect(RecordingEngine.shouldLabelRewriting(
-            recordingMode: .pushToTalk,
             postProcessingMode: PostProcessingMode.always.rawValue
         ))
         #expect(RecordingEngine.shouldLabelRewriting(
-            recordingMode: .pushToTalk,
             postProcessingMode: PostProcessingMode.auto.rawValue
         ))
         #expect(RecordingEngine.shouldLabelRewriting(
-            recordingMode: .pushToTalk,
             postProcessingMode: PostProcessingMode.off.rawValue
         ) == false)
     }
@@ -812,6 +803,8 @@ struct RealtimeTranscriptionTests {
             transcriptionModel: "whisper-1",
             transcriberModel: "gpt-a",
             enhancementModel: "gpt-a-fallback",
+            intentModel: "gpt-intent-a",
+            intentDetectionEnabled: true,
             enhanceTriggersJSON: #"["rewrite a"]"#,
             keywordTransformsJSON: #"{"code with":"Codewith"}"#
         )
@@ -826,6 +819,8 @@ struct RealtimeTranscriptionTests {
             transcriptionModel: "gpt-4o-transcribe",
             transcriberModel: "gpt-b",
             enhancementModel: "gpt-b-fallback",
+            intentModel: "gpt-intent-b",
+            intentDetectionEnabled: true,
             enhanceTriggersJSON: #"["rewrite b"]"#,
             keywordTransformsJSON: #"{"open ai":"OpenAI"}"#
         )
@@ -868,6 +863,8 @@ struct RealtimeTranscriptionTests {
             transcriptionModel: "whisper-a",
             transcriberModel: "gpt-command-a",
             enhancementModel: "gpt-fallback-a",
+            intentModel: "gpt-intent-a",
+            intentDetectionEnabled: true,
             enhanceTriggersJSON: #"["rewrite a"]"#,
             keywordTransformsJSON: #"{"code with":"Codewith A"}"#
         )
@@ -879,6 +876,8 @@ struct RealtimeTranscriptionTests {
             transcriptionModel: "whisper-b",
             transcriberModel: "gpt-command-b",
             enhancementModel: "gpt-fallback-b",
+            intentModel: "gpt-intent-b",
+            intentDetectionEnabled: true,
             enhanceTriggersJSON: #"["rewrite b"]"#,
             keywordTransformsJSON: #"{"open ai":"OpenAI B"}"#
         )

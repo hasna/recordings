@@ -308,7 +308,7 @@ describe("native app companion contract", () => {
     expect(engine).toContain("AccessibilitySelectionToken");
     expect(engine).toContain("CFEqual(element, currentElement)");
     expect(engine).toContain("matchesCurrentSelection(for: app.processIdentifier)");
-    expect(engine).toContain("commandSelectionToken:");
+    expect(engine).toContain("selectionToken:");
     expect(engine.match(/targetIsReady\(\)/g)?.length).toBeGreaterThanOrEqual(3);
     expect(engine).not.toContain("activateIgnoringOtherApps");
   });

@@ -10,37 +10,6 @@ extension KeyboardShortcuts.Name {
     @MainActor public static let toggleRecording = Self("toggleRecording", default: .init(.f5))
 }
 
-// MARK: - Recording Mode
-
-public enum RecordingMode: String, CaseIterable, Identifiable, Sendable {
-    case pushToTalk = "Push to Talk"
-    case dictation = "Dictation"
-    case command = "Command"
-
-    public var id: String { rawValue }
-    public var shortName: String {
-        switch self {
-        case .pushToTalk: return "Talk"
-        case .dictation: return "Dictate"
-        case .command: return "Command"
-        }
-    }
-    public var icon: String {
-        switch self {
-        case .pushToTalk: return "hand.tap.fill"
-        case .dictation: return "text.bubble.fill"
-        case .command: return "wand.and.stars"
-        }
-    }
-    public var hint: String {
-        switch self {
-        case .pushToTalk: return "Hold your recording shortcut, then release to paste"
-        case .dictation: return "Hold your recording shortcut to dictate, then release to paste"
-        case .command: return "Select text, hold your recording shortcut, then release to rewrite"
-        }
-    }
-}
-
 // MARK: - Transcription Result
 
 public struct TranscriptionResult: Identifiable, Sendable {
@@ -81,15 +50,16 @@ struct RecordingProcessingConfiguration: Equatable, Sendable {
     let transcriptionModel: String
     let transcriberModel: String
     let enhancementModel: String
+    let intentModel: String
+    let intentDetectionEnabled: Bool
     let enhanceTriggersJSON: String
     let keywordTransformsJSON: String
 }
 
 struct RecordingCaptureConfiguration: Sendable {
-    let mode: RecordingMode
     let targetAppBundleIdentifier: String?
     let targetAppPid: pid_t?
-    let commandSelectionToken: AccessibilitySelectionToken?
+    let selectionToken: AccessibilitySelectionToken?
     let canonicalProjectId: String?
     let displayProjectId: String?
     let activeProjectName: String?
@@ -568,12 +538,6 @@ private extension Data {
 @MainActor
 public final class RecordingEngine: ObservableObject {
     @Published public var isRecording = false
-    @Published public var mode: RecordingMode = .pushToTalk {
-        didSet {
-            UserDefaults.standard.set(mode.rawValue, forKey: "recordingMode")
-            updateStatus()
-        }
-    }
     @Published public var useFnKey: Bool = false {
         didSet {
             UserDefaults.standard.set(useFnKey, forKey: "useFnKey")
@@ -581,7 +545,19 @@ public final class RecordingEngine: ObservableObject {
             updateStatus()
         }
     }
-    @Published public var isWhisperMode = false
+    /// Advanced fallback policy (Settings only): when off, every recording is dictated
+    /// literally and the classifier is never consulted.
+    @Published public var intentDetectionEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(intentDetectionEnabled, forKey: "intentDetectionEnabled")
+        }
+    }
+    /// Typed Record-page state; views render idle/listening/finalizing/processing/ready/error
+    /// from this instead of parsing `statusMessage`.
+    @Published public private(set) var flowPhase: RecordingFlowPhase = .idle
+    /// Latest conversational answer. Cleared whenever a new recording starts so a stale reply
+    /// can never be attributed to a later recording.
+    @Published public private(set) var conversationReply: ConversationReply?
     @Published public var recentTranscriptions: [TranscriptionResult] = []
     @Published public var statusMessage = "Starting..."
     @Published public var isTranscribing = false
@@ -602,7 +578,7 @@ public final class RecordingEngine: ObservableObject {
     private var fnKeyIsDown = false
     private var targetAppBundleIdentifier: String?
     private var targetAppPid: pid_t?
-    private var targetCommandSelectionToken: AccessibilitySelectionToken?
+    private var targetSelectionToken: AccessibilitySelectionToken?
     private var pasteTargetProcessIdentityByGeneration: [UInt64: PasteTargetProcessIdentity] = [:]
     public var projectStore: ProjectStore?
     public var voiceShortcuts: VoiceShortcuts?
@@ -618,7 +594,10 @@ public final class RecordingEngine: ObservableObject {
     private var recordingGeneration: UInt64 = 0
     private var activeCaptureConfiguration: RecordingCaptureConfiguration?
     private var pipelineDeliveryGate = PipelineDeliveryGate()
-    private var commandDeliveryPending = false
+    private var intentDeliveryPending = false
+    private lazy var intentClassifier = SpeechIntentClassifier(
+        apiKeyProvider: { [home] in OpenAIAPIKeyStore.load(homePath: home) }
+    )
     private lazy var pasteTransactionCoordinator = PasteTransactionCoordinator(
         schedule: { delay, operation in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -664,10 +643,7 @@ public final class RecordingEngine: ObservableObject {
         log("RecordingEngine init; microphone=\(microphonePermissionLabel); accessibility=\(accessibilityPermissionLabel)")
 
         // Load preferences
-        if let savedMode = UserDefaults.standard.string(forKey: "recordingMode"),
-           let parsedMode = RecordingMode(rawValue: savedMode) {
-            mode = parsedMode
-        }
+        intentDetectionEnabled = UserDefaults.standard.object(forKey: "intentDetectionEnabled") as? Bool ?? true
         transcriptionLanguage = OpenAIAPIKeyStore.loadLanguage(homePath: home)
         useFnKey = UserDefaults.standard.object(forKey: "useFnKey") as? Bool ?? false
         if KeyboardShortcuts.getShortcut(for: .toggleRecording) == nil {
@@ -820,6 +796,7 @@ public final class RecordingEngine: ObservableObject {
     public func updateStatus() {
         if isRecording || isTranscribing || deliveryIsPending { return }
         statusMessage = "Ready"
+        flowPhase = .idle
     }
 
     // MARK: - Toggle
@@ -854,6 +831,7 @@ public final class RecordingEngine: ObservableObject {
         }
         activeTrigger = trigger
         keyboardShortcutIsDown = trigger == .keyboardShortcut
+        conversationReply = nil
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let frontmostApp = NSWorkspace.shared.frontmostApplication
@@ -872,8 +850,10 @@ public final class RecordingEngine: ObservableObject {
         } else {
             pasteTargetProcessIdentityByGeneration[recordingGeneration] = nil
         }
-        targetCommandSelectionToken = if Self.shouldCaptureCommandSelection(
-            recordingMode: mode,
+        // The selection is frozen for every recording (not only an exposed "command mode"),
+        // so a later command decision can only ever act on the exact text and element that
+        // were selected when the user started speaking.
+        targetSelectionToken = if Self.shouldCaptureSelection(
             targetPid: targetAppPid,
             accessibilityTrusted: AXIsProcessTrusted()
         ), let targetAppPid {
@@ -926,6 +906,7 @@ public final class RecordingEngine: ObservableObject {
                     } else {
                         self.resetRecordingIntent()
                         self.statusMessage = "Microphone permission denied"
+                        self.flowPhase = .failed(self.statusMessage)
                     }
                 }
             }
@@ -933,9 +914,11 @@ public final class RecordingEngine: ObservableObject {
             resetRecordingIntent()
             log("microphone permission blocked status=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
             statusMessage = "Enable Microphone permission for Recordings in System Settings"
+            flowPhase = .failed(statusMessage)
         @unknown default:
             resetRecordingIntent()
             statusMessage = "Microphone permission unavailable"
+            flowPhase = .failed(statusMessage)
         }
     }
 
@@ -948,27 +931,24 @@ public final class RecordingEngine: ObservableObject {
         !isRecording && !isTranscribing && !isAwaitingMicrophonePermission && !isDeliveryPending
     }
 
-    nonisolated static func shouldCaptureCommandSelection(
-        recordingMode: RecordingMode,
+    nonisolated static func shouldCaptureSelection(
         targetPid: pid_t?,
         accessibilityTrusted: Bool
     ) -> Bool {
-        recordingMode == .command && targetPid != nil && accessibilityTrusted
+        targetPid != nil && accessibilityTrusted
     }
 
     nonisolated static func recordingStatus(
-        capturedMode: RecordingMode,
         trigger: RecordingTrigger
     ) -> String {
-        switch (capturedMode, trigger) {
-        case (.command, _): "Speak your instruction..."
-        case (_, .manual): "Recording — click Stop when finished"
-        case (_, .fnKey), (_, .keyboardShortcut): "Recording — release to stop"
+        switch trigger {
+        case .manual: "Recording — click Stop when finished"
+        case .fnKey, .keyboardShortcut: "Recording — release to stop"
         }
     }
 
     private var deliveryIsPending: Bool {
-        commandDeliveryPending || pasteTransactionCoordinator.hasPendingTransaction
+        intentDeliveryPending || pasteTransactionCoordinator.hasPendingTransaction
     }
 
     nonisolated static func shouldContinueStartingAfterPermission(
@@ -998,10 +978,9 @@ public final class RecordingEngine: ObservableObject {
         let apiKey = openAIAPIKey
         let modelSelection = OpenAIAPIKeyStore.loadProcessingModelSelection(homePath: home)
         let captureConfiguration = RecordingCaptureConfiguration(
-            mode: mode,
             targetAppBundleIdentifier: targetAppBundleIdentifier,
             targetAppPid: targetAppPid,
-            commandSelectionToken: targetCommandSelectionToken,
+            selectionToken: targetSelectionToken,
             canonicalProjectId: projectStore?.activeCanonicalProjectIdForRecording,
             displayProjectId: projectStore?.settings.activeProjectId,
             activeProjectName: projectStore?.activeProject?.name,
@@ -1013,6 +992,8 @@ public final class RecordingEngine: ObservableObject {
                 transcriptionModel: modelSelection.transcriptionModel,
                 transcriberModel: modelSelection.transcriberModel,
                 enhancementModel: modelSelection.enhancementModel,
+                intentModel: modelSelection.intentModel,
+                intentDetectionEnabled: intentDetectionEnabled,
                 enhanceTriggersJSON: modelSelection.enhanceTriggersJSON,
                 keywordTransformsJSON: modelSelection.keywordTransformsJSON
             )
@@ -1049,10 +1030,8 @@ public final class RecordingEngine: ObservableObject {
             recordedPCM.removeAll(keepingCapacity: true)
             activeAudioPath = "\(audioDir)/recording-\(Self.timestampForFilename()).wav"
             let trigger = activeTrigger ?? .manual
-            statusMessage = Self.recordingStatus(
-                capturedMode: captureConfiguration.mode,
-                trigger: trigger
-            )
+            statusMessage = Self.recordingStatus(trigger: trigger)
+            flowPhase = .listening
 
             recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -1070,6 +1049,7 @@ public final class RecordingEngine: ObservableObject {
             activeCaptureConfiguration = nil
             resetRecordingIntent()
             statusMessage = "Failed: \(error.localizedDescription)"
+            flowPhase = .failed(statusMessage)
         }
     }
 
@@ -1148,6 +1128,7 @@ public final class RecordingEngine: ObservableObject {
         activeCaptureConfiguration = nil
         resetRecordingIntent()
         statusMessage = "Ready"
+        flowPhase = .idle
     }
 
     // MARK: - Stop & Transcribe
@@ -1181,10 +1162,9 @@ public final class RecordingEngine: ObservableObject {
             return
         }
         activeCaptureConfiguration = nil
-        let curMode = captureConfiguration.mode
         let targetAppBundleIdentifier = captureConfiguration.targetAppBundleIdentifier
         let targetAppPid = captureConfiguration.targetAppPid
-        let commandSelectionToken = captureConfiguration.commandSelectionToken
+        let selectionToken = captureConfiguration.selectionToken
         let activeProjectId = captureConfiguration.displayProjectId
         let canonicalProjectId = captureConfiguration.canonicalProjectId
         let activeProjectName = captureConfiguration.activeProjectName
@@ -1195,10 +1175,11 @@ public final class RecordingEngine: ObservableObject {
         pipelineDeliveryGate.registerPipeline(pipelineGeneration)
         let processingConfiguration = captureConfiguration.processing
         let postProcessingMode = processingConfiguration.postProcessingMode
-        statusMessage = Self.shouldLabelRewriting(
-            recordingMode: curMode,
+        let busyLabel = Self.shouldLabelRewriting(
             postProcessingMode: postProcessingMode
         ) ? "Rewriting..." : "Transcribing..."
+        statusMessage = busyLabel
+        flowPhase = .finalizing
         resetRecordingIntent()
         self.pcmStreamPipe = nil
 
@@ -1225,6 +1206,9 @@ public final class RecordingEngine: ObservableObject {
             self.realtimeClient = nil
             self.streamingTask?.cancel()
             self.streamingTask = nil
+            if self.isTranscribing {
+                self.flowPhase = .processing(busyLabel)
+            }
 
             if let error = streamingResult.error {
                 self.log("realtime finish reported error=\(error)")
@@ -1269,7 +1253,6 @@ public final class RecordingEngine: ObservableObject {
                 }
 
                 if Self.shouldPasteBeforePersistence(
-                    recordingMode: curMode,
                     postProcessingMode: postProcessingMode
                 ) {
                     self.isTranscribing = false
@@ -1280,10 +1263,9 @@ public final class RecordingEngine: ObservableObject {
                             await withCheckedContinuation { continuation in
                                 self.finishWithText(
                                     text,
-                                    curMode: curMode,
                                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                                     targetAppPid: targetAppPid,
-                                    commandSelectionToken: commandSelectionToken,
+                                    selectionToken: selectionToken,
                                     canonicalProjectId: canonicalProjectId,
                                     activeProjectId: activeProjectId,
                                     activeProjectName: activeProjectName,
@@ -1300,10 +1282,9 @@ public final class RecordingEngine: ObservableObject {
                                     error: result.error ?? "Realtime save returned no recording",
                                     audioPath: audioPath,
                                     pcmData: pcmData,
-                                    curMode: curMode,
                                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                                     targetAppPid: targetAppPid,
-                                    commandSelectionToken: commandSelectionToken,
+                                    selectionToken: selectionToken,
                                     canonicalProjectId: canonicalProjectId,
                                     displayProjectId: activeProjectId,
                                     activeProjectName: activeProjectName,
@@ -1327,10 +1308,9 @@ public final class RecordingEngine: ObservableObject {
                     if let audioPath, FileManager.default.fileExists(atPath: audioPath) || self.writeCapturedWAV(to: audioPath) {
                         self.fallbackTranscribe(
                             audioPath: audioPath,
-                            curMode: curMode,
                             targetAppBundleIdentifier: targetAppBundleIdentifier,
                             targetAppPid: targetAppPid,
-                            commandSelectionToken: commandSelectionToken,
+                            selectionToken: selectionToken,
                             canonicalProjectId: canonicalProjectId,
                             displayProjectId: activeProjectId,
                             activeProjectName: activeProjectName,
@@ -1350,10 +1330,9 @@ public final class RecordingEngine: ObservableObject {
                 self.isTranscribing = false
                 self.finishWithText(
                     savedText,
-                    curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
-                    commandSelectionToken: commandSelectionToken,
+                    selectionToken: selectionToken,
                     canonicalProjectId: canonicalProjectId,
                     activeProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
@@ -1369,10 +1348,9 @@ public final class RecordingEngine: ObservableObject {
                 self.log("transcribing captured full audio with quality model audioPath=\(audioPath) realtimePreviewChars=\(realtimeText?.count ?? 0)")
                 self.fallbackTranscribe(
                     audioPath: audioPath,
-                    curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
-                    commandSelectionToken: commandSelectionToken,
+                    selectionToken: selectionToken,
                     canonicalProjectId: canonicalProjectId,
                     displayProjectId: activeProjectId,
                     activeProjectName: activeProjectName,
@@ -1392,10 +1370,9 @@ public final class RecordingEngine: ObservableObject {
                     self.isTranscribing = false
                     self.finishWithText(
                         text,
-                        curMode: curMode,
                         targetAppBundleIdentifier: targetAppBundleIdentifier,
                         targetAppPid: targetAppPid,
-                        commandSelectionToken: commandSelectionToken,
+                        selectionToken: selectionToken,
                         canonicalProjectId: canonicalProjectId,
                         activeProjectId: activeProjectId,
                         activeProjectName: activeProjectName,
@@ -1455,17 +1432,15 @@ public final class RecordingEngine: ObservableObject {
     }
 
     nonisolated static func shouldPasteBeforePersistence(
-        recordingMode: RecordingMode,
         postProcessingMode: String
     ) -> Bool {
-        recordingMode != .command && PostProcessingMode(rawValue: postProcessingMode) == .off
+        PostProcessingMode(rawValue: postProcessingMode) == .off
     }
 
     nonisolated static func shouldLabelRewriting(
-        recordingMode: RecordingMode,
         postProcessingMode: String
     ) -> Bool {
-        recordingMode == .command || PostProcessingMode(rawValue: postProcessingMode) != .off
+        PostProcessingMode(rawValue: postProcessingMode) != .off
     }
 
     @MainActor
@@ -1703,10 +1678,9 @@ public final class RecordingEngine: ObservableObject {
 
     private func finishWithText(
         _ text: String,
-        curMode: RecordingMode,
         targetAppBundleIdentifier: String?,
         targetAppPid: pid_t?,
-        commandSelectionToken: AccessibilitySelectionToken?,
+        selectionToken: AccessibilitySelectionToken?,
         canonicalProjectId: String?,
         activeProjectId: String?,
         activeProjectName: String?,
@@ -1715,47 +1689,179 @@ public final class RecordingEngine: ObservableObject {
         pipelineGeneration: UInt64? = nil,
         deliveryCompleted: (@MainActor @Sendable () -> Void)? = nil
     ) {
-        log("finishWithText mode=\(curMode.rawValue) chars=\(text.count)")
+        log("finishWithText chars=\(text.count)")
         if let pipelineGeneration,
            !pipelineDeliveryGate.claimDelivery(for: pipelineGeneration) {
             log("duplicate delivery suppressed pipeline_generation=\(pipelineGeneration)")
             deliveryCompleted?()
             return
         }
-        if curMode == .command {
+
+        let execute: @MainActor @Sendable (RoutedSpeechAction, IntentDecisionOrigin) -> Void = { [weak self] action, origin in
+            guard let self else {
+                deliveryCompleted?()
+                return
+            }
+            self.executeRoutedAction(
+                action,
+                origin: origin,
+                text: text,
+                targetAppBundleIdentifier: targetAppBundleIdentifier,
+                targetAppPid: targetAppPid,
+                selectionToken: selectionToken,
+                canonicalProjectId: canonicalProjectId,
+                activeProjectId: activeProjectId,
+                activeProjectName: activeProjectName,
+                processingConfiguration: processingConfiguration,
+                pipelineTrace: pipelineTrace,
+                pipelineGeneration: pipelineGeneration,
+                deliveryCompleted: deliveryCompleted
+            )
+        }
+
+        let routingContext = IntentRoutingContext(
+            detectionEnabled: processingConfiguration.intentDetectionEnabled,
+            hasSelection: selectionToken != nil,
+            accessibilityTrusted: AXIsProcessTrusted()
+        )
+        if !routingContext.detectionEnabled {
+            execute(IntentRouter.route(decision: nil, context: routingContext), .localScreen)
+            return
+        }
+        if let localDecision = IntentScreen.screen(text: text) {
+            log("intent decided locally intent=\(localDecision.intent.rawValue) reason=\(localDecision.reason)")
+            execute(IntentRouter.route(decision: localDecision, context: routingContext), .localScreen)
+            return
+        }
+
+        // Consult the classifier. New recordings are blocked while the decision is pending,
+        // and the generation is re-checked afterwards so a stale decision can never act on a
+        // later recording.
+        intentDeliveryPending = true
+        statusMessage = "Deciding..."
+        flowPhase = .processing("Deciding...")
+        if let pipelineTrace { log(pipelineTrace.message(stage: "intent_classification_started")) }
+        let classifier = intentClassifier
+        let intentModel = processingConfiguration.intentModel
+        let hasSelection = routingContext.hasSelection
+        Task { [weak self] in
+            let outcome = await classifier.classify(
+                transcript: text,
+                hasSelection: hasSelection,
+                model: intentModel
+            )
+            guard let self else {
+                deliveryCompleted?()
+                return
+            }
+            self.intentDeliveryPending = false
+            if let pipelineGeneration, pipelineGeneration != self.recordingGeneration {
+                self.log("stale intent decision abandoned pipeline_generation=\(pipelineGeneration)")
+                deliveryCompleted?()
+                return
+            }
+            let decision: IntentDecision?
+            switch outcome {
+            case .decision(let classified):
+                decision = classified
+                self.log("intent classified intent=\(classified.intent.rawValue) confidence=\(classified.confidence) reason=\(classified.reason)")
+            case .unavailable(let message):
+                decision = nil
+                self.log("intent classifier unavailable — failing closed to dictation: \(message)")
+            }
+            if let pipelineTrace { self.log(pipelineTrace.message(stage: "intent_classification_complete")) }
+            let action = IntentRouter.route(
+                decision: decision,
+                context: IntentRoutingContext(
+                    detectionEnabled: true,
+                    hasSelection: hasSelection,
+                    accessibilityTrusted: AXIsProcessTrusted()
+                )
+            )
+            execute(action, .classifier)
+        }
+    }
+
+    private func executeRoutedAction(
+        _ action: RoutedSpeechAction,
+        origin: IntentDecisionOrigin,
+        text: String,
+        targetAppBundleIdentifier: String?,
+        targetAppPid: pid_t?,
+        selectionToken: AccessibilitySelectionToken?,
+        canonicalProjectId: String?,
+        activeProjectId: String?,
+        activeProjectName: String?,
+        processingConfiguration: RecordingProcessingConfiguration,
+        pipelineTrace: RecordingPipelineTrace?,
+        pipelineGeneration: UInt64?,
+        deliveryCompleted: (@MainActor @Sendable () -> Void)?
+    ) {
+        switch action {
+        case .paste(let reason):
+            log("intent route=paste origin=\(origin.rawValue) reason=\(reason)")
+            let shortcutText = voiceShortcuts?.match(text)
+            let output = shortcutText ?? text
+            pasteIntoFrontApp(
+                output,
+                targetAppBundleIdentifier: targetAppBundleIdentifier,
+                targetAppPid: targetAppPid,
+                restoreClipboard: true,
+                deliveryKind: .ordinaryDictation,
+                pipelineTrace: pipelineTrace,
+                pipelineGeneration: pipelineGeneration,
+                deliveryCompleted: deliveryCompleted
+            )
+            insertRecentTranscription(
+                rawText: text,
+                processedText: shortcutText,
+                projectId: activeProjectId,
+                projectName: activeProjectName
+            )
+        case .rewriteSelection(let reason):
+            log("intent route=rewriteSelection origin=\(origin.rawValue) reason=\(reason)")
             runCommandMode(
                 instruction: text,
                 targetAppBundleIdentifier: targetAppBundleIdentifier,
                 targetAppPid: targetAppPid,
-                commandSelectionToken: commandSelectionToken,
+                selectionToken: selectionToken,
                 canonicalProjectId: canonicalProjectId,
                 processingConfiguration: processingConfiguration,
                 pipelineTrace: pipelineTrace,
                 pipelineGeneration: pipelineGeneration,
                 deliveryCompleted: deliveryCompleted
             )
-            return
-        }
-
-        let shortcutText = voiceShortcuts?.match(text)
-        let output = shortcutText ?? text
-        pasteIntoFrontApp(
-            output,
-            targetAppBundleIdentifier: targetAppBundleIdentifier,
-            targetAppPid: targetAppPid,
-            restoreClipboard: true,
-            deliveryKind: .ordinaryDictation,
-            pipelineTrace: pipelineTrace,
-            pipelineGeneration: pipelineGeneration,
-            deliveryCompleted: deliveryCompleted
-        )
-        recentTranscriptions.insert(
-            TranscriptionResult(
+        case .answerConversation(let reason):
+            log("intent route=answerConversation origin=\(origin.rawValue) reason=\(reason)")
+            insertRecentTranscription(
                 rawText: text,
-                processedText: shortcutText,
-                timestamp: Date(),
+                processedText: nil,
                 projectId: activeProjectId,
                 projectName: activeProjectName
+            )
+            runConversationMode(
+                question: text,
+                processingConfiguration: processingConfiguration,
+                pipelineTrace: pipelineTrace,
+                pipelineGeneration: pipelineGeneration,
+                deliveryCompleted: deliveryCompleted
+            )
+        }
+    }
+
+    private func insertRecentTranscription(
+        rawText: String,
+        processedText: String?,
+        projectId: String?,
+        projectName: String?
+    ) {
+        recentTranscriptions.insert(
+            TranscriptionResult(
+                rawText: rawText,
+                processedText: processedText,
+                timestamp: Date(),
+                projectId: projectId,
+                projectName: projectName
             ),
             at: 0
         )
@@ -1927,10 +2033,9 @@ public final class RecordingEngine: ObservableObject {
         error: String,
         audioPath: String?,
         pcmData: Data,
-        curMode: RecordingMode,
         targetAppBundleIdentifier: String?,
         targetAppPid: pid_t?,
-        commandSelectionToken: AccessibilitySelectionToken?,
+        selectionToken: AccessibilitySelectionToken?,
         canonicalProjectId: String?,
         displayProjectId: String?,
         activeProjectName: String?,
@@ -1945,6 +2050,7 @@ public final class RecordingEngine: ObservableObject {
         ))
         updateBackgroundRecoveryStatus(
             "Pasted; recovering recording...",
+            kind: .success,
             pipelineGeneration: pipelineGeneration
         )
 
@@ -1958,16 +2064,16 @@ public final class RecordingEngine: ObservableObject {
                 guard let recoveryAudioPath else {
                     self.updateBackgroundRecoveryStatus(
                         "Pasted, but recording could not be saved: \(sanitizedError)",
+                        kind: .failure,
                         pipelineGeneration: pipelineGeneration
                     )
                     return
                 }
                 self.fallbackTranscribe(
                     audioPath: recoveryAudioPath,
-                    curMode: curMode,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
-                    commandSelectionToken: commandSelectionToken,
+                    selectionToken: selectionToken,
                     canonicalProjectId: canonicalProjectId,
                     displayProjectId: displayProjectId,
                     activeProjectName: activeProjectName,
@@ -2015,6 +2121,7 @@ public final class RecordingEngine: ObservableObject {
 
     private func updateBackgroundRecoveryStatus(
         _ message: String,
+        kind: DeliveryStatusKind,
         pipelineGeneration: UInt64
     ) {
         guard Self.shouldApplyBackgroundRecoveryStatus(
@@ -2027,6 +2134,7 @@ public final class RecordingEngine: ObservableObject {
             return
         }
         statusMessage = message
+        flowPhase = Self.flowPhase(forDeliveryStatus: message, kind: kind)
     }
 
     nonisolated static func fallbackCompletionAction(
@@ -2049,10 +2157,9 @@ public final class RecordingEngine: ObservableObject {
 
     private func fallbackTranscribe(
         audioPath: String,
-        curMode: RecordingMode,
         targetAppBundleIdentifier: String?,
         targetAppPid: pid_t?,
-        commandSelectionToken: AccessibilitySelectionToken?,
+        selectionToken: AccessibilitySelectionToken?,
         canonicalProjectId: String?,
         displayProjectId: String?,
         activeProjectName: String?,
@@ -2068,13 +2175,14 @@ public final class RecordingEngine: ObservableObject {
         if deliverResult {
             isTranscribing = true
             statusMessage = Self.shouldLabelRewriting(
-                recordingMode: curMode,
                 postProcessingMode: processingConfiguration.postProcessingMode
             ) ? "Rewriting..." : "Transcribing..."
+            flowPhase = .processing(statusMessage)
         } else {
             if let backgroundRecoveryGeneration {
                 updateBackgroundRecoveryStatus(
                     "Pasted; recovering recording...",
+                    kind: .success,
                     pipelineGeneration: backgroundRecoveryGeneration
                 )
             }
@@ -2135,10 +2243,9 @@ public final class RecordingEngine: ObservableObject {
                     self.isTranscribing = false
                     self.finishWithText(
                         text,
-                        curMode: curMode,
                         targetAppBundleIdentifier: targetAppBundleIdentifier,
                         targetAppPid: targetAppPid,
-                        commandSelectionToken: commandSelectionToken,
+                        selectionToken: selectionToken,
                         canonicalProjectId: canonicalProjectId,
                         activeProjectId: displayProjectId,
                         activeProjectName: activeProjectName,
@@ -2158,6 +2265,7 @@ public final class RecordingEngine: ObservableObject {
                     if let backgroundRecoveryGeneration {
                         self.updateBackgroundRecoveryStatus(
                             "Pasted and saved",
+                            kind: .success,
                             pipelineGeneration: backgroundRecoveryGeneration
                         )
                     }
@@ -2165,6 +2273,7 @@ public final class RecordingEngine: ObservableObject {
                     if let backgroundRecoveryGeneration {
                         self.updateBackgroundRecoveryStatus(
                             "Pasted, but recording could not be saved: \(failure)",
+                            kind: .failure,
                             pipelineGeneration: backgroundRecoveryGeneration
                         )
                     }
@@ -2330,6 +2439,7 @@ public final class RecordingEngine: ObservableObject {
         isTranscribing = false
         liveTranscriptionText = ""
         statusMessage = msg
+        flowPhase = .failed(msg)
     }
 
     private func resetRecordingIntent() {
@@ -2339,7 +2449,71 @@ public final class RecordingEngine: ObservableObject {
         fnKeyIsDown = false
         targetAppBundleIdentifier = nil
         targetAppPid = nil
-        targetCommandSelectionToken = nil
+        targetSelectionToken = nil
+    }
+
+    // MARK: - Conversation
+
+    private func runConversationMode(
+        question: String,
+        processingConfiguration: RecordingProcessingConfiguration,
+        pipelineTrace: RecordingPipelineTrace?,
+        pipelineGeneration: UInt64?,
+        deliveryCompleted: (@MainActor @Sendable () -> Void)?
+    ) {
+        intentDeliveryPending = true
+        updateDeliveryStatus("Answering...", kind: .progress, pipelineGeneration: pipelineGeneration)
+        if let pipelineTrace { log(pipelineTrace.message(stage: "conversation_started")) }
+        let classifier = intentClassifier
+        let model = processingConfiguration.intentModel
+        Task { [weak self] in
+            let outcome = await classifier.answer(question: question, model: model)
+            guard let self else {
+                deliveryCompleted?()
+                return
+            }
+            self.intentDeliveryPending = false
+            if let pipelineTrace { self.log(pipelineTrace.message(stage: "conversation_complete")) }
+            switch outcome {
+            case .answer(let answer):
+                if Self.shouldApplyConversationReply(
+                    replyGeneration: pipelineGeneration,
+                    currentGeneration: self.recordingGeneration,
+                    isRecording: self.isRecording
+                ) {
+                    self.conversationReply = ConversationReply(question: question, answer: answer)
+                } else {
+                    self.log("stale conversation reply dropped pipeline_generation=\(pipelineGeneration.map(String.init) ?? "nil")")
+                }
+                let copied = Self.writeClipboardPreservingOnFailure(answer, to: .general)
+                self.updateDeliveryStatus(
+                    copied ? "Answered — copied to clipboard" : "Answered",
+                    kind: .success,
+                    pipelineGeneration: pipelineGeneration
+                )
+            case .unavailable(let message):
+                // The delayed answer failed; never auto-paste this late. Fail closed to the
+                // preview path: the transcript stays in Recent and on the clipboard.
+                self.log("conversation unavailable: \(message)")
+                let copied = Self.writeClipboardPreservingOnFailure(question, to: .general)
+                self.updateDeliveryStatus(
+                    copied ? "Couldn't answer — transcript copied" : "Couldn't answer — transcript in Recent",
+                    kind: .failure,
+                    pipelineGeneration: pipelineGeneration
+                )
+            }
+            deliveryCompleted?()
+        }
+    }
+
+    nonisolated static func shouldApplyConversationReply(
+        replyGeneration: UInt64?,
+        currentGeneration: UInt64,
+        isRecording: Bool
+    ) -> Bool {
+        guard !isRecording else { return false }
+        guard let replyGeneration else { return true }
+        return replyGeneration == currentGeneration
     }
 
     // MARK: - Command Mode
@@ -2348,22 +2522,23 @@ public final class RecordingEngine: ObservableObject {
         instruction: String,
         targetAppBundleIdentifier: String?,
         targetAppPid: pid_t?,
-        commandSelectionToken: AccessibilitySelectionToken?,
+        selectionToken: AccessibilitySelectionToken?,
         canonicalProjectId: String?,
         processingConfiguration: RecordingProcessingConfiguration,
         pipelineTrace: RecordingPipelineTrace?,
         pipelineGeneration: UInt64?,
         deliveryCompleted: (@MainActor @Sendable () -> Void)?
     ) {
-        commandDeliveryPending = true
+        intentDeliveryPending = true
         let finishCommandDelivery: @MainActor @Sendable () -> Void = { [weak self] in
-            self?.commandDeliveryPending = false
+            self?.intentDeliveryPending = false
             deliveryCompleted?()
         }
         guard accessibilityPromptGate.trustForProtectedOperation().trusted else {
             log("command mode blocked by accessibility permission")
             updateDeliveryStatus(
                 "Enable Accessibility permission for Recordings to rewrite selected text",
+                kind: .failure,
                 pipelineGeneration: pipelineGeneration
             )
             finishCommandDelivery()
@@ -2380,7 +2555,7 @@ public final class RecordingEngine: ObservableObject {
         )
         guard let targetApp else {
             log("command mode target app not found")
-            updateDeliveryStatus("No target app found", pipelineGeneration: pipelineGeneration)
+            updateDeliveryStatus("No target app found", kind: .failure, pipelineGeneration: pipelineGeneration)
             finishCommandDelivery()
             return
         }
@@ -2404,13 +2579,13 @@ public final class RecordingEngine: ObservableObject {
                 frontmostLaunchDate: frontmostBeforeRead?.launchDate,
                 requiresProcessIdentity: pipelineGeneration != nil && targetAppPid != nil
             ) else {
-                self.updateDeliveryStatus("No text selected", pipelineGeneration: pipelineGeneration)
+                self.updateDeliveryStatus("No text selected", kind: .failure, pipelineGeneration: pipelineGeneration)
                 finishCommandDelivery()
                 return
             }
             let frontmostAfterRead = NSWorkspace.shared.frontmostApplication
             let selected = Self.validAccessibilitySelection(
-                commandSelectionToken?.selectedText,
+                selectionToken?.selectedText,
                 targetStillFrontmost: Self.pasteTargetIsReady(
                     expectedPid: targetApp.processIdentifier,
                     expectedBundleIdentifier: targetApp.bundleIdentifier,
@@ -2423,15 +2598,16 @@ public final class RecordingEngine: ObservableObject {
                 )
             )
             guard let selected,
-                  commandSelectionToken?.matchesCurrentSelection(
+                  selectionToken?.matchesCurrentSelection(
                     for: targetApp.processIdentifier
                   ) == true else {
-                self.updateDeliveryStatus("No text selected", pipelineGeneration: pipelineGeneration)
+                self.updateDeliveryStatus("No text selected", kind: .failure, pipelineGeneration: pipelineGeneration)
                 finishCommandDelivery()
                 return
             }
             if self.canOwnBusyState(pipelineGeneration: pipelineGeneration) {
                 self.statusMessage = "Rewriting..."
+                self.flowPhase = .processing("Rewriting...")
                 self.isTranscribing = true
             }
 
@@ -2456,7 +2632,7 @@ public final class RecordingEngine: ObservableObject {
                     targetAppPid: targetAppPid,
                     restoreClipboard: true,
                     deliveryKind: .commandRewrite,
-                    commandSelectionToken: commandSelectionToken,
+                    selectionToken: selectionToken,
                     pipelineTrace: pipelineTrace,
                     pipelineGeneration: pipelineGeneration,
                     deliveryCompleted: finishCommandDelivery
@@ -2464,6 +2640,7 @@ public final class RecordingEngine: ObservableObject {
             } else {
                 self.updateDeliveryStatus(
                     CLIRunner.parseError(result) ?? "Rewrite failed",
+                    kind: .failure,
                     pipelineGeneration: pipelineGeneration
                 )
                 finishCommandDelivery()
@@ -2503,6 +2680,13 @@ public final class RecordingEngine: ObservableObject {
 
     // MARK: - Paste
 
+    /// Copies text without pasting, preserving the previous clipboard if the write fails.
+    /// Used by explicit "Copy" affordances in the UI.
+    @discardableResult
+    public func copyToClipboard(_ text: String) -> Bool {
+        Self.writeClipboardPreservingOnFailure(text, to: .general)
+    }
+
     public func pasteIntoFrontApp(
         _ text: String,
         targetAppBundleIdentifier: String? = nil,
@@ -2527,7 +2711,7 @@ public final class RecordingEngine: ObservableObject {
         targetAppPid: pid_t? = nil,
         restoreClipboard: Bool = false,
         deliveryKind: PasteDeliveryKind,
-        commandSelectionToken: AccessibilitySelectionToken? = nil,
+        selectionToken: AccessibilitySelectionToken? = nil,
         pipelineTrace: RecordingPipelineTrace?,
         pipelineGeneration: UInt64?,
         deliveryCompleted: (@MainActor @Sendable () -> Void)?
@@ -2551,7 +2735,7 @@ public final class RecordingEngine: ObservableObject {
             } else {
                 "Copied — waiting for Accessibility approval"
             }
-            updateDeliveryStatus(message, pipelineGeneration: pipelineGeneration)
+            updateDeliveryStatus(message, kind: .failure, pipelineGeneration: pipelineGeneration)
             deliveryCompleted?()
             return
         }
@@ -2577,6 +2761,7 @@ public final class RecordingEngine: ObservableObject {
                     : copied
                         ? "Copied — no target app found"
                         : "Transcription ready, but the clipboard could not be updated",
+                kind: .failure,
                 pipelineGeneration: pipelineGeneration
             )
             deliveryCompleted?()
@@ -2592,7 +2777,7 @@ public final class RecordingEngine: ObservableObject {
         let pasteDelay: TimeInterval = alreadyFrontmost ? 0.15 : 0.5
         var ownedPasteboardChangeCount: Int?
         var clipboardOwnershipWasLost = false
-        updateDeliveryStatus("Pasting...", pipelineGeneration: pipelineGeneration)
+        updateDeliveryStatus("Pasting...", kind: .progress, pipelineGeneration: pipelineGeneration)
         let accepted = pasteTransactionCoordinator.submit(
             text: text,
             generation: pipelineGeneration,
@@ -2611,7 +2796,7 @@ public final class RecordingEngine: ObservableObject {
                     requiresProcessIdentity: pipelineGeneration != nil && targetAppPid != nil
                 )
                 guard appIsReady else { return false }
-                return commandSelectionToken?.matchesCurrentSelection(for: app.processIdentifier) ?? true
+                return selectionToken?.matchesCurrentSelection(for: app.processIdentifier) ?? true
             },
             payloadIsReady: {
                 guard let ownedPasteboardChangeCount else { return false }
@@ -2670,7 +2855,11 @@ public final class RecordingEngine: ObservableObject {
                 ? "Paste failed because the paste event could not be posted"
                 : "Copied, but paste event could not be posted"
             }
-            self.updateDeliveryStatus(message, pipelineGeneration: transaction.generation)
+            self.updateDeliveryStatus(
+                message,
+                kind: posted ? .success : .failure,
+                pipelineGeneration: transaction.generation
+            )
         } settlement: { transaction, outcome in
             let pasteboard = NSPasteboard.general
             let stillOwnsChangeCount = ownedPasteboardChangeCount.map {
@@ -2699,7 +2888,11 @@ public final class RecordingEngine: ObservableObject {
         }
         guard accepted else {
             log("paste transaction rejected because another delivery is pending")
-            updateDeliveryStatus("Finish the previous paste before trying again", pipelineGeneration: pipelineGeneration)
+            updateDeliveryStatus(
+                "Finish the previous paste before trying again",
+                kind: .failure,
+                pipelineGeneration: pipelineGeneration
+            )
             deliveryCompleted?()
             return
         }
@@ -2848,21 +3041,41 @@ public final class RecordingEngine: ObservableObject {
         return nil
     }
 
-    private func updateDeliveryStatus(_ message: String, pipelineGeneration: UInt64?) {
-        guard let pipelineGeneration else {
-            statusMessage = message
-            return
+    enum DeliveryStatusKind: Equatable, Sendable {
+        case progress
+        case success
+        case failure
+    }
+
+    nonisolated static func flowPhase(
+        forDeliveryStatus message: String,
+        kind: DeliveryStatusKind
+    ) -> RecordingFlowPhase {
+        switch kind {
+        case .progress: .processing(message)
+        case .success: .ready(message)
+        case .failure: .failed(message)
         }
-        guard pipelineDeliveryGate.shouldApplyStatus(
-            deliveryGeneration: pipelineGeneration,
-            currentGeneration: recordingGeneration,
-            isRecording: isRecording,
-            isTranscribing: isTranscribing
-        ) else {
-            log("delivery status suppressed for superseded pipeline generation=\(pipelineGeneration)")
-            return
+    }
+
+    private func updateDeliveryStatus(
+        _ message: String,
+        kind: DeliveryStatusKind,
+        pipelineGeneration: UInt64?
+    ) {
+        if let pipelineGeneration {
+            guard pipelineDeliveryGate.shouldApplyStatus(
+                deliveryGeneration: pipelineGeneration,
+                currentGeneration: recordingGeneration,
+                isRecording: isRecording,
+                isTranscribing: isTranscribing
+            ) else {
+                log("delivery status suppressed for superseded pipeline generation=\(pipelineGeneration)")
+                return
+            }
         }
         statusMessage = message
+        flowPhase = Self.flowPhase(forDeliveryStatus: message, kind: kind)
     }
 
     private func selectedRunningPasteTarget(

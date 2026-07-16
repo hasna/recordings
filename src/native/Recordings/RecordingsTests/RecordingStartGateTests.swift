@@ -230,18 +230,15 @@ struct RecordingStartGateTests {
         ) == false)
     }
 
-    @Test("recording status is derived from the frozen capture mode")
-    func statusUsesCapturedMode() {
+    @Test("recording status is derived from the trigger")
+    func statusUsesTrigger() {
         #expect(RecordingEngine.recordingStatus(
-            capturedMode: .command,
-            trigger: .keyboardShortcut
-        ) == "Speak your instruction...")
-        #expect(RecordingEngine.recordingStatus(
-            capturedMode: .dictation,
             trigger: .keyboardShortcut
         ) == "Recording — release to stop")
         #expect(RecordingEngine.recordingStatus(
-            capturedMode: .pushToTalk,
+            trigger: .fnKey
+        ) == "Recording — release to stop")
+        #expect(RecordingEngine.recordingStatus(
             trigger: .manual
         ) == "Recording — click Stop when finished")
     }

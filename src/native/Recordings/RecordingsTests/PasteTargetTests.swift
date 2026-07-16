@@ -3,25 +3,17 @@ import Testing
 @testable import RecordingsLib
 
 struct PasteTargetTests {
-    @Test("command selection is frozen when recording starts, not after transcription")
-    func commandSelectionCapturePolicy() {
-        #expect(RecordingEngine.shouldCaptureCommandSelection(
-            recordingMode: .command,
+    @Test("selection is frozen when recording starts, not after transcription")
+    func selectionCapturePolicy() {
+        #expect(RecordingEngine.shouldCaptureSelection(
             targetPid: 42,
             accessibilityTrusted: true
         ))
-        #expect(!RecordingEngine.shouldCaptureCommandSelection(
-            recordingMode: .dictation,
-            targetPid: 42,
-            accessibilityTrusted: true
-        ))
-        #expect(!RecordingEngine.shouldCaptureCommandSelection(
-            recordingMode: .command,
+        #expect(!RecordingEngine.shouldCaptureSelection(
             targetPid: nil,
             accessibilityTrusted: true
         ))
-        #expect(!RecordingEngine.shouldCaptureCommandSelection(
-            recordingMode: .command,
+        #expect(!RecordingEngine.shouldCaptureSelection(
             targetPid: 42,
             accessibilityTrusted: false
         ))
