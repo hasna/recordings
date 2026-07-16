@@ -12,7 +12,7 @@ import {
   verifyArchiveManifest,
   compareVersions,
   sha256File as fileDigest,
-  tailscaleStableIdSha256,
+  tailscaleNodeIdSha256,
 } from "../../scripts/macos_artifact";
 
 const temporaryDirectories: string[] = [];
@@ -116,7 +116,7 @@ function fixture(): {
 
 function localFixture(
   approvedTarget = "station06",
-  identityKind?: "hardware_uuid_sha256" | "tailscale_stable_id_sha256",
+  identityKind?: "hardware_uuid_sha256" | "tailscale_node_id_sha256",
 ) {
   const result = fixture();
   const { manifest } = result;
@@ -125,6 +125,7 @@ function localFixture(
   manifest.approved_target = approvedTarget;
   manifest.approved_target_identity_kind = identityKind;
   manifest.approved_target_identity_sha256 = targetIdentitySha256;
+  manifest.builder_identity_kind = identityKind;
   manifest.builder_identity_sha256 = builderIdentitySha256;
   manifest.non_notarized = true;
   manifest.team_id = "ADHOC";
@@ -329,6 +330,7 @@ describe("macOS artifact manifest", () => {
     expect(manifest.approved_target).toBeUndefined();
     expect(manifest.approved_target_identity_kind).toBeUndefined();
     expect(manifest.approved_target_identity_sha256).toBeUndefined();
+    expect(manifest.builder_identity_kind).toBeUndefined();
     expect(manifest.builder_identity_sha256).toBeUndefined();
     expect(manifest.non_notarized).toBeUndefined();
     expect(manifest.signing.mode).toBeUndefined();
@@ -336,7 +338,7 @@ describe("macOS artifact manifest", () => {
 
   test("release schema v2 rejects every local target identity field", () => {
     const { archivePath, manifestPath, manifest } = fixture();
-    manifest.approved_target_identity_kind = "tailscale_stable_id_sha256";
+    manifest.approved_target_identity_kind = "tailscale_node_id_sha256";
     writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
     expect(() =>
       verifyArchiveManifest(
@@ -363,6 +365,59 @@ describe("macOS artifact manifest", () => {
     ]);
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(result.stdout.toString().trim()).toBe("none");
+  });
+
+  test("direct release verification CLI remains compatible without identity-kind flags", () => {
+    const { archivePath, manifestPath, manifest } = fixture();
+    const result = Bun.spawnSync([
+      process.execPath,
+      join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
+      "verify-archive",
+      "--archive",
+      archivePath,
+      "--manifest",
+      manifestPath,
+      "--team-id",
+      manifest.team_id,
+      "--manifest-sha256",
+      fileDigest(manifestPath),
+      "--source-sha",
+      manifest.git_sha,
+      "--version",
+      manifest.bundle_version,
+      "--artifact-policy",
+      "release",
+      "--approved-target",
+      "fleet",
+      "--approved-target-identity-sha256",
+      "none",
+    ]);
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+  });
+
+  test("direct release provenance CLI defaults both omitted identity kinds to none", () => {
+    const result = Bun.spawnSync([
+      process.execPath,
+      join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
+      "provenance",
+      "--app",
+      join(tmpdir(), "missing-release-app"),
+      "--team-id",
+      "EXAMPLE123",
+      "--package-root",
+      join(import.meta.dir, "..", ".."),
+      "--artifact-policy",
+      "release",
+      "--approved-target",
+      "fleet",
+      "--approved-target-identity-sha256",
+      "none",
+      "--builder-identity-sha256",
+      "none",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).not.toContain("identity-kind");
+    expect(result.stderr.toString()).not.toContain("builder identity kind");
   });
 
   test("accepts local-only artifacts only with an explicit policy and exact target", () => {
@@ -423,7 +478,7 @@ describe("macOS artifact manifest", () => {
   });
 
   test("requires an exact explicit identity kind for Tailscale-bound artifacts", () => {
-    const { archivePath, manifestPath } = localFixture("station06", "tailscale_stable_id_sha256");
+    const { archivePath, manifestPath } = localFixture("station06", "tailscale_node_id_sha256");
     expect(() =>
       verifyArchiveManifest(
         archivePath,
@@ -448,9 +503,9 @@ describe("macOS artifact manifest", () => {
         "local_only",
         "station06",
         targetIdentitySha256,
-        "tailscale_stable_id_sha256",
+        "tailscale_node_id_sha256",
       ).approved_target_identity_kind,
-    ).toBe("tailscale_stable_id_sha256");
+    ).toBe("tailscale_node_id_sha256");
   });
 
   test("rejects explicit hardware identity kinds on newly written schema-v3 manifests", () => {
@@ -474,31 +529,74 @@ describe("macOS artifact manifest", () => {
     ).toThrow("exact station06 name and machine identity");
   });
 
-  test("hashes exactly one online Tailscale Self StableID for the approved hostname", () => {
-    const stableId = "nodeid:station06-stable";
+  test("requires target and builder identities to use the same node-ID namespace", () => {
+    const { archivePath, manifestPath, manifest } = localFixture(
+      "station06",
+      "tailscale_node_id_sha256",
+    );
+    manifest.builder_identity_kind = "hardware_uuid_sha256";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "ADHOC",
+        fileDigest(manifestPath),
+        manifest.git_sha,
+        manifest.bundle_version,
+        "local_only",
+        "station06",
+        targetIdentitySha256,
+        "tailscale_node_id_sha256",
+      ),
+    ).toThrow("exact station06 name and machine identity");
+  });
+
+  test("hashes the live-schema online Tailscale Self.ID exactly for the approved hostname", () => {
+    const nodeId = "n1234567890CNTRL";
     expect(
-      tailscaleStableIdSha256(
-        JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: stableId } }),
+      tailscaleNodeIdSha256(
+        JSON.stringify({
+          Version: "1.98.4-tabcdef",
+          TUN: true,
+          BackendState: "Running",
+          Self: {
+            ID: nodeId,
+            PublicKey: "nodekey:fixture-public-key",
+            HostName: "station06",
+            Online: true,
+          },
+        }),
         "station06",
       ),
-    ).toBe(Bun.CryptoHasher.hash("sha256", stableId, "hex"));
+    ).toBe(Bun.CryptoHasher.hash("sha256", nodeId, "hex"));
   });
 
   test.each([
     ["malformed JSON", "{"],
     ["missing Self", JSON.stringify({})],
     ["malformed Self", JSON.stringify({ Self: [] })],
-    ["stale offline Self", JSON.stringify({ Self: { Online: false, HostName: "station06", StableID: "nodeid:stable" } })],
-    ["wrong Self hostname", JSON.stringify({ Self: { Online: true, HostName: "station05", StableID: "nodeid:stable" } })],
-    ["missing StableID", JSON.stringify({ Self: { Online: true, HostName: "station06" } })],
-    ["empty StableID", JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: "" } })],
-    ["whitespace StableID", JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: " nodeid:stable " } })],
+    ["stale offline Self", JSON.stringify({ Self: { Online: false, HostName: "station06", ID: "nodeid:stable" } })],
+    ["wrong Self hostname", JSON.stringify({ Self: { Online: true, HostName: "station05", ID: "nodeid:stable" } })],
+    ["StableID-only Self", JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: "nodeid:stable" } })],
+    ["missing ID", JSON.stringify({ Self: { Online: true, HostName: "station06" } })],
+    ["empty ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "" } })],
+    ["leading whitespace ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: " nodeid:stable" } })],
+    ["trailing whitespace ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "nodeid:stable " } })],
+    ["internal space ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "nodeid:sta ble" } })],
+    ["internal tab ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "nodeid:\tstable" } })],
+    ["CR in ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "nodeid:\rstable" } })],
+    ["LF in ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "nodeid:\nstable" } })],
+    ["NUL in ID", JSON.stringify({ Self: { Online: true, HostName: "station06", ID: "nodeid:\0stable" } })],
   ])("rejects %s", (_label, statusJson) => {
-    expect(() => tailscaleStableIdSha256(statusJson, "station06")).toThrow();
+    expect(() => tailscaleNodeIdSha256(statusJson, "station06")).toThrow();
   });
 
   test("rejects local-only manifests that imply release trust", () => {
-    const { archivePath, manifestPath, manifest } = localFixture();
+    const { archivePath, manifestPath, manifest } = localFixture(
+      "station06",
+      "tailscale_node_id_sha256",
+    );
     manifest.notarization.status = "Accepted";
     manifest.notarization.stapled = true;
     writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
@@ -518,7 +616,10 @@ describe("macOS artifact manifest", () => {
   });
 
   test("rejects raw or matching local machine identities", () => {
-    const { archivePath, manifestPath, manifest } = localFixture();
+    const { archivePath, manifestPath, manifest } = localFixture(
+      "station06",
+      "tailscale_node_id_sha256",
+    );
     manifest.approved_target_identity_sha256 = "11111111-1111-4111-8111-111111111111";
     writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
     expect(() =>
@@ -732,6 +833,9 @@ describe("macOS install journal compatibility", () => {
     ]);
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(JSON.parse(result.stdout.toString()).approved_target_identity_kind).toBe(
+      "hardware_uuid_sha256",
+    );
+    expect(JSON.parse(result.stdout.toString()).builder_identity_kind).toBe(
       "hardware_uuid_sha256",
     );
   });

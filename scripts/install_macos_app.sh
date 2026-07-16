@@ -153,7 +153,7 @@ else
     exit 2
   fi
   case "$APPROVED_TARGET_IDENTITY_KIND" in
-    hardware_uuid_sha256|tailscale_stable_id_sha256) ;;
+    hardware_uuid_sha256|tailscale_node_id_sha256) ;;
     *) echo "Local-only install requires a supported --approved-target-identity-kind." >&2; exit 2 ;;
   esac
   if [ "$ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS" -ne 1 ]; then
@@ -165,7 +165,7 @@ else
     echo "Local-only artifact target ${APPROVED_TARGET} does not match this Mac (${ACTUAL_TARGET})." >&2
     exit 1
   fi
-  if [ "$APPROVED_TARGET_IDENTITY_KIND" = "tailscale_stable_id_sha256" ]; then
+  if [ "$APPROVED_TARGET_IDENTITY_KIND" = "tailscale_node_id_sha256" ]; then
     if ! command -v tailscale >/dev/null 2>&1; then
       echo "Tailscale is required to verify this local-only target identity." >&2
       exit 1
@@ -174,7 +174,7 @@ else
       echo "Bun is required to verify this local-only target identity." >&2
       exit 1
     fi
-    if ! ACTUAL_TARGET_IDENTITY_SHA256="$(tailscale status --json | bun "$ARTIFACT_TOOL" tailscale-identity-sha256 --expected-hostname "$APPROVED_TARGET")"; then
+    if ! ACTUAL_TARGET_IDENTITY_SHA256="$(tailscale status --json | bun "$ARTIFACT_TOOL" tailscale-node-id-sha256 --expected-hostname "$APPROVED_TARGET")"; then
       echo "Could not verify the live Tailscale identity for this local-only target." >&2
       exit 1
     fi
@@ -450,6 +450,7 @@ bun "$ARTIFACT_TOOL" verify-archive \
   --approved-target "$APPROVED_TARGET" \
   --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
+MANIFEST_BUILDER_IDENTITY_KIND="$(bun "$ARTIFACT_TOOL" manifest-get --manifest "$MANIFEST_PATH" --field builder_identity_kind)"
 
 CURRENT_MACOS="$(sw_vers -productVersion)"
 MINIMUM_MACOS="$(bun "$ARTIFACT_TOOL" manifest-get --manifest "$MANIFEST_PATH" --field minimum_macos)"
@@ -639,6 +640,7 @@ write_journal() {
     --approved-target "$APPROVED_TARGET"
     --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND"
     --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
+    --builder-identity-kind "$MANIFEST_BUILDER_IDENTITY_KIND"
     --candidate-identity-sha256 "$candidate_identity_sha256"
     --previous-identity-sha256 "$previous_identity_sha256"
   )

@@ -32,6 +32,7 @@ ARTIFACT_POLICY="release"
 APPROVED_TARGET="fleet"
 APPROVED_TARGET_IDENTITY_KIND="none"
 APPROVED_TARGET_IDENTITY_SHA256="none"
+BUILDER_IDENTITY_KIND="none"
 BUILDER_IDENTITY_SHA256="none"
 if [ "$MODE" = "release" ]; then
     if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
@@ -55,8 +56,8 @@ elif [ "$MODE" = "local" ]; then
         echo "Local-only builds require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256." >&2
         exit 1
     fi
-    if [ "$LOCAL_APPROVED_TARGET_IDENTITY_KIND" != "tailscale_stable_id_sha256" ]; then
-        echo "New local-only builds require RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND=tailscale_stable_id_sha256." >&2
+    if [ "$LOCAL_APPROVED_TARGET_IDENTITY_KIND" != "tailscale_node_id_sha256" ]; then
+        echo "New local-only builds require RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND=tailscale_node_id_sha256." >&2
         exit 1
     fi
     BUILD_HOST="$(hostname -s)"
@@ -64,15 +65,21 @@ elif [ "$MODE" = "local" ]; then
         echo "Local-only artifacts must be built on a non-target Mac." >&2
         exit 1
     fi
-    BUILDER_PLATFORM_ID="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ {print $(NF-1); exit}' | tr '[:upper:]' '[:lower:]')"
-    if [ -z "$BUILDER_PLATFORM_ID" ]; then
-        echo "Could not read the build Mac platform identity." >&2
+    if ! command -v tailscale >/dev/null 2>&1; then
+        echo "Tailscale is required to authenticate the non-target build Mac." >&2
         exit 1
     fi
-    BUILDER_IDENTITY_SHA256="$(printf '%s' "$BUILDER_PLATFORM_ID" | shasum -a 256 | awk '{print $1}')"
-    unset BUILDER_PLATFORM_ID
+    if ! BUILDER_IDENTITY_SHA256="$(tailscale status --json | "$BUN_EXECUTABLE" "$PACKAGE_ROOT/scripts/macos_artifact.ts" tailscale-node-id-sha256 --expected-hostname "$BUILD_HOST")"; then
+        echo "Could not authenticate the live Tailscale node identity for the build Mac." >&2
+        exit 1
+    fi
+    if ! [[ "$BUILDER_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "Build Mac Tailscale node identity did not produce a valid SHA-256 digest." >&2
+        exit 1
+    fi
+    BUILDER_IDENTITY_KIND="tailscale_node_id_sha256"
     if [ "$BUILDER_IDENTITY_SHA256" = "$LOCAL_APPROVED_TARGET_IDENTITY_SHA256" ]; then
-        echo "Local-only artifacts must be built on a non-target Mac identity." >&2
+        echo "Local-only artifacts must be built on a different authenticated Tailscale node." >&2
         exit 1
     fi
     CODESIGN_IDENTITY="-"
@@ -237,6 +244,7 @@ if [ "$MODE" != "debug" ]; then
         --approved-target "$APPROVED_TARGET" \
         --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
         --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256" \
+        --builder-identity-kind "$BUILDER_IDENTITY_KIND" \
         --builder-identity-sha256 "$BUILDER_IDENTITY_SHA256"
 fi
 codesign "${APP_SIGN_ARGUMENTS[@]}" \

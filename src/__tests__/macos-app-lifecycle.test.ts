@@ -19,14 +19,15 @@ const repositoryRoot = resolve(import.meta.dir, "../..");
 const bunExecutable = process.execPath;
 const targetPlatformIdentity = "11111111-1111-4111-8111-111111111111";
 const builderPlatformIdentity = "22222222-2222-4222-8222-222222222222";
-const targetTailscaleStableId = "nodeid:station06-stable";
+const targetTailscaleNodeId = "n-target-station06";
+const builderTailscaleNodeId = "n-builder-station05";
 const targetIdentitySha256 = Bun.CryptoHasher.hash("sha256", targetPlatformIdentity, "hex");
 const targetTailscaleIdentitySha256 = Bun.CryptoHasher.hash(
   "sha256",
-  targetTailscaleStableId,
+  targetTailscaleNodeId,
   "hex",
 );
-const builderIdentitySha256 = Bun.CryptoHasher.hash("sha256", builderPlatformIdentity, "hex");
+const builderIdentitySha256 = Bun.CryptoHasher.hash("sha256", builderTailscaleNodeId, "hex");
 const temporaryPaths: string[] = [];
 setDefaultTimeout(15_000);
 
@@ -98,7 +99,7 @@ set -euo pipefail
 if [ -n "\${TAILSCALE_STATUS_JSON:-}" ]; then
   printf '%s\n' "$TAILSCALE_STATUS_JSON"
 else
-  printf '%s\n' '{"Self":{"Online":true,"HostName":"station06","StableID":"${targetTailscaleStableId}"}}'
+  printf '%s\n' '{"Self":{"Online":true,"HostName":"station06","ID":"${targetTailscaleNodeId}"}}'
 fi
 `,
   );
@@ -121,7 +122,8 @@ case "$*" in
   *" journal-write "*|*" journal-get "*|*" journal-recover "*|*" tree-digest "*)
     exec "$REAL_BUN" "$@"
     ;;
-  *" tailscale-identity-sha256 "*) exec "$REAL_BUN" "$@" ;;
+  *" tailscale-node-id-sha256 "*) exec "$REAL_BUN" "$@" ;;
+  *" manifest-get "*"--field builder_identity_kind"*) printf '%s\n' "\${REQUIRED_BUILDER_IDENTITY_KIND:-none}"; exit 0 ;;
   *" manifest-get "*"--field minimum_macos"*) printf '26.0\n'; exit 0 ;;
   *" manifest-get "*"--field architectures"*) printf 'arm64\n'; exit 0 ;;
   *" manifest-get "*"--field identity"*) printf '%064d\n' 0 | tr '0' c; exit 0 ;;
@@ -304,6 +306,7 @@ async function runLocalInstaller(
       REQUIRED_ARTIFACT_POLICY: "local_only",
       REQUIRED_APPROVED_TARGET: "station06",
       REQUIRED_APPROVED_TARGET_IDENTITY: targetIdentitySha256,
+      REQUIRED_BUILDER_IDENTITY_KIND: "hardware_uuid_sha256",
       ...environment,
     },
   );
@@ -322,7 +325,7 @@ async function runTailscaleLocalInstaller(
       "--approved-target",
       "station06",
       "--approved-target-identity-kind",
-      "tailscale_stable_id_sha256",
+      "tailscale_node_id_sha256",
       "--approved-target-identity-sha256",
       targetTailscaleIdentitySha256,
       "--acknowledge-local-signing-and-permissions",
@@ -332,7 +335,8 @@ async function runTailscaleLocalInstaller(
       REQUIRED_TEAM_ID: "ADHOC",
       REQUIRED_ARTIFACT_POLICY: "local_only",
       REQUIRED_APPROVED_TARGET: "station06",
-      REQUIRED_APPROVED_TARGET_IDENTITY_KIND: "tailscale_stable_id_sha256",
+      REQUIRED_APPROVED_TARGET_IDENTITY_KIND: "tailscale_node_id_sha256",
+      REQUIRED_BUILDER_IDENTITY_KIND: "tailscale_node_id_sha256",
       REQUIRED_APPROVED_TARGET_IDENTITY: targetTailscaleIdentitySha256,
       ...environment,
     },
@@ -389,7 +393,7 @@ describe("macOS finalized artifact installer", () => {
     const fixture = createInstallerFixture();
     const result = await runInstaller(fixture, [
       "--approved-target-identity-kind",
-      "tailscale_stable_id_sha256",
+      "tailscale_node_id_sha256",
     ]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("do not accept a local-only target identity kind");
@@ -460,7 +464,7 @@ describe("macOS finalized artifact installer", () => {
     const result = await runTailscaleLocalInstaller(fixture);
     expect(result.exitCode, result.stderr).toBe(0);
     expect(readFileSync(join(fixture.markers, "bun.log"), "utf8")).toContain(
-      "tailscale-identity-sha256 --expected-hostname station06",
+      "tailscale-node-id-sha256 --expected-hostname station06",
     );
   });
 
@@ -478,10 +482,11 @@ describe("macOS finalized artifact installer", () => {
     ["malformed status", "{", {}],
     ["missing Self", "{}", {}],
     ["malformed Self", '{"Self":[]}', {}],
-    ["stale Self", '{"Self":{"Online":false,"HostName":"station06","StableID":"nodeid:station06-stable"}}', {}],
-    ["wrong Self", '{"Self":{"Online":true,"HostName":"station05","StableID":"nodeid:station06-stable"}}', {}],
-    ["missing StableID", '{"Self":{"Online":true,"HostName":"station06"}}', {}],
-    ["hash mismatch", '{"Self":{"Online":true,"HostName":"station06","StableID":"nodeid:other"}}', {}],
+    ["stale Self", '{"Self":{"Online":false,"HostName":"station06","ID":"n-target-station06"}}', {}],
+    ["wrong Self", '{"Self":{"Online":true,"HostName":"station05","ID":"n-target-station06"}}', {}],
+    ["StableID-only Self", '{"Self":{"Online":true,"HostName":"station06","StableID":"nodeid:legacy"}}', {}],
+    ["missing ID", '{"Self":{"Online":true,"HostName":"station06"}}', {}],
+    ["hash mismatch", '{"Self":{"Online":true,"HostName":"station06","ID":"n-other"}}', {}],
   ])("Tailscale-bound local install fails closed for %s", async (_label, statusJson, environment) => {
     const fixture = createInstallerFixture();
     const result = await runTailscaleLocalInstaller(fixture, [], {
@@ -1341,6 +1346,13 @@ chmod +x "$1"
       `import { appendFileSync, writeFileSync } from "node:fs";
 const args = Bun.argv.slice(2);
 appendFileSync(Bun.env.MARKER_DIRECTORY + "/bun.log", args.join(" ") + "\\n");
+if (args[0] === "tailscale-node-id-sha256") {
+  const expectedHostname = args[args.indexOf("--expected-hostname") + 1];
+  const status = await Bun.stdin.json();
+  if (status?.Self?.Online !== true || status?.Self?.HostName !== expectedHostname || typeof status?.Self?.ID !== "string") process.exit(65);
+  process.stdout.write(Bun.CryptoHasher.hash("sha256", status.Self.ID, "hex") + "\\n");
+  process.exit(0);
+}
 if (args[0] === "provenance") process.exit(0);
 if (args[0] === "finalize" || args[0] === "finalize-local") {
   const manifestIndex = args.indexOf("--manifest");
@@ -1356,6 +1368,18 @@ process.exit(64);
       "#!/usr/bin/env bash\nmkdir -p .build/$3\nprintf app > .build/$3/App\nchmod +x .build/$3/App\n",
     );
     writeExecutable(join(bin, "hostname"), "#!/usr/bin/env bash\nprintf '%s\\n' \"${BUILD_FIXTURE_HOSTNAME:-station05}\"\n");
+    writeExecutable(
+      join(bin, "tailscale"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+[ "\${FAIL_BUILDER_TAILSCALE_STATUS:-0}" = 0 ] || exit 1
+if [ -n "\${BUILDER_TAILSCALE_STATUS_JSON:-}" ]; then
+  printf '%s\n' "$BUILDER_TAILSCALE_STATUS_JSON"
+else
+  printf '%s\n' '{"Self":{"Online":true,"HostName":"station05","ID":"${builderTailscaleNodeId}"}}'
+fi
+`,
+    );
     writeExecutable(
       join(bin, "ioreg"),
       `#!/usr/bin/env bash
@@ -1496,8 +1520,8 @@ fi
         RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
         RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "",
         RECORDINGS_LOCAL_APPROVED_TARGET: "station06",
-        RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND: "tailscale_stable_id_sha256",
-        RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: targetIdentitySha256,
+        RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND: "tailscale_node_id_sha256",
+        RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: targetTailscaleIdentitySha256,
         SIGNING_FLAGS: "0x10002(adhoc,runtime)",
         ...environment,
       },
@@ -1545,8 +1569,9 @@ fi
     expect(bunLog).toContain("provenance");
     expect(bunLog).toContain("--artifact-policy local_only");
     expect(bunLog).toContain("--approved-target station06");
-    expect(bunLog).toContain("--approved-target-identity-kind tailscale_stable_id_sha256");
-    expect(bunLog).toContain(`--approved-target-identity-sha256 ${targetIdentitySha256}`);
+    expect(bunLog).toContain("--approved-target-identity-kind tailscale_node_id_sha256");
+    expect(bunLog).toContain(`--approved-target-identity-sha256 ${targetTailscaleIdentitySha256}`);
+    expect(bunLog).toContain("--builder-identity-kind tailscale_node_id_sha256");
     expect(bunLog).toContain(`--builder-identity-sha256 ${builderIdentitySha256}`);
     expect(bunLog).toContain("finalize-local");
     expect(existsSync(join(fixture.markers, "xcrun.log"))).toBeFalse();
@@ -1571,7 +1596,7 @@ fi
       RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND: "hardware_uuid_sha256",
     });
     expect(legacyHardwareKindResult.exitCode).not.toBe(0);
-    expect(legacyHardwareKindResult.stderr).toContain("tailscale_stable_id_sha256");
+    expect(legacyHardwareKindResult.stderr).toContain("tailscale_node_id_sha256");
 
     const missingKind = createBuildFixture();
     const missingKindResult = await runLocalBuild(missingKind, {
@@ -1579,6 +1604,40 @@ fi
     });
     expect(missingKindResult.exitCode).not.toBe(0);
     expect(missingKindResult.stderr).toContain("RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND");
+  });
+
+  test("local-only build requires a distinct authenticated online builder node", async () => {
+    const buildScript = readFileSync(
+      join(repositoryRoot, "src", "native", "Recordings", "build.sh"),
+      "utf8",
+    );
+    expect(buildScript).toContain("command -v tailscale");
+    expect(buildScript).toContain("Tailscale is required to authenticate");
+
+    const offlineBuilder = createBuildFixture();
+    const offlineResult = await runLocalBuild(offlineBuilder, {
+      BUILDER_TAILSCALE_STATUS_JSON: JSON.stringify({
+        Self: { Online: false, HostName: "station05", ID: builderTailscaleNodeId },
+      }),
+    });
+    expect(offlineResult.exitCode).not.toBe(0);
+    expect(offlineResult.stderr).toContain("Could not authenticate");
+
+    const wrongBuilder = createBuildFixture();
+    const wrongResult = await runLocalBuild(wrongBuilder, {
+      BUILDER_TAILSCALE_STATUS_JSON: JSON.stringify({
+        Self: { Online: true, HostName: "station04", ID: builderTailscaleNodeId },
+      }),
+    });
+    expect(wrongResult.exitCode).not.toBe(0);
+    expect(wrongResult.stderr).toContain("Could not authenticate");
+
+    const sameNode = createBuildFixture();
+    const sameNodeResult = await runLocalBuild(sameNode, {
+      RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: builderIdentitySha256,
+    });
+    expect(sameNodeResult.exitCode).not.toBe(0);
+    expect(sameNodeResult.stderr).toContain("different authenticated Tailscale node");
   });
 
   test("release builds reject missing signer and notary configuration", async () => {

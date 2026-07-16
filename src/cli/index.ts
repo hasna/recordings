@@ -741,7 +741,7 @@ appCommand
   .option("--approved-target <station>", "Exact approved target; fleet for release artifacts", "fleet")
   .option(
     "--approved-target-identity-kind <kind>",
-    "Target identity kind: hardware_uuid_sha256 or tailscale_stable_id_sha256",
+    "Target identity kind: hardware_uuid_sha256 or tailscale_node_id_sha256",
   )
   .option(
     "--approved-target-identity-sha256 <sha256>",
