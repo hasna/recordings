@@ -636,6 +636,186 @@ struct CLIRunnerTests {
         #expect(reader.data.count == 8_192)
     }
 
+    @Test("capture reader retries interrupted setup and closes every descriptor when setup fails")
+    func captureReaderDescriptorSetupIsFailClosed() throws {
+        // Four descriptors each get F_GETFD/F_SETFD, followed by F_GETFL/F_SETFL on
+        // the capture read end. Force every individual setup operation to fail in turn.
+        for failingCall in 1...10 {
+            var createdDescriptors: [Int32] = []
+            var configurationCall = 0
+            let systemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
+                makePipe: { _ in
+                    var ends: [Int32] = [0, 0]
+                    guard Darwin.pipe(&ends) == 0 else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    createdDescriptors.append(contentsOf: ends)
+                    return (ends[0], ends[1])
+                },
+                fcntl: { descriptor, command, value in
+                    configurationCall += 1
+                    if configurationCall == failingCall {
+                        errno = EIO
+                        return -1
+                    }
+                    if let value { return Darwin.fcntl(descriptor, command, value) }
+                    return Darwin.fcntl(descriptor, command)
+                }
+            )
+
+            #expect(throws: (any Error).self) {
+                _ = try CLIRunner.PipeCaptureReader(systemCalls: systemCalls)
+            }
+            #expect(createdDescriptors.count == 4)
+            for descriptor in createdDescriptors {
+                errno = 0
+                #expect(Darwin.fcntl(descriptor, F_GETFD) == -1)
+                #expect(errno == EBADF)
+            }
+        }
+
+        // EINTR is retried at every setup call; successful construction still proves
+        // both inheritance protection and nonblocking capture configuration landed.
+        var interruptedCalls = Set<Int>()
+        var configurationCall = 0
+        var retryDescriptors: [Int32] = []
+        let retryingSystemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
+            makePipe: { _ in
+                var ends: [Int32] = [0, 0]
+                guard Darwin.pipe(&ends) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                retryDescriptors.append(contentsOf: ends)
+                return (ends[0], ends[1])
+            },
+            fcntl: { descriptor, command, value in
+                configurationCall += 1
+                let logicalCall = (configurationCall + 1) / 2
+                if configurationCall % 2 == 1 {
+                    interruptedCalls.insert(logicalCall)
+                    errno = EINTR
+                    return -1
+                }
+                if let value { return Darwin.fcntl(descriptor, command, value) }
+                return Darwin.fcntl(descriptor, command)
+            }
+        )
+        let reader = try CLIRunner.PipeCaptureReader(systemCalls: retryingSystemCalls)
+        defer { reader.closeWriteDescriptor() }
+        #expect(interruptedCalls == Set(1...10))
+        for descriptor in retryDescriptors {
+            #expect(Darwin.fcntl(descriptor, F_GETFD) & FD_CLOEXEC != 0)
+        }
+        #expect(Darwin.fcntl(reader.readDescriptor, F_GETFL) & O_NONBLOCK != 0)
+        reader.cancel()
+        reader.join()
+    }
+
+    @Test("a reaper failure still joins capture readers and closes silent escaped pipes")
+    func reapFailureStillFinishesCaptures() throws {
+        struct InjectedReapFailure: Error {}
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-reap-failure-\(UUID().uuidString)")
+        let source = root.appendingPathComponent("silent-holder.c")
+        let executable = root.appendingPathComponent("silent-holder")
+        let holderPidFile = root.appendingPathComponent("holder-pid")
+        let markerFile = root.appendingPathComponent("holder-probe")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            if let holderPid = Self.readPID(from: holderPidFile) {
+                _ = Darwin.kill(holderPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        try """
+        #include <errno.h>
+        #include <signal.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <sys/wait.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        static volatile sig_atomic_t probeRequested = 0;
+        static void requestProbe(int signo) { (void)signo; probeRequested = 1; }
+
+        int main(int argc, char **argv) {
+            if (argc < 3) return 64;
+            pid_t child = fork();
+            if (child == -1) return 65;
+            if (child != 0) {
+                while (access(argv[1], F_OK) == -1) {
+                    struct timespec delay = {0, 10000000};
+                    nanosleep(&delay, 0);
+                }
+                return 0;
+            }
+            if (setsid() == -1) _exit(66);
+            signal(SIGPIPE, SIG_IGN);
+            signal(SIGUSR1, requestProbe);
+            FILE *pid = fopen(argv[1], "w");
+            if (!pid) _exit(67);
+            fprintf(pid, "%d", (int)getpid());
+            fclose(pid);
+            while (!probeRequested) {
+                struct timespec delay = {0, 20000000};
+                nanosleep(&delay, 0);
+            }
+            int outBroken = (write(STDOUT_FILENO, "x", 1) == -1 && errno == EPIPE);
+            int errBroken = (write(STDERR_FILENO, "y", 1) == -1 && errno == EPIPE);
+            FILE *marker = fopen(argv[2], "w");
+            if (!marker) _exit(68);
+            fputs(outBroken && errBroken ? "both-epipe" : "still-connected", marker);
+            fclose(marker);
+            _exit(0);
+        }
+        """.write(to: source, atomically: true, encoding: .utf8)
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compile.arguments = ["-o", executable.path, source.path]
+        try compile.run()
+        compile.waitUntilExit()
+        try #require(compile.terminationStatus == 0)
+
+        let startedAt = ContinuousClock.now
+        #expect(throws: InjectedReapFailure.self) {
+            _ = try CLIRunner.runExecutable(
+                executable.path,
+                arguments: [holderPidFile.path, markerFile.path],
+                pipeDrainTimeout: 0.1,
+                leaderReaper: { processIdentifier, _ in
+                    var status: Int32 = 0
+                    var result: pid_t
+                    repeat {
+                        result = Darwin.waitpid(processIdentifier, &status, 0)
+                    } while result == -1 && errno == EINTR
+                    guard result == processIdentifier else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    throw InjectedReapFailure()
+                }
+            )
+        }
+        #expect(ContinuousClock.now - startedAt < .seconds(2))
+
+        let holderPid = try #require(Self.readPID(from: holderPidFile))
+        #expect(Darwin.kill(holderPid, 0) == 0)
+        try #require(Darwin.kill(holderPid, SIGUSR1) == 0)
+        var marker: String?
+        let markerDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < markerDeadline {
+            if let contents = try? String(contentsOf: markerFile, encoding: .utf8), !contents.isEmpty {
+                marker = contents
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        #expect(marker == "both-epipe")
+        expectProcessIsGone(holderPid)
+    }
+
     @Test("output at the exit/drain boundary is captured completely for nil-budget and budgeted runs")
     func outputCompleteAtExitDrainBoundary() throws {
         // 256 KiB per stream overflows the kernel pipe buffer many times over, so data is

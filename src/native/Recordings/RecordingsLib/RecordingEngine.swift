@@ -3758,6 +3758,11 @@ enum CLIRunner: Sendable {
         case leaderReaped(Int32)
     }
 
+    typealias LeaderReaper = (
+        _ processIdentifier: pid_t,
+        _ lifecycleObserver: ((ProcessLifecycleEvent) -> Void)?
+    ) throws -> Int32
+
     static func run(
         _ args: [String],
         home: String,
@@ -3824,7 +3829,8 @@ enum CLIRunner: Sendable {
         pipeDrainTimeout: TimeInterval = 2,
         totalWallClockBudget: TimeInterval? = nil,
         beforeExecutionDeadline: (() -> Void)? = nil,
-        lifecycleObserver: ((ProcessLifecycleEvent) -> Void)? = nil
+        lifecycleObserver: ((ProcessLifecycleEvent) -> Void)? = nil,
+        leaderReaper: LeaderReaper? = nil
     ) throws -> ProcessOutput {
         precondition(executionTimeout.isFinite && executionTimeout > 0)
         precondition(terminationGracePeriod.isFinite && terminationGracePeriod >= 0)
@@ -3941,10 +3947,22 @@ enum CLIRunner: Sendable {
         }
         let terminationStatus: Int32?
         if confirmedExit {
-            terminationStatus = try reapLeader(
-                processIdentifier,
-                lifecycleObserver: lifecycleObserver
-            )
+            do {
+                terminationStatus = try leaderReaper?(
+                    processIdentifier,
+                    lifecycleObserver
+                ) ?? reapLeader(
+                    processIdentifier,
+                    lifecycleObserver: lifecycleObserver
+                )
+            } catch {
+                reapLeaderInBackground(processIdentifier)
+                finishCaptures(
+                    captureReaders,
+                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
+                )
+                throw error
+            }
         } else {
             reapLeaderInBackground(processIdentifier)
             terminationStatus = nil
@@ -4238,6 +4256,21 @@ enum CLIRunner: Sendable {
     /// forever — a descendant that inherited the write end would never observe EPIPE, and
     /// the descriptor would leak in this process. Never reintroduce it here.
     final class PipeCaptureReader: @unchecked Sendable {
+        struct SystemCalls: @unchecked Sendable {
+            let makePipe: (_ operation: String) throws -> (read: Int32, write: Int32)
+            let fcntl: (_ descriptor: Int32, _ command: Int32, _ value: Int32?) -> Int32
+
+            static let live = SystemCalls(
+                makePipe: { try PipeCaptureReader.makePipe(operation: $0) },
+                fcntl: { descriptor, command, value in
+                    if let value {
+                        return Darwin.fcntl(descriptor, command, value)
+                    }
+                    return Darwin.fcntl(descriptor, command)
+                }
+            )
+        }
+
         /// Write end lent to the spawned child; the runner closes it through
         /// `closeWriteDescriptor()` once the child holds its own copies.
         let writeDescriptor: Int32
@@ -4261,32 +4294,68 @@ enum CLIRunner: Sendable {
         /// prompt against a descendant that keeps writing.
         private static let cancelledDrainReadLimit = 16
 
-        init() throws {
-            let dataPipe = try Self.makePipe(operation: "create capture pipe")
+        init(systemCalls: SystemCalls = .live) throws {
+            let dataPipe = try systemCalls.makePipe("create capture pipe")
             let wakeupPipe: (read: Int32, write: Int32)
             do {
-                wakeupPipe = try Self.makePipe(operation: "create capture wakeup pipe")
+                wakeupPipe = try systemCalls.makePipe("create capture wakeup pipe")
             } catch {
                 Darwin.close(dataPipe.read)
                 Darwin.close(dataPipe.write)
                 throw error
             }
+
+            let descriptors = [dataPipe.read, dataPipe.write, wakeupPipe.read, wakeupPipe.write]
+            var setupSucceeded = false
+            defer {
+                if !setupSucceeded {
+                    for descriptor in descriptors {
+                        Darwin.close(descriptor)
+                    }
+                }
+            }
+
+            for descriptor in descriptors {
+                let descriptorFlags = try Self.checkedFcntl(
+                    descriptor,
+                    command: F_GETFD,
+                    operation: "read capture descriptor flags",
+                    systemCalls: systemCalls
+                )
+                _ = try Self.checkedFcntl(
+                    descriptor,
+                    command: F_SETFD,
+                    value: descriptorFlags | FD_CLOEXEC,
+                    operation: "protect capture descriptor from inheritance",
+                    systemCalls: systemCalls
+                )
+            }
+            let readFlags = try Self.checkedFcntl(
+                dataPipe.read,
+                command: F_GETFL,
+                operation: "read capture pipe status flags",
+                systemCalls: systemCalls
+            )
+            _ = try Self.checkedFcntl(
+                dataPipe.read,
+                command: F_SETFL,
+                value: readFlags | O_NONBLOCK,
+                operation: "make capture pipe nonblocking",
+                systemCalls: systemCalls
+            )
+
             readDescriptor = dataPipe.read
             writeDescriptor = dataPipe.write
             wakeupReadDescriptor = wakeupPipe.read
             wakeupWriteDescriptor = wakeupPipe.write
-            for descriptor in [readDescriptor, writeDescriptor, wakeupReadDescriptor, wakeupWriteDescriptor] {
-                _ = Darwin.fcntl(descriptor, F_SETFD, FD_CLOEXEC)
-            }
-            let readFlags = Darwin.fcntl(readDescriptor, F_GETFL)
-            _ = Darwin.fcntl(readDescriptor, F_SETFL, readFlags | O_NONBLOCK)
+            setupSucceeded = true
             Thread.detachNewThread { [self] in consumePipe() }
         }
 
         deinit {
-            // The reader thread retains the object and closes the read end before it
-            // exits, so nothing here can race it; this is a safety net for callers that
-            // drop the object without walking the full shutdown sequence.
+            // The reader thread retains this object until it has closed the read end.
+            // Callers must still close/cancel/join; this only releases any remaining
+            // owner-side descriptors after the reader has already exited.
             if !writeDescriptorClosed { Darwin.close(writeDescriptor) }
             if !wakeupDescriptorsClosed {
                 Darwin.close(wakeupReadDescriptor)
@@ -4401,6 +4470,31 @@ enum CLIRunner: Sendable {
                 )
             }
             return (ends[0], ends[1])
+        }
+
+        private static func checkedFcntl(
+            _ descriptor: Int32,
+            command: Int32,
+            value: Int32? = nil,
+            operation: String,
+            systemCalls: SystemCalls
+        ) throws -> Int32 {
+            var result: Int32
+            repeat {
+                result = systemCalls.fcntl(descriptor, command, value)
+            } while result == -1 && errno == EINTR
+            guard result != -1 else {
+                let errorNumber = errno
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(errorNumber),
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Failed to \(operation): \(String(cString: strerror(errorNumber)))"
+                    ]
+                )
+            }
+            return result
         }
     }
 
