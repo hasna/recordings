@@ -642,6 +642,7 @@ struct CLIRunnerTests {
         // the capture read end. Force every individual setup operation to fail in turn.
         for failingCall in 1...10 {
             var createdDescriptors: [Int32] = []
+            var closeCalls: [Int32: Int] = [:]
             var configurationCall = 0
             let systemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
                 makePipe: { _ in
@@ -660,6 +661,10 @@ struct CLIRunnerTests {
                     }
                     if let value { return Darwin.fcntl(descriptor, command, value) }
                     return Darwin.fcntl(descriptor, command)
+                },
+                close: { descriptor in
+                    closeCalls[descriptor, default: 0] += 1
+                    return Darwin.close(descriptor)
                 }
             )
 
@@ -667,10 +672,10 @@ struct CLIRunnerTests {
                 _ = try CLIRunner.PipeCaptureReader(systemCalls: systemCalls)
             }
             #expect(createdDescriptors.count == 4)
+            #expect(Set(createdDescriptors).count == 4)
+            #expect(closeCalls.count == 4)
             for descriptor in createdDescriptors {
-                errno = 0
-                #expect(Darwin.fcntl(descriptor, F_GETFD) == -1)
-                #expect(errno == EBADF)
+                #expect(closeCalls[descriptor] == 1)
             }
         }
 
@@ -711,9 +716,174 @@ struct CLIRunnerTests {
         reader.join()
     }
 
+    @Test("capture reader closes every owned descriptor exactly once on EOF and cancellation")
+    func captureReaderDescriptorOwnershipIsExact() throws {
+        for cancelBeforeEOF in [false, true] {
+            let ledgerLock = NSLock()
+            var createdDescriptors: [Int32] = []
+            var closeCalls: [Int32: Int] = [:]
+            let systemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
+                makePipe: { _ in
+                    var ends: [Int32] = [0, 0]
+                    guard Darwin.pipe(&ends) == 0 else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    ledgerLock.lock()
+                    createdDescriptors.append(contentsOf: ends)
+                    ledgerLock.unlock()
+                    return (ends[0], ends[1])
+                },
+                close: { descriptor in
+                    ledgerLock.lock()
+                    closeCalls[descriptor, default: 0] += 1
+                    ledgerLock.unlock()
+                    return Darwin.close(descriptor)
+                }
+            )
+
+            var reader: CLIRunner.PipeCaptureReader? = try .init(systemCalls: systemCalls)
+            if cancelBeforeEOF { reader?.cancel() }
+            reader?.closeWriteDescriptor()
+            if !cancelBeforeEOF {
+                #expect(reader?.waitUntilExited(deadline: .now() + .seconds(1)) == true)
+            }
+            reader?.join()
+            reader = nil
+
+            ledgerLock.lock()
+            let createdSnapshot = createdDescriptors
+            let closeSnapshot = closeCalls
+            ledgerLock.unlock()
+            #expect(createdSnapshot.count == 4)
+            #expect(Set(createdSnapshot).count == 4)
+            #expect(closeSnapshot.count == 4)
+            for descriptor in createdSnapshot {
+                #expect(closeSnapshot[descriptor] == 1)
+            }
+        }
+    }
+
+    @Test("terminal capture read and poll failures are retained after the reader joins")
+    func captureReaderRetainsTerminalIOFailures() throws {
+        let readFailure = try CLIRunner.PipeCaptureReader(
+            systemCalls: .init(read: { _, _, _ in
+                errno = EIO
+                return -1
+            })
+        )
+        readFailure.closeWriteDescriptor()
+        readFailure.join()
+        #expect(
+            readFailure.terminalError
+                == .captureFailed(operation: .read, code: EIO)
+        )
+
+        let pollFailure = try CLIRunner.PipeCaptureReader(
+            systemCalls: .init(poll: { _, _, _ in
+                errno = EIO
+                return -1
+            })
+        )
+        defer { pollFailure.closeWriteDescriptor() }
+        pollFailure.join()
+        #expect(
+            pollFailure.terminalError
+                == .captureFailed(operation: .poll, code: EIO)
+        )
+
+        let wakeupPollFailure = try CLIRunner.PipeCaptureReader(
+            systemCalls: .init(poll: { descriptors, _, _ in
+                guard let descriptors else {
+                    errno = EFAULT
+                    return -1
+                }
+                descriptors[1].revents = Int16(POLLNVAL)
+                return 1
+            })
+        )
+        defer { wakeupPollFailure.closeWriteDescriptor() }
+        wakeupPollFailure.join()
+        #expect(
+            wakeupPollFailure.terminalError
+                == .captureFailed(operation: .poll, code: EBADF)
+        )
+    }
+
+    @Test("an otherwise successful command surfaces a terminal capture failure")
+    func runExecutableSurfacesTerminalCaptureFailure() throws {
+        let failureGate = NSLock()
+        var shouldFailCapture = false
+        #expect(
+            throws: CLIRunner.ExecutionError.captureFailed(operation: .read, code: EIO)
+        ) {
+            _ = try CLIRunner.runExecutable(
+                "/bin/sleep",
+                arguments: ["0.05"],
+                beforeExecutionDeadline: {
+                    failureGate.lock()
+                    shouldFailCapture = true
+                    failureGate.unlock()
+                },
+                captureSystemCalls: .init(read: { descriptor, buffer, count in
+                    failureGate.lock()
+                    let shouldFail = shouldFailCapture
+                    failureGate.unlock()
+                    if shouldFail {
+                        errno = EIO
+                        return -1
+                    }
+                    errno = EAGAIN
+                    return -1
+                })
+            )
+        }
+    }
+
+    @Test("a command timeout remains primary over a competing capture failure")
+    func commandTimeoutRemainsPrimaryOverCaptureFailure() throws {
+        let failureGate = NSLock()
+        var shouldFailCapture = false
+        var injectedFailures = 0
+        #expect(
+            throws: CLIRunner.ExecutionError.timedOut(executable: "/bin/sleep", seconds: 0.05)
+        ) {
+            _ = try CLIRunner.runExecutable(
+                "/bin/sleep",
+                arguments: ["1"],
+                executionTimeout: 0.05,
+                terminationGracePeriod: 0,
+                forceKillGracePeriod: 0.1,
+                pipeDrainTimeout: 0.1,
+                beforeExecutionDeadline: {
+                    failureGate.lock()
+                    shouldFailCapture = true
+                    failureGate.unlock()
+                },
+                captureSystemCalls: .init(read: { descriptor, buffer, count in
+                    failureGate.lock()
+                    let shouldFail = shouldFailCapture
+                    if shouldFail { injectedFailures += 1 }
+                    failureGate.unlock()
+                    if shouldFail {
+                        errno = EIO
+                        return -1
+                    }
+                    return Darwin.read(descriptor, buffer, count)
+                })
+            )
+        }
+        failureGate.lock()
+        let injectedFailureCount = injectedFailures
+        failureGate.unlock()
+        #expect(injectedFailureCount > 0)
+    }
+
     @Test("a reaper failure still joins capture readers and closes silent escaped pipes")
     func reapFailureStillFinishesCaptures() throws {
         struct InjectedReapFailure: Error {}
+        let failureGate = NSLock()
+        var shouldFailCapture = false
+        var injectedFailures = 0
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("recordings-reap-failure-\(UUID().uuidString)")
@@ -786,6 +956,9 @@ struct CLIRunnerTests {
                 arguments: [holderPidFile.path, markerFile.path],
                 pipeDrainTimeout: 0.1,
                 leaderReaper: { processIdentifier, _ in
+                    failureGate.lock()
+                    shouldFailCapture = true
+                    failureGate.unlock()
                     var status: Int32 = 0
                     var result: pid_t
                     repeat {
@@ -795,10 +968,25 @@ struct CLIRunnerTests {
                         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
                     }
                     throw InjectedReapFailure()
-                }
+                },
+                captureSystemCalls: .init(read: { descriptor, buffer, count in
+                    failureGate.lock()
+                    let shouldFail = shouldFailCapture
+                    if shouldFail { injectedFailures += 1 }
+                    failureGate.unlock()
+                    if shouldFail {
+                        errno = EIO
+                        return -1
+                    }
+                    return Darwin.read(descriptor, buffer, count)
+                })
             )
         }
         #expect(ContinuousClock.now - startedAt < .seconds(2))
+        failureGate.lock()
+        let injectedFailureCount = injectedFailures
+        failureGate.unlock()
+        #expect(injectedFailureCount > 0)
 
         let holderPid = try #require(Self.readPID(from: holderPidFile))
         #expect(Darwin.kill(holderPid, 0) == 0)

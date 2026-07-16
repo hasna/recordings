@@ -3730,13 +3730,28 @@ private final class ProcessDataCapture: @unchecked Sendable {
 }
 
 enum CLIRunner: Sendable {
+    enum CaptureOperation: Sendable {
+        case read
+        case poll
+
+        fileprivate var description: String {
+            switch self {
+            case .read: "reading"
+            case .poll: "waiting for"
+            }
+        }
+    }
+
     enum ExecutionError: Error, LocalizedError, Equatable {
         case timedOut(executable: String, seconds: TimeInterval)
+        case captureFailed(operation: CaptureOperation, code: Int32)
 
         var errorDescription: String? {
             switch self {
             case let .timedOut(executable, seconds):
                 return "Command timed out after \(seconds.formatted()) seconds: \(executable)"
+            case let .captureFailed(operation, code):
+                return "Failed to capture command output while \(operation.description): \(String(cString: strerror(code)))"
             }
         }
     }
@@ -3830,7 +3845,8 @@ enum CLIRunner: Sendable {
         totalWallClockBudget: TimeInterval? = nil,
         beforeExecutionDeadline: (() -> Void)? = nil,
         lifecycleObserver: ((ProcessLifecycleEvent) -> Void)? = nil,
-        leaderReaper: LeaderReaper? = nil
+        leaderReaper: LeaderReaper? = nil,
+        captureSystemCalls: PipeCaptureReader.SystemCalls = .live
     ) throws -> ProcessOutput {
         precondition(executionTimeout.isFinite && executionTimeout > 0)
         precondition(terminationGracePeriod.isFinite && terminationGracePeriod >= 0)
@@ -3857,13 +3873,13 @@ enum CLIRunner: Sendable {
         let contractualExecutionTimeout = totalWallClockBudget
             .map { min(executionTimeout, $0 - wallClockCleanupReserve) } ?? executionTimeout
 
-        let stdoutReader = try PipeCaptureReader()
+        let stdoutReader = try PipeCaptureReader(systemCalls: captureSystemCalls)
         let stderrReader: PipeCaptureReader
         do {
-            stderrReader = try PipeCaptureReader()
+            stderrReader = try PipeCaptureReader(systemCalls: captureSystemCalls)
         } catch {
             stdoutReader.closeWriteDescriptor()
-            finishCaptures([stdoutReader], pipeDrainTimeout: 0)
+            _ = finishCaptures([stdoutReader], pipeDrainTimeout: 0)
             throw error
         }
         let captureReaders = [stdoutReader, stderrReader]
@@ -3882,7 +3898,7 @@ enum CLIRunner: Sendable {
         } catch {
             stdoutReader.closeWriteDescriptor()
             stderrReader.closeWriteDescriptor()
-            finishCaptures(captureReaders, pipeDrainTimeout: 0)
+            _ = finishCaptures(captureReaders, pipeDrainTimeout: 0)
             throw error
         }
         stdoutReader.closeWriteDescriptor()
@@ -3901,7 +3917,10 @@ enum CLIRunner: Sendable {
         } catch {
             signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
             reapLeaderInBackground(processIdentifier)
-            finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
+            _ = finishCaptures(
+                captureReaders,
+                pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
+            )
             throw error
         }
 
@@ -3920,7 +3939,10 @@ enum CLIRunner: Sendable {
             } catch {
                 signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
                 reapLeaderInBackground(processIdentifier)
-                finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
+                _ = finishCaptures(
+                    captureReaders,
+                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
+                )
                 throw error
             }
         } else {
@@ -3941,7 +3963,10 @@ enum CLIRunner: Sendable {
                 )
             } catch {
                 reapLeaderInBackground(processIdentifier)
-                finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
+                _ = finishCaptures(
+                    captureReaders,
+                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
+                )
                 throw error
             }
         }
@@ -3957,7 +3982,7 @@ enum CLIRunner: Sendable {
                 )
             } catch {
                 reapLeaderInBackground(processIdentifier)
-                finishCaptures(
+                _ = finishCaptures(
                     captureReaders,
                     pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
                 )
@@ -3968,10 +3993,16 @@ enum CLIRunner: Sendable {
             terminationStatus = nil
         }
 
-        finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
+        let captureError = finishCaptures(
+            captureReaders,
+            pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
+        )
 
         if didTimeOut {
             throw ExecutionError.timedOut(executable: executable, seconds: contractualExecutionTimeout)
+        }
+        if let captureError {
+            throw captureError
         }
 
         // Both readers are joined by now, so these snapshots can never observe a
@@ -4228,7 +4259,7 @@ enum CLIRunner: Sendable {
     private static func finishCaptures(
         _ readers: [PipeCaptureReader],
         pipeDrainTimeout: TimeInterval
-    ) {
+    ) -> ExecutionError? {
         let deadline = monotonicDispatchDeadline(after: pipeDrainTimeout)
         for reader in readers {
             reader.waitUntilExited(deadline: deadline)
@@ -4239,6 +4270,7 @@ enum CLIRunner: Sendable {
         for reader in readers {
             reader.join()
         }
+        return readers.lazy.compactMap(\.terminalError).first
     }
 
     /// Owns one capture pipe end to end: it creates the pipe, lends the write end to the
@@ -4259,16 +4291,52 @@ enum CLIRunner: Sendable {
         struct SystemCalls: @unchecked Sendable {
             let makePipe: (_ operation: String) throws -> (read: Int32, write: Int32)
             let fcntl: (_ descriptor: Int32, _ command: Int32, _ value: Int32?) -> Int32
+            let close: (_ descriptor: Int32) -> Int32
+            let read: (
+                _ descriptor: Int32,
+                _ buffer: UnsafeMutableRawPointer?,
+                _ count: Int
+            ) -> Int
+            let poll: (
+                _ descriptors: UnsafeMutablePointer<pollfd>?,
+                _ count: nfds_t,
+                _ timeout: Int32
+            ) -> Int32
 
-            static let live = SystemCalls(
-                makePipe: { try PipeCaptureReader.makePipe(operation: $0) },
-                fcntl: { descriptor, command, value in
+            init(
+                makePipe: @escaping (_ operation: String) throws -> (read: Int32, write: Int32) = {
+                    try PipeCaptureReader.makePipe(operation: $0)
+                },
+                fcntl: @escaping (
+                    _ descriptor: Int32,
+                    _ command: Int32,
+                    _ value: Int32?
+                ) -> Int32 = { descriptor, command, value in
                     if let value {
                         return Darwin.fcntl(descriptor, command, value)
                     }
                     return Darwin.fcntl(descriptor, command)
-                }
-            )
+                },
+                close: @escaping (_ descriptor: Int32) -> Int32 = { Darwin.close($0) },
+                read: @escaping (
+                    _ descriptor: Int32,
+                    _ buffer: UnsafeMutableRawPointer?,
+                    _ count: Int
+                ) -> Int = { Darwin.read($0, $1, $2) },
+                poll: @escaping (
+                    _ descriptors: UnsafeMutablePointer<pollfd>?,
+                    _ count: nfds_t,
+                    _ timeout: Int32
+                ) -> Int32 = { Darwin.poll($0, $1, $2) }
+            ) {
+                self.makePipe = makePipe
+                self.fcntl = fcntl
+                self.close = close
+                self.read = read
+                self.poll = poll
+            }
+
+            static let live = SystemCalls()
         }
 
         /// Write end lent to the spawned child; the runner closes it through
@@ -4279,12 +4347,14 @@ enum CLIRunner: Sendable {
 
         private let wakeupReadDescriptor: Int32
         private let wakeupWriteDescriptor: Int32
+        private let systemCalls: SystemCalls
         private let capture = ProcessDataCapture()
         private let exited = DispatchSemaphore(value: 0)
         private let lock = NSLock()
         private var cancelRequested = false
         private var writeDescriptorClosed = false
         private var wakeupDescriptorsClosed = false
+        private var storedTerminalError: ExecutionError?
 
         /// Reads per drain burst between polls, so a flooding writer cannot starve the
         /// wakeup descriptor check.
@@ -4300,8 +4370,8 @@ enum CLIRunner: Sendable {
             do {
                 wakeupPipe = try systemCalls.makePipe("create capture wakeup pipe")
             } catch {
-                Darwin.close(dataPipe.read)
-                Darwin.close(dataPipe.write)
+                _ = systemCalls.close(dataPipe.read)
+                _ = systemCalls.close(dataPipe.write)
                 throw error
             }
 
@@ -4310,7 +4380,7 @@ enum CLIRunner: Sendable {
             defer {
                 if !setupSucceeded {
                     for descriptor in descriptors {
-                        Darwin.close(descriptor)
+                        _ = systemCalls.close(descriptor)
                     }
                 }
             }
@@ -4348,6 +4418,7 @@ enum CLIRunner: Sendable {
             writeDescriptor = dataPipe.write
             wakeupReadDescriptor = wakeupPipe.read
             wakeupWriteDescriptor = wakeupPipe.write
+            self.systemCalls = systemCalls
             setupSucceeded = true
             Thread.detachNewThread { [self] in consumePipe() }
         }
@@ -4356,22 +4427,30 @@ enum CLIRunner: Sendable {
             // The reader thread retains this object until it has closed the read end.
             // Callers must still close/cancel/join; this only releases any remaining
             // owner-side descriptors after the reader has already exited.
-            if !writeDescriptorClosed { Darwin.close(writeDescriptor) }
+            if !writeDescriptorClosed { _ = systemCalls.close(writeDescriptor) }
             if !wakeupDescriptorsClosed {
-                Darwin.close(wakeupReadDescriptor)
-                Darwin.close(wakeupWriteDescriptor)
+                _ = systemCalls.close(wakeupReadDescriptor)
+                _ = systemCalls.close(wakeupWriteDescriptor)
             }
         }
 
         /// Everything captured so far; stable and complete once `join()` has returned.
         var data: Data { capture.data }
 
+        /// A terminal capture failure, stable once `join()` has returned. Cancellation
+        /// and ordinary end-of-file are not failures.
+        var terminalError: ExecutionError? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedTerminalError
+        }
+
         func closeWriteDescriptor() {
             lock.lock()
             defer { lock.unlock() }
             guard !writeDescriptorClosed else { return }
             writeDescriptorClosed = true
-            Darwin.close(writeDescriptor)
+            _ = systemCalls.close(writeDescriptor)
         }
 
         /// Waits until `deadline` for the reader thread to exit on its own — that is,
@@ -4408,8 +4487,8 @@ enum CLIRunner: Sendable {
             defer { lock.unlock() }
             guard !wakeupDescriptorsClosed else { return }
             wakeupDescriptorsClosed = true
-            Darwin.close(wakeupReadDescriptor)
-            Darwin.close(wakeupWriteDescriptor)
+            _ = systemCalls.close(wakeupReadDescriptor)
+            _ = systemCalls.close(wakeupWriteDescriptor)
         }
 
         private func consumePipe() {
@@ -4423,7 +4502,7 @@ enum CLIRunner: Sendable {
                 let readLimit = cancelled ? Self.cancelledDrainReadLimit : Self.drainReadLimit
                 while reads < readLimit {
                     let count = buffer.withUnsafeMutableBytes {
-                        Darwin.read(readDescriptor, $0.baseAddress, $0.count)
+                        systemCalls.read(readDescriptor, $0.baseAddress, $0.count)
                     }
                     if count > 0 {
                         capture.append(Data(bytes: buffer, count: count))
@@ -4435,6 +4514,7 @@ enum CLIRunner: Sendable {
                     } else if errno == EINTR {
                         continue
                     } else if errno != EAGAIN {
+                        storeTerminalError(operation: .read, code: errno)
                         sawFailure = true
                     }
                     break
@@ -4444,20 +4524,43 @@ enum CLIRunner: Sendable {
                     pollfd(fd: readDescriptor, events: Int16(POLLIN), revents: 0),
                     pollfd(fd: wakeupReadDescriptor, events: Int16(POLLIN), revents: 0),
                 ]
-                let events = Darwin.poll(&descriptors, 2, -1)
+                let events = systemCalls.poll(&descriptors, 2, -1)
                 if events == -1 {
                     if errno == EINTR { continue readLoop }
+                    storeTerminalError(operation: .poll, code: errno)
                     break readLoop
                 }
-                if descriptors[1].revents != 0
-                    || descriptors[0].revents & Int16(POLLERR | POLLNVAL) != 0 {
+                if descriptors[0].revents & Int16(POLLNVAL) != 0 {
+                    storeTerminalError(operation: .poll, code: EBADF)
+                    break readLoop
+                }
+                if descriptors[0].revents & Int16(POLLERR) != 0 {
+                    storeTerminalError(operation: .poll, code: EIO)
+                    break readLoop
+                }
+                if descriptors[1].revents & Int16(POLLNVAL) != 0 {
+                    storeTerminalError(operation: .poll, code: EBADF)
+                    break readLoop
+                }
+                if descriptors[1].revents & Int16(POLLERR) != 0 {
+                    storeTerminalError(operation: .poll, code: EIO)
+                    break readLoop
+                }
+                if descriptors[1].revents != 0 {
                     // One final bounded drain of already-buffered data, then exit.
                     cancelled = true
                 }
             }
             _ = capture.finish()
-            Darwin.close(readDescriptor)
+            _ = systemCalls.close(readDescriptor)
             exited.signal()
+        }
+
+        private func storeTerminalError(operation: CaptureOperation, code: Int32) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard storedTerminalError == nil else { return }
+            storedTerminalError = .captureFailed(operation: operation, code: code)
         }
 
         private static func makePipe(operation: String) throws -> (read: Int32, write: Int32) {
