@@ -27,14 +27,21 @@ export const LOCAL_ARTIFACT_SCHEMA_VERSION = 3;
 export const BUNDLE_ID = "com.hasna.recordings";
 export const PROVENANCE_FILENAME = "recordings-build-provenance.json";
 export const RELEASE_APPROVED_TARGET = "fleet";
+export const LEGACY_LOCAL_TARGET_IDENTITY_KIND = "hardware_uuid_sha256";
 
 export type ArtifactPolicy = "release" | "local_only";
+export type TargetIdentityKind =
+  | typeof LEGACY_LOCAL_TARGET_IDENTITY_KIND
+  | "tailscale_node_id_sha256";
+type OperatorTargetIdentityKind = TargetIdentityKind | "none";
 
 export type BuildProvenance = {
   schema_version: 2 | 3;
   artifact_policy?: "local_only";
   approved_target?: string;
+  approved_target_identity_kind?: TargetIdentityKind;
   approved_target_identity_sha256?: string;
+  builder_identity_kind?: TargetIdentityKind;
   builder_identity_sha256?: string;
   non_notarized?: true;
   bundle_id: string;
@@ -326,6 +333,50 @@ function manifestPolicy(manifest: MacOSArtifactManifest): ArtifactPolicy {
   return manifest.schema_version === LOCAL_ARTIFACT_SCHEMA_VERSION ? "local_only" : "release";
 }
 
+function manifestTargetIdentityKind(manifest: MacOSArtifactManifest): OperatorTargetIdentityKind {
+  if (manifestPolicy(manifest) === "release") return "none";
+  return manifest.approved_target_identity_kind ?? LEGACY_LOCAL_TARGET_IDENTITY_KIND;
+}
+
+function manifestBuilderIdentityKind(manifest: MacOSArtifactManifest): OperatorTargetIdentityKind {
+  if (manifestPolicy(manifest) === "release") return "none";
+  return manifest.builder_identity_kind ?? LEGACY_LOCAL_TARGET_IDENTITY_KIND;
+}
+
+function isTargetIdentityKind(value: unknown): value is TargetIdentityKind {
+  return value === LEGACY_LOCAL_TARGET_IDENTITY_KIND || value === "tailscale_node_id_sha256";
+}
+
+export function tailscaleNodeIdSha256(statusJson: string, expectedHostname: string): string {
+  if (!expectedHostname) throw new Error("expected Tailscale hostname is required");
+  let status: unknown;
+  try {
+    status = JSON.parse(statusJson);
+  } catch {
+    throw new Error("Tailscale status is not valid JSON");
+  }
+  if (!status || typeof status !== "object" || Array.isArray(status)) {
+    throw new Error("Tailscale status is missing Self");
+  }
+  const self = (status as Record<string, unknown>).Self;
+  if (!self || typeof self !== "object" || Array.isArray(self)) {
+    throw new Error("Tailscale status is missing Self");
+  }
+  const record = self as Record<string, unknown>;
+  if (record.Online !== true) throw new Error("Tailscale Self is not online");
+  if (record.HostName !== expectedHostname) {
+    throw new Error("Tailscale Self hostname does not match the approved target");
+  }
+  if (typeof record.ID !== "string") {
+    throw new Error("Tailscale Self has no ID");
+  }
+  const nodeId = record.ID;
+  if (!nodeId || /[\s\0]/u.test(nodeId)) {
+    throw new Error("Tailscale Self ID is empty or malformed");
+  }
+  return sha256(nodeId);
+}
+
 function nestedItems(
   appPath: string,
   expectedTeamId: string,
@@ -489,7 +540,9 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
     if (
       manifest.artifact_policy !== undefined ||
       manifest.approved_target !== undefined ||
+      manifest.approved_target_identity_kind !== undefined ||
       manifest.approved_target_identity_sha256 !== undefined ||
+      manifest.builder_identity_kind !== undefined ||
       manifest.builder_identity_sha256 !== undefined ||
       manifest.non_notarized !== undefined ||
       manifest.signing.mode !== undefined
@@ -523,6 +576,12 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
     if (
       manifest.artifact_policy !== "local_only" ||
       manifest.approved_target !== "station06" ||
+      (manifest.approved_target_identity_kind !== undefined &&
+        manifest.approved_target_identity_kind !== "tailscale_node_id_sha256") ||
+      (manifest.approved_target_identity_kind === undefined) !==
+        (manifest.builder_identity_kind === undefined) ||
+      (manifest.builder_identity_kind !== undefined &&
+        manifest.builder_identity_kind !== "tailscale_node_id_sha256") ||
       !manifest.approved_target_identity_sha256 ||
       !isHex(manifest.approved_target_identity_sha256, 64) ||
       !manifest.builder_identity_sha256 ||
@@ -602,6 +661,7 @@ export function verifyArchiveManifest(
   expectedPolicy: ArtifactPolicy = "release",
   expectedApprovedTarget: string = RELEASE_APPROVED_TARGET,
   expectedApprovedTargetIdentitySha256: string = "none",
+  expectedApprovedTargetIdentityKind: OperatorTargetIdentityKind = LEGACY_LOCAL_TARGET_IDENTITY_KIND,
 ): MacOSArtifactManifest {
   if (!expectedTeamId) throw new Error("expected Team ID is required");
   if (!isHex(expectedManifestSha256, 64) || sha256File(manifestPath) !== expectedManifestSha256) {
@@ -615,6 +675,12 @@ export function verifyArchiveManifest(
   const actualApprovedTarget = manifest.approved_target ?? RELEASE_APPROVED_TARGET;
   if (actualApprovedTarget !== expectedApprovedTarget) {
     throw new Error("manifest approved target does not match the exact operator-approved target");
+  }
+  if (
+    expectedPolicy === "local_only" &&
+    manifestTargetIdentityKind(manifest) !== expectedApprovedTargetIdentityKind
+  ) {
+    throw new Error("manifest target identity kind does not match the explicit operator selection");
   }
   if (
     expectedPolicy === "local_only" &&
@@ -653,7 +719,9 @@ function assertProvenanceMatchesManifest(
   for (const key of [
     "artifact_policy",
     "approved_target",
+    "approved_target_identity_kind",
     "approved_target_identity_sha256",
+    "builder_identity_kind",
     "builder_identity_sha256",
     "non_notarized",
     "bundle_id",
@@ -691,12 +759,19 @@ export function verifyExtractedApp(
   expectedPolicy: ArtifactPolicy = "release",
   expectedApprovedTarget: string = RELEASE_APPROVED_TARGET,
   expectedApprovedTargetIdentitySha256: string = "none",
+  expectedApprovedTargetIdentityKind: OperatorTargetIdentityKind = LEGACY_LOCAL_TARGET_IDENTITY_KIND,
 ): MacOSArtifactManifest {
   const manifest = readJson<MacOSArtifactManifest>(manifestPath);
   assertManifestShape(manifest);
   if (manifestPolicy(manifest) !== expectedPolicy) throw new Error("manifest artifact policy mismatch");
   if ((manifest.approved_target ?? RELEASE_APPROVED_TARGET) !== expectedApprovedTarget) {
     throw new Error("manifest approved target mismatch");
+  }
+  if (
+    expectedPolicy === "local_only" &&
+    manifestTargetIdentityKind(manifest) !== expectedApprovedTargetIdentityKind
+  ) {
+    throw new Error("manifest approved target identity kind mismatch");
   }
   if (
     expectedPolicy === "local_only" &&
@@ -803,7 +878,9 @@ function writeProvenance(
   packageRoot: string,
   artifactPolicy: ArtifactPolicy,
   approvedTarget: string,
+  approvedTargetIdentityKind: OperatorTargetIdentityKind,
   approvedTargetIdentitySha256: string,
+  builderIdentityKind: OperatorTargetIdentityKind,
   builderIdentitySha256: string,
 ): void {
   const executablePath = join(appPath, "Contents", "MacOS", "Recordings");
@@ -833,7 +910,9 @@ function writeProvenance(
   if (artifactPolicy === "release") {
     if (
       approvedTarget !== RELEASE_APPROVED_TARGET ||
+      approvedTargetIdentityKind !== "none" ||
       approvedTargetIdentitySha256 !== "none" ||
+      builderIdentityKind !== "none" ||
       builderIdentitySha256 !== "none" ||
       expectedTeamId === "ADHOC"
     ) {
@@ -842,15 +921,19 @@ function writeProvenance(
   } else if (
     expectedTeamId !== "ADHOC" ||
     approvedTarget !== "station06" ||
+    approvedTargetIdentityKind !== "tailscale_node_id_sha256" ||
+    builderIdentityKind !== "tailscale_node_id_sha256" ||
     !isHex(approvedTargetIdentitySha256, 64) ||
     !isHex(builderIdentitySha256, 64) ||
     approvedTargetIdentitySha256 === builderIdentitySha256
   ) {
-    throw new Error("local-only provenance requires ADHOC and exact station06 machine identity");
+    throw new Error("new local-only provenance requires ADHOC and a Tailscale node-bound station06 identity");
   } else {
     provenance.artifact_policy = "local_only";
     provenance.approved_target = approvedTarget;
+    provenance.approved_target_identity_kind = approvedTargetIdentityKind;
     provenance.approved_target_identity_sha256 = approvedTargetIdentitySha256;
+    provenance.builder_identity_kind = builderIdentityKind;
     provenance.builder_identity_sha256 = builderIdentitySha256;
     provenance.non_notarized = true;
   }
@@ -951,8 +1034,12 @@ function finalizeLocalArtifact(
   archivePath: string,
   manifestPath: string,
   approvedTarget: string,
+  approvedTargetIdentityKind: TargetIdentityKind,
   approvedTargetIdentitySha256: string,
 ): void {
+  if (approvedTargetIdentityKind !== "tailscale_node_id_sha256") {
+    throw new Error("new local-only artifacts require a Tailscale node ID identity hash");
+  }
   const executablePath = join(appPath, "Contents", "MacOS", "Recordings");
   const helperPath = join(appPath, "Contents", "Helpers", "recordings");
   const embeddedPath = provenancePath(appPath);
@@ -960,7 +1047,9 @@ function finalizeLocalArtifact(
   if (
     provenance.artifact_policy !== "local_only" ||
     provenance.approved_target !== approvedTarget ||
+    provenance.approved_target_identity_kind !== approvedTargetIdentityKind ||
     provenance.approved_target_identity_sha256 !== approvedTargetIdentitySha256 ||
+    provenance.builder_identity_kind !== "tailscale_node_id_sha256" ||
     provenance.non_notarized !== true ||
     provenance.team_id !== "ADHOC"
   ) {
@@ -1039,6 +1128,7 @@ function finalizeLocalArtifact(
     "local_only",
     approvedTarget,
     approvedTargetIdentitySha256,
+    approvedTargetIdentityKind,
   );
   verifyExtractedApp(
     appPath,
@@ -1047,6 +1137,7 @@ function finalizeLocalArtifact(
     "local_only",
     approvedTarget,
     approvedTargetIdentitySha256,
+    approvedTargetIdentityKind,
   );
 }
 
@@ -1169,6 +1260,7 @@ function verifyActiveApp(
   expectedPolicy: ArtifactPolicy,
   expectedApprovedTarget: string,
   expectedApprovedTargetIdentitySha256: string,
+  expectedApprovedTargetIdentityKind: OperatorTargetIdentityKind,
 ): void {
   const manifest = verifyExtractedApp(
     appPath,
@@ -1177,6 +1269,7 @@ function verifyActiveApp(
     expectedPolicy,
     expectedApprovedTarget,
     expectedApprovedTargetIdentitySha256,
+    expectedApprovedTargetIdentityKind,
   );
   const helperPath = join(appPath, "Contents", "Helpers", "recordings");
   if (companionVersion(helperPath) !== manifest.companion.version) {
@@ -1246,7 +1339,9 @@ export type InstallJournal = {
   expected_version: string;
   artifact_policy?: ArtifactPolicy;
   approved_target?: string;
+  approved_target_identity_kind?: TargetIdentityKind | "none";
   approved_target_identity_sha256?: string;
+  builder_identity_kind?: TargetIdentityKind | "none";
   candidate_identity_sha256: string;
   previous_identity_sha256: string;
 };
@@ -1291,7 +1386,11 @@ function journalArgument(): InstallJournal {
     expected_version: argument("--expected-version"),
     artifact_policy: argument("--artifact-policy") as ArtifactPolicy,
     approved_target: argument("--approved-target"),
+    approved_target_identity_kind: argument("--approved-target-identity-kind") as
+      | TargetIdentityKind
+      | "none",
     approved_target_identity_sha256: argument("--approved-target-identity-sha256"),
+    builder_identity_kind: argument("--builder-identity-kind") as TargetIdentityKind | "none",
     candidate_identity_sha256: argument("--candidate-identity-sha256"),
     previous_identity_sha256: argument("--previous-identity-sha256"),
   };
@@ -1339,24 +1438,39 @@ function readJournal(path: string): InstallJournal {
     if (
       journal.artifact_policy !== undefined ||
       journal.approved_target !== undefined ||
-      journal.approved_target_identity_sha256 !== undefined
+      journal.approved_target_identity_kind !== undefined ||
+      journal.approved_target_identity_sha256 !== undefined ||
+      journal.builder_identity_kind !== undefined
     ) {
       throw new Error("legacy install transaction journal contains unsupported policy fields");
     }
     journal.artifact_policy = "release";
     journal.approved_target = RELEASE_APPROVED_TARGET;
+    journal.approved_target_identity_kind = "none";
     journal.approved_target_identity_sha256 = "none";
-  } else if (
+    journal.builder_identity_kind = "none";
+  } else {
+    journal.approved_target_identity_kind ??=
+      journal.artifact_policy === "local_only" ? LEGACY_LOCAL_TARGET_IDENTITY_KIND : "none";
+    journal.builder_identity_kind ??=
+      journal.artifact_policy === "local_only" ? LEGACY_LOCAL_TARGET_IDENTITY_KIND : "none";
+  }
+  if (journal.schema_version === 3 && (
     (journal.artifact_policy !== "release" && journal.artifact_policy !== "local_only") ||
     !journal.approved_target ||
     (journal.artifact_policy === "release" &&
       (journal.approved_target !== RELEASE_APPROVED_TARGET ||
-        journal.approved_target_identity_sha256 !== "none")) ||
+        journal.approved_target_identity_kind !== "none" ||
+        journal.approved_target_identity_sha256 !== "none" ||
+        journal.builder_identity_kind !== "none")) ||
     (journal.artifact_policy === "local_only" &&
       (journal.approved_target !== "station06" ||
+        !isTargetIdentityKind(journal.approved_target_identity_kind) ||
+        !isTargetIdentityKind(journal.builder_identity_kind) ||
+        journal.approved_target_identity_kind !== journal.builder_identity_kind ||
         !journal.approved_target_identity_sha256 ||
         !isHex(journal.approved_target_identity_sha256, 64)))
-  ) {
+  )) {
     throw new Error("install transaction journal has an invalid artifact policy or target");
   }
   const expectedParent = resolve(journal.app_parent);
@@ -1553,7 +1667,11 @@ function manifestGet(path: string, field: string): void {
   else if (field === "identity") console.log(manifest.signing.designated_requirement_sha256);
   else if (field === "artifact_policy") console.log(manifest.artifact_policy);
   else if (field === "approved_target") console.log(manifest.approved_target);
+  else if (field === "approved_target_identity_kind") {
+    console.log(manifestTargetIdentityKind(manifest));
+  }
   else if (field === "approved_target_identity_sha256") console.log(manifest.approved_target_identity_sha256);
+  else if (field === "builder_identity_kind") console.log(manifestBuilderIdentityKind(manifest));
   else throw new Error(`unsupported manifest field: ${field}`);
 }
 
@@ -1572,17 +1690,51 @@ function artifactPolicyArgument(): ArtifactPolicy {
   return value;
 }
 
+function targetIdentityKindArgument(
+  policy?: ArtifactPolicy,
+  required = false,
+): OperatorTargetIdentityKind {
+  const index = Bun.argv.indexOf("--approved-target-identity-kind");
+  const value = index >= 0 ? Bun.argv[index + 1] : undefined;
+  if (!value) {
+    if (required) throw new Error("missing required argument --approved-target-identity-kind");
+    return policy === "release" ? "none" : LEGACY_LOCAL_TARGET_IDENTITY_KIND;
+  }
+  if (value !== "none" && !isTargetIdentityKind(value)) {
+    throw new Error("unsupported approved target identity kind");
+  }
+  return value;
+}
+
+function builderIdentityKindArgument(policy: ArtifactPolicy): OperatorTargetIdentityKind {
+  const index = Bun.argv.indexOf("--builder-identity-kind");
+  const value = index >= 0 ? Bun.argv[index + 1] : undefined;
+  if (!value) {
+    if (policy === "local_only") {
+      throw new Error("missing required argument --builder-identity-kind");
+    }
+    return "none";
+  }
+  if (value !== "none" && !isTargetIdentityKind(value)) {
+    throw new Error("unsupported builder identity kind");
+  }
+  return value;
+}
+
 function main(): void {
   const command = Bun.argv[2];
   if (command === "provenance") {
     const teamId = argument("--team-id");
+    const policy = artifactPolicyArgument();
     writeProvenance(
       argument("--app"),
       teamId,
       argument("--package-root"),
-      artifactPolicyArgument(),
+      policy,
       argument("--approved-target"),
+      targetIdentityKindArgument(policy),
       argument("--approved-target-identity-sha256"),
+      builderIdentityKindArgument(policy),
       argument("--builder-identity-sha256"),
     );
   } else if (command === "finalize") {
@@ -1602,10 +1754,12 @@ function main(): void {
       argument("--archive"),
       argument("--manifest"),
       argument("--approved-target"),
+      targetIdentityKindArgument(undefined, true),
       argument("--approved-target-identity-sha256"),
     );
   } else if (command === "verify-archive") {
     const teamId = argument("--team-id");
+    const policy = artifactPolicyArgument();
     verifyArchiveManifest(
       argument("--archive"),
       argument("--manifest"),
@@ -1613,29 +1767,34 @@ function main(): void {
       argument("--manifest-sha256"),
       argument("--source-sha"),
       argument("--version"),
-      artifactPolicyArgument(),
+      policy,
       argument("--approved-target"),
       argument("--approved-target-identity-sha256"),
+      targetIdentityKindArgument(policy),
     );
   } else if (command === "verify-app") {
     const teamId = argument("--team-id");
+    const policy = artifactPolicyArgument();
     verifyExtractedApp(
       argument("--app"),
       argument("--manifest"),
       teamId,
-      artifactPolicyArgument(),
+      policy,
       argument("--approved-target"),
       argument("--approved-target-identity-sha256"),
+      targetIdentityKindArgument(policy),
     );
   } else if (command === "verify-active") {
     const teamId = argument("--team-id");
+    const policy = artifactPolicyArgument();
     verifyActiveApp(
       argument("--app"),
       argument("--manifest"),
       teamId,
-      artifactPolicyArgument(),
+      policy,
       argument("--approved-target"),
       argument("--approved-target-identity-sha256"),
+      targetIdentityKindArgument(policy),
     );
   } else if (command === "assert-release") {
     assertExpectedRelease(
@@ -1648,6 +1807,8 @@ function main(): void {
     assertInstallTransition(argument("--existing-app"), argument("--manifest"));
   } else if (command === "requirement-digest") {
     requirementDigest(argument("--app"), artifactPolicyArgument());
+  } else if (command === "tailscale-node-id-sha256") {
+    console.log(tailscaleNodeIdSha256(readFileSync(0, "utf8"), argument("--expected-hostname")));
   } else if (command === "verify-filesystem-tree") {
     assertFilesystemTree(argument("--path"), Number(argument("--uid")));
   } else if (command === "fsync-tree") {

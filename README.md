@@ -71,7 +71,8 @@ RECORDINGS_NOTARY_KEYCHAIN_PROFILE="recordings-notary" ./build.sh release
 # Explicit local-only alternative when Developer ID credentials are unavailable.
 # Build on a Mac other than the approved target; this does not replace a release:
 RECORDINGS_LOCAL_APPROVED_TARGET="station06" \
-RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256="APPROVED_MACHINE_IDENTITY_SHA256" \
+RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND="tailscale_node_id_sha256" \
+RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256="AUTHENTICATED_TAILSCALE_NODE_ID_SHA256" \
   ./build.sh local
 
 # Install only on that exact target, with the immutable manifest digest recorded separately:
@@ -83,7 +84,8 @@ recordings app install \
   --expected-version 0.2.13 \
   --artifact-policy local-only \
   --approved-target station06 \
-  --approved-target-identity-sha256 APPROVED_MACHINE_IDENTITY_SHA256 \
+  --approved-target-identity-kind tailscale_node_id_sha256 \
+  --approved-target-identity-sha256 AUTHENTICATED_TAILSCALE_NODE_ID_SHA256 \
   --acknowledge-local-signing-and-permissions \
   --launch
 swift test                    # run the native test suite
@@ -107,10 +109,20 @@ The `local` build mode is an explicit, target-scoped exception. It still require
 commit, an immutable ZIP and manifest, matching app/helper architectures and hashes, consistent
 ad-hoc signatures, transactional state backup and rollback, and exact-path postactivation probes.
 It is intentionally marked `local_only` and `non_notarized`, binds only SHA-256 digests of the
-approved target and non-target builder platform identities, never runs notarization or Gatekeeper
-release checks, and cannot be installed without matching the live Mac name and acknowledging that
-the changed signing identity can require manual Microphone or Accessibility reauthorization. The
-installer never resets or inspects TCC and never clears quarantine in either policy.
+approved target and non-target builder identities, never runs notarization or Gatekeeper release
+checks, and cannot be installed without matching the live Mac name and acknowledging that the
+changed signing identity can require manual Microphone or Accessibility reauthorization. For new
+artifacts, use `tailscale_node_id_sha256`: the authenticated operator input is the SHA-256 of the
+exact target's Tailscale node ID. The non-target builder separately reads and hashes its own live
+online `Self.ID`, records `builder_identity_kind=tailscale_node_id_sha256`, and requires that
+same-namespace digest to differ from the target digest. Before locking or mutating local state, the
+installer reads local `tailscale status --json`, requires online `Self` with hostname `station06`,
+requires the single nonempty `Self.ID` to contain no whitespace or NUL, hashes its exact decoded
+bytes without a newline, and compares the digest. Neither raw node ID is written to the manifest,
+build log, or installer log. Older schema-v3 artifacts without an
+identity-kind field remain compatible as `hardware_uuid_sha256`; that kind is retained only for
+backward compatibility. The installer never resets or inspects TCC and never clears quarantine in
+either policy.
 
 Requires macOS 26+; source builds also require a Swift toolchain (Xcode or Command Line Tools).
 Set the OpenAI API key in **Settings** or via `recordings` config;
