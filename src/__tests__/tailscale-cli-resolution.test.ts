@@ -32,11 +32,22 @@ function writeExecutable(path: string, body = "printf '%s\\n' '{\"Self\":{}}'\n"
   chmodSync(path, 0o755);
 }
 
+function resolverChildEnvironment(
+  inheritedEnvironment: Record<string, string | undefined>,
+  overrides: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const environment = { ...inheritedEnvironment, ...overrides };
+  delete environment.BASH_ENV;
+  delete environment.ENV;
+  return environment;
+}
+
 async function resolveWith(options: {
   path: string;
   fallback: string;
   invoke?: boolean;
   defineFunction?: string;
+  inheritedEnvironment?: Record<string, string | undefined>;
 }) {
   const root = temporaryDirectory();
   const wrapper = join(root, "run.sh");
@@ -44,6 +55,8 @@ async function resolveWith(options: {
     wrapper,
     `#!/usr/bin/env bash
 set -euo pipefail
+[ -z "\${BASH_ENV+x}" ]
+[ -z "\${ENV+x}" ]
 source "$RESOLVER"
 recordings_tailscale_standard_app_cli() { printf '%s\\n' "$FALLBACK"; }
 ${options.defineFunction ?? ""}
@@ -54,12 +67,11 @@ ${options.invoke ? '"$resolved" status --json' : ""}
   );
   chmodSync(wrapper, 0o755);
   const process = Bun.spawn(["/bin/bash", wrapper], {
-    env: {
-      ...Bun.env,
+    env: resolverChildEnvironment(options.inheritedEnvironment ?? Bun.env, {
       PATH: options.path,
       RESOLVER: resolver,
       FALLBACK: options.fallback,
-    },
+    }),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -194,4 +206,32 @@ describe("Tailscale CLI resolution", () => {
     expect(result.stdout.trim()).toBe(`resolved=${fallback}`);
     expect(existsSync(marker)).toBeFalse();
   });
+
+  test.each(["BASH_ENV", "ENV"] as const)(
+    "scrubs inherited %s before starting the fixture shell",
+    async (startupVariable) => {
+      const root = temporaryDirectory();
+      const marker = join(root, "startup-environment-ran");
+      const injectedBin = join(root, "injected-bin");
+      const fallback = join(root, "app", "Tailscale");
+      const startupFile = join(root, "startup.sh");
+      writeExecutable(join(injectedBin, "tailscale"));
+      writeExecutable(fallback);
+      writeFileSync(startupFile, `: > "$STARTUP_MARKER"\nexport PATH="$STARTUP_BIN"\n`);
+
+      const result = await resolveWith({
+        path: join(root, "fixture-bin"),
+        fallback,
+        inheritedEnvironment: {
+          ...Bun.env,
+          [startupVariable]: startupFile,
+          STARTUP_MARKER: marker,
+          STARTUP_BIN: injectedBin,
+        },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe(`resolved=${fallback}`);
+      expect(existsSync(marker)).toBeFalse();
+    },
+  );
 });

@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -1348,9 +1349,9 @@ if [ "$pid" = "$state_pid" ]; then printf 'p%s\\nn%s\\n' "$pid" "$executable"; f
     expect(stdout).toContain('"focusEvidenceStatus":"ssh-unavailable"');
     expect(stdout).toContain('"focusEvidenceStatus":"not-applicable"');
     expect(readFileSync(appLog, "utf8").trim().split("\n")).toEqual([
-      physicalApp,
-      physicalApp,
-      physicalApp,
+      realpathSync(physicalApp),
+      realpathSync(physicalApp),
+      realpathSync(physicalApp),
     ]);
     expect(readlinkSync(releaseLink)).toBe(driftRelease);
   });
