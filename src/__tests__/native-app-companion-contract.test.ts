@@ -319,7 +319,8 @@ describe("native app companion contract", () => {
       "utf8",
     );
     const start = engine.indexOf("public func startRecording(");
-    const permissionSwitch = engine.indexOf("switch AVCaptureDevice.authorizationStatus", start);
+    const permissionSwitch = engine.indexOf("switch microphoneAuthorization()", start);
+    expect(permissionSwitch).toBeGreaterThan(start);
     const startBody = engine.slice(start, permissionSwitch);
 
     expect(startBody).not.toContain("guard store.isReadyForRecording");
@@ -330,6 +331,57 @@ describe("native app companion contract", () => {
     );
     expect(engine).toContain("activeProjectId: canonicalProjectId");
     expect(engine).toContain("activeProjectId: activeProjectId");
+  });
+
+  test("recorder start never waits on Accessibility IPC; the frozen context is generation-bound", () => {
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+    const start = engine.indexOf("public func startRecording(");
+    const permissionSwitch = engine.indexOf("switch microphoneAuthorization()", start);
+    const startBody = engine.slice(start, permissionSwitch);
+
+    // The AX snapshot (selection token + window title) resolves on a detached task and the
+    // pipeline awaits it only after the recorder stopped.
+    expect(startBody).toContain("Task.detached(priority: .userInitiated)");
+    expect(startBody).not.toContain("AccessibilitySelectionToken.capture(for:");
+    expect(engine).toContain("await captureConfiguration.startContext.value");
+    expect(engine).toContain("generation == self.recordingGeneration");
+  });
+
+  test("fail-closed routes paste the raw transcript and the rewrite helper is tightly bounded", () => {
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+    const intent = readFileSync(
+      "src/native/Recordings/RecordingsLib/SpeechIntent.swift",
+      "utf8",
+    );
+
+    expect(intent).toContain("literalRawTranscript: true");
+    expect(engine).toContain("literalRawTranscript ? rawTranscript : text");
+    expect(engine).toContain("commandRewriteTimeout: TimeInterval = 25");
+    expect(engine).toContain("runCLI(rewriteArguments, homePath, Self.commandRewriteTimeout)");
+    expect(engine).toContain("public func cancelIntentProcessing()");
+    expect(engine).toContain("shouldAbandonDelivery");
+  });
+
+  test("the menu bar reports the true start gate and the Record hero is dimensionally stable", () => {
+    const presentation = readFileSync(
+      "src/native/Recordings/RecordingsLib/MenuBarPresentation.swift",
+      "utf8",
+    );
+    const menuView = readFileSync("src/native/Recordings/App/MenuBarStatusView.swift", "utf8");
+    const workspace = readFileSync("src/native/Recordings/App/RecordWorkspaceView.swift", "utf8");
+
+    expect(presentation).toContain("canStartRecording: Bool");
+    expect(menuView).toContain("canStartRecording: store.engine.canStartRecording");
+    expect(menuView).toContain(".disabled(!presentation.primaryActionEnabled)");
+    expect(workspace).toContain("heroSizingTemplate");
+    expect(workspace).toContain("liveTextReservation");
+    expect(workspace).toContain("engine.cancelIntentProcessing()");
   });
 
   test("showing either a new or retained main window activates the app", () => {

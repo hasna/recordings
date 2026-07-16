@@ -69,6 +69,32 @@ public enum IntentScreen {
 
         let commandShaped = containsCommandMarker(lowered)
         let conversationShaped = containsConversationMarker(lowered)
+        // Two independent signals agreeing (interrogative opener AND a terminal question
+        // mark, or an edit opener AND an explicit selection reference) are decided locally
+        // with deterministic high confidence: no serial classifier call for the clear
+        // shapes. Anything with mixed or single-signal shape stays fail-closed behind the
+        // classifier.
+        if !commandShaped, isClearQuestion(lowered) {
+            return IntentDecision(intent: .conversation, confidence: clearShapeConfidence, reason: "Clear question")
+        }
+        if !conversationShaped, commandShaped, isClearSelectionCommand(lowered) {
+            if hasSelection {
+                return IntentDecision(
+                    intent: .command,
+                    confidence: clearShapeConfidence,
+                    reason: "Clear edit instruction for the selection"
+                )
+            }
+            // The clear-edit shape without a selection is a fail-closed result: the raw
+            // words must be pasted verbatim so an enhancer can never "execute" the
+            // instruction by rewriting it.
+            return IntentDecision(
+                intent: .dictate,
+                confidence: 1,
+                reason: "Edit instruction without a selection — dictating literally",
+                literalTranscript: true
+            )
+        }
         if conversationShaped || (commandShaped && hasSelection) {
             return nil
         }
@@ -79,6 +105,10 @@ public enum IntentScreen {
         }
         return IntentDecision(intent: .dictate, confidence: 1, reason: "No command or question markers")
     }
+
+    /// Confidence assigned to locally-decided clear question/command shapes; kept above the
+    /// router threshold and below 1 so logs distinguish them from certain decisions.
+    public static let clearShapeConfidence = 0.9
 
     /// Phrases that read as attempts to steer the classifier or reach system surfaces the app
     /// does not have. Matching transcripts are dictated literally without consulting the model.
@@ -155,6 +185,29 @@ public enum IntentScreen {
         return conversationOpeners.contains(first)
     }
 
+    /// Interrogative openers that mark an unambiguous question when the utterance also ends
+    /// with a question mark. Deliberately narrower than `conversationOpeners`: auxiliary
+    /// openers like "can"/"do"/"is" are common in dictated messages and stay ambiguous.
+    private static let clearQuestionOpeners: Set<String> = [
+        "what", "whats", "what's", "why", "how", "when", "where", "who", "whos", "who's",
+        "which",
+    ]
+
+    static func isClearQuestion(_ lowered: String) -> Bool {
+        guard lowered.hasSuffix("?") else { return false }
+        guard let first = meaningfulWords(lowered).first else { return false }
+        return clearQuestionOpeners.contains(first)
+    }
+
+    /// A clear selection edit requires both an edit opener as the first meaningful word and
+    /// an explicit reference to the selected text elsewhere in the utterance.
+    static func isClearSelectionCommand(_ lowered: String) -> Bool {
+        guard let first = meaningfulWords(lowered).first, commandOpeners.contains(first) else {
+            return false
+        }
+        return commandPhrases.contains { lowered.contains($0) }
+    }
+
     private static func meaningfulWords(_ lowered: String) -> [String] {
         let words = lowered
             .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
@@ -183,39 +236,47 @@ public struct IntentRoutingContext: Equatable, Sendable {
 /// The complete, closed set of things a recording may do. There is deliberately no case that
 /// reaches the shell, the file system, or any app surface beyond pasting text, rewriting the
 /// frozen Accessibility selection, or answering in the Recordings UI.
+/// `literalRawTranscript` marks fail-closed pastes: the raw transcript must be delivered
+/// verbatim, never a post-processed variant.
 public enum RoutedSpeechAction: Equatable, Sendable {
-    case paste(reason: String)
+    case paste(reason: String, literalRawTranscript: Bool)
     case answerConversation(reason: String)
     case rewriteSelection(reason: String)
 }
 
 /// Pure fail-closed routing: every uncertain, unavailable, low-confidence, or
-/// precondition-violating outcome degrades to pasting the literal transcript.
+/// precondition-violating outcome degrades to pasting the literal raw transcript. Only a
+/// positive dictation decision (or intent detection being switched off) may paste the
+/// post-processed text, because there the enhancement pipeline is the product feature the
+/// user asked for — not a misroute.
 public enum IntentRouter {
     /// A classifier decision must meet this confidence to leave the dictation path.
     public static let minimumActionableConfidence = 0.8
 
     public static func route(decision: IntentDecision?, context: IntentRoutingContext) -> RoutedSpeechAction {
         guard context.detectionEnabled else {
-            return .paste(reason: "Intent detection disabled")
+            return .paste(reason: "Intent detection disabled", literalRawTranscript: false)
         }
         guard let decision else {
-            return .paste(reason: "Intent unavailable — dictated literally")
+            return .paste(reason: "Intent unavailable — dictated literally", literalRawTranscript: true)
         }
         guard decision.confidence >= minimumActionableConfidence else {
-            return .paste(reason: "Low confidence (\(formatted(decision.confidence))) — dictated literally")
+            return .paste(
+                reason: "Low confidence (\(formatted(decision.confidence))) — dictated literally",
+                literalRawTranscript: true
+            )
         }
         switch decision.intent {
         case .dictate:
-            return .paste(reason: decision.reason)
+            return .paste(reason: decision.reason, literalRawTranscript: decision.literalTranscript)
         case .conversation:
             return .answerConversation(reason: decision.reason)
         case .command:
             guard context.accessibilityTrusted else {
-                return .paste(reason: "Accessibility unavailable — dictated literally")
+                return .paste(reason: "Accessibility unavailable — dictated literally", literalRawTranscript: true)
             }
             guard context.hasSelection else {
-                return .paste(reason: "No selected text — dictated literally")
+                return .paste(reason: "No selected text — dictated literally", literalRawTranscript: true)
             }
             return .rewriteSelection(reason: decision.reason)
         }

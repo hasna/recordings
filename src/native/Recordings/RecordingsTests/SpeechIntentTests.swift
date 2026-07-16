@@ -30,19 +30,56 @@ struct IntentScreenTests {
         #expect(decision?.intent == .dictate)
     }
 
-    @Test("question-shaped speech defers to the classifier regardless of selection")
-    func questionDefersToClassifier() {
-        #expect(IntentScreen.screen(text: "What's the capital of France?", hasSelection: false) == nil)
-        #expect(IntentScreen.screen(text: "how do I quit vim", hasSelection: true) == nil)
-        #expect(IntentScreen.screen(text: "is it going to rain tomorrow?", hasSelection: false) == nil)
+    @Test("a clear question — interrogative opener plus question mark — is decided locally without the classifier")
+    func clearQuestionIsDecidedLocally() {
+        for text in [
+            "What's the capital of France?",
+            "why is the sky blue?",
+            "Where was the treaty signed?",
+        ] {
+            let decision = IntentScreen.screen(text: text, hasSelection: false)
+            #expect(decision?.intent == .conversation, "expected local conversation for: \(text)")
+            #expect(decision?.confidence == IntentScreen.clearShapeConfidence)
+        }
     }
 
-    @Test("command-shaped speech with a selection defers to the classifier")
-    func commandDefersToClassifier() {
-        #expect(IntentScreen.screen(text: "rewrite this to be more formal", hasSelection: true) == nil)
-        #expect(IntentScreen.screen(text: "okay so make this more professional", hasSelection: true) == nil)
-        #expect(IntentScreen.screen(text: "translate the selected text in french", hasSelection: true) == nil)
-        #expect(IntentScreen.screen(text: "summarize this paragraph", hasSelection: true) == nil)
+    @Test("single-signal question shapes stay ambiguous and defer to the classifier")
+    func ambiguousQuestionDefersToClassifier() {
+        // Opener without a question mark, question mark without a wh-opener, and auxiliary
+        // openers common in dictated messages all stay behind the classifier.
+        #expect(IntentScreen.screen(text: "how do I quit vim", hasSelection: true) == nil)
+        #expect(IntentScreen.screen(text: "is it going to rain tomorrow?", hasSelection: false) == nil)
+        #expect(IntentScreen.screen(text: "can you send me the report?", hasSelection: false) == nil)
+        #expect(IntentScreen.screen(text: "you saw the game last night?", hasSelection: false) == nil)
+    }
+
+    @Test("a clear selection edit — edit opener plus selection reference — is decided locally as a command")
+    func clearSelectionCommandIsDecidedLocally() {
+        for text in [
+            "rewrite this to be more formal",
+            "okay so make this more professional",
+            "translate the selected text in french",
+            "summarize this paragraph",
+        ] {
+            let decision = IntentScreen.screen(text: text, hasSelection: true)
+            #expect(decision?.intent == .command, "expected local command for: \(text)")
+            #expect(decision?.confidence == IntentScreen.clearShapeConfidence)
+        }
+    }
+
+    @Test("weak command shapes with a selection still defer to the classifier")
+    func weakCommandDefersToClassifier() {
+        #expect(IntentScreen.screen(text: "fix it", hasSelection: true) == nil)
+        #expect(IntentScreen.screen(text: "clean up the intro", hasSelection: true) == nil)
+        #expect(IntentScreen.screen(text: "change the meeting to thursday", hasSelection: true) == nil)
+    }
+
+    @Test("a clear selection edit without a selection is dictated literally — raw words, no network wait")
+    func clearEditWithoutSelectionIsLiteral() {
+        let decision = IntentScreen.screen(text: "rewrite this to be more formal", hasSelection: false)
+        #expect(decision?.intent == .dictate)
+        #expect(decision?.confidence == 1)
+        #expect(decision?.literalTranscript == true)
     }
 
     @Test("command-shaped speech without a selection pastes immediately — no network wait")
@@ -50,6 +87,7 @@ struct IntentScreenTests {
         let decision = IntentScreen.screen(text: "add milk to the shopping list", hasSelection: false)
         #expect(decision?.intent == .dictate)
         #expect(decision?.confidence == 1)
+        #expect(decision?.literalTranscript == false)
     }
 
     @Test("injection-shaped speech is dictated literally and never consults the classifier")
@@ -114,13 +152,22 @@ struct IntentRouterTests {
         )
     }
 
-    @Test("clear dictate decision pastes")
+    @Test("clear dictate decision pastes the (possibly post-processed) text")
     func clearDictate() {
         let action = IntentRouter.route(
             decision: IntentDecision(intent: .dictate, confidence: 0.95, reason: "clear dictation"),
             context: context()
         )
-        #expect(action == .paste(reason: "clear dictation"))
+        #expect(action == .paste(reason: "clear dictation", literalRawTranscript: false))
+    }
+
+    @Test("a literal dictate decision pastes the raw transcript verbatim")
+    func literalDictate() {
+        let action = IntentRouter.route(
+            decision: IntentDecision(intent: .dictate, confidence: 1, reason: "injection veto", literalTranscript: true),
+            context: context()
+        )
+        #expect(action == .paste(reason: "injection veto", literalRawTranscript: true))
     }
 
     @Test("clear conversation decision answers")
@@ -141,17 +188,18 @@ struct IntentRouterTests {
         #expect(action == .rewriteSelection(reason: "edit instruction"))
     }
 
-    @Test("low-confidence and ambiguous decisions fail closed to dictation")
+    @Test("low-confidence and ambiguous decisions fail closed to literal raw dictation")
     func lowConfidenceFailsClosed() {
         for intent in SpeechIntent.allCases {
             let action = IntentRouter.route(
                 decision: IntentDecision(intent: intent, confidence: 0.5, reason: "ambiguous"),
                 context: context()
             )
-            guard case .paste = action else {
+            guard case .paste(_, let literalRawTranscript) = action else {
                 Issue.record("expected paste for low-confidence \(intent)")
                 return
             }
+            #expect(literalRawTranscript, "low-confidence \(intent) must paste the raw transcript")
         }
     }
 
@@ -180,46 +228,37 @@ struct IntentRouterTests {
         }
     }
 
-    @Test("offline or provider failure (nil decision) fails closed to dictation")
+    @Test("offline or provider failure (nil decision) fails closed to literal raw dictation")
     func unavailableClassifierFailsClosed() {
         let action = IntentRouter.route(decision: nil, context: context())
-        guard case .paste = action else {
-            Issue.record("expected paste when the classifier is unavailable")
-            return
-        }
+        #expect(action == .paste(reason: "Intent unavailable — dictated literally", literalRawTranscript: true))
     }
 
-    @Test("command without a frozen selection fails closed to dictation")
+    @Test("command without a frozen selection fails closed to literal raw dictation")
     func commandWithoutSelectionFailsClosed() {
         let action = IntentRouter.route(
             decision: IntentDecision(intent: .command, confidence: 0.99, reason: "edit"),
             context: context(hasSelection: false)
         )
-        guard case .paste = action else {
-            Issue.record("expected paste when no selection was frozen")
-            return
-        }
+        #expect(action == .paste(reason: "No selected text — dictated literally", literalRawTranscript: true))
     }
 
-    @Test("command with Accessibility denied or revoked fails closed to dictation")
+    @Test("command with Accessibility denied or revoked fails closed to literal raw dictation")
     func commandWithoutAccessibilityFailsClosed() {
         let action = IntentRouter.route(
             decision: IntentDecision(intent: .command, confidence: 0.99, reason: "edit"),
             context: context(accessibilityTrusted: false)
         )
-        guard case .paste = action else {
-            Issue.record("expected paste when Accessibility is not trusted")
-            return
-        }
+        #expect(action == .paste(reason: "Accessibility unavailable — dictated literally", literalRawTranscript: true))
     }
 
-    @Test("detection disabled routes everything to dictation")
+    @Test("detection disabled routes everything to plain dictation of the processed text")
     func detectionDisabled() {
         let action = IntentRouter.route(
             decision: IntentDecision(intent: .command, confidence: 1, reason: "edit"),
             context: context(detectionEnabled: false)
         )
-        #expect(action == .paste(reason: "Intent detection disabled"))
+        #expect(action == .paste(reason: "Intent detection disabled", literalRawTranscript: false))
     }
 
     @Test("a hostile classifier payload can never reach anything beyond the bounded actions")
@@ -234,10 +273,11 @@ struct IntentRouterTests {
             ),
             context: context(hasSelection: false, accessibilityTrusted: false)
         )
-        guard case .paste = action else {
+        guard case .paste(_, let literalRawTranscript) = action else {
             Issue.record("expected paste for hostile command without preconditions")
             return
         }
+        #expect(literalRawTranscript)
     }
 }
 
@@ -478,6 +518,21 @@ struct IntentFlowStateTests {
             == .ready("Pasted (12 chars)"))
         #expect(RecordingEngine.flowPhase(forDeliveryStatus: "No text selected", kind: .failure)
             == .failed("No text selected"))
+    }
+
+    @Test("generation-bound deliveries abandon superseded or mid-recording completions")
+    func deliveryStalenessRule() {
+        #expect(!RecordingEngine.shouldAbandonDelivery(pipelineGeneration: 4, currentGeneration: 4, isRecording: false))
+        #expect(RecordingEngine.shouldAbandonDelivery(pipelineGeneration: 3, currentGeneration: 4, isRecording: false))
+        #expect(RecordingEngine.shouldAbandonDelivery(pipelineGeneration: 4, currentGeneration: 4, isRecording: true))
+        // Manual pastes carry no generation and are not staleness-gated.
+        #expect(!RecordingEngine.shouldAbandonDelivery(pipelineGeneration: nil, currentGeneration: 9, isRecording: false))
+    }
+
+    @Test("the rewrite helper runs under a tight practical budget, not the generic CLI ceiling")
+    func rewriteTimeoutIsBounded() {
+        #expect(RecordingEngine.commandRewriteTimeout > 0)
+        #expect(RecordingEngine.commandRewriteTimeout <= 30)
     }
 
     @Test("busy phases block and terminal phases do not")

@@ -57,9 +57,18 @@ struct RecordWorkspaceView: View {
 
     @ViewBuilder
     private var hero: some View {
-        let content = VStack(spacing: 14) { heroContent }
-            .frame(maxWidth: .infinity, minHeight: 208)
-            .padding(26)
+        // The hidden template is the tallest phase layout (listening, with the full
+        // six-line live-text reservation). Every phase renders inside that fixed envelope,
+        // so streaming live text and phase transitions can never shift the content below
+        // the hero. The template scales with Dynamic Type because it uses the real fonts.
+        let content = ZStack {
+            heroSizingTemplate
+                .hidden()
+                .accessibilityHidden(true)
+            VStack(spacing: 14) { heroContent }
+        }
+        .frame(maxWidth: .infinity, minHeight: 208)
+        .padding(26)
         if reduceTransparency {
             content
                 .background(.ultraThinMaterial, in: .rect(cornerRadius: Theme.cornerLarge))
@@ -94,12 +103,47 @@ struct RecordWorkspaceView: View {
         case .finalizing:
             busyContent(label: "Finishing up…", detail: "Capturing the last words", showsLiveText: true)
         case .processing(let label):
-            busyContent(label: label, detail: nil, showsLiveText: false)
+            busyContent(
+                label: label,
+                detail: nil,
+                showsLiveText: false,
+                showsCancel: engine.canCancelIntentDelivery
+            )
         case .ready(let summary):
             readyContent(summary: summary)
         case .failed(let message):
             failedContent(message: message)
         }
+    }
+
+    /// Invisible layout twin of the listening phase; see `hero`. Uses the same controls and
+    /// fonts so its height tracks the real layout at every Dynamic Type size.
+    private var heroSizingTemplate: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "waveform").font(.largeTitle)
+                Text("0:00:00")
+                    .font(.system(size: 34, weight: .semibold, design: .rounded).monospacedDigit())
+            }
+            liveTextReservation
+            HStack(spacing: 12) {
+                Button {} label: { Label("Discard", systemImage: "xmark") }
+                    .buttonStyle(.glass)
+                Button {} label: { Label("Stop & Transcribe", systemImage: "stop.fill") }
+                    .buttonStyle(.glassProminent)
+            }
+            .controlSize(.large)
+            .disabled(true)
+        }
+    }
+
+    /// Reserves exactly six lines at the live-text font so the region cannot grow as words
+    /// stream in.
+    private var liveTextReservation: some View {
+        Text(String(repeating: "M\n", count: 5) + "M")
+            .font(.system(.title3, design: .rounded))
+            .lineLimit(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Idle
@@ -177,7 +221,12 @@ struct RecordWorkspaceView: View {
 
     // MARK: Finalizing / Processing
 
-    private func busyContent(label: String, detail: String?, showsLiveText: Bool) -> some View {
+    private func busyContent(
+        label: String,
+        detail: String?,
+        showsLiveText: Bool,
+        showsCancel: Bool = false
+    ) -> some View {
         VStack(spacing: 14) {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.large)
@@ -189,6 +238,18 @@ struct RecordWorkspaceView: View {
             }
             if showsLiveText {
                 liveText(placeholder: "Finishing up…")
+            }
+            if showsCancel {
+                Button(role: .cancel) {
+                    engine.cancelIntentProcessing()
+                } label: {
+                    Label("Cancel", systemImage: "xmark")
+                }
+                .buttonStyle(.glass)
+                .controlSize(.large)
+                .keyboardShortcut(.cancelAction)
+                .help("Stop waiting — the transcript stays in Recent")
+                .accessibilityLabel("Cancel and keep the transcript")
             }
         }
     }
@@ -241,16 +302,22 @@ struct RecordWorkspaceView: View {
         .accessibilityElement(children: .contain)
     }
 
-    @ViewBuilder
+    /// Live text renders inside a fixed six-line reservation: the region's size never
+    /// depends on how much has been transcribed, so nothing below it can shift.
     private func liveText(placeholder: String) -> some View {
-        if !engine.liveTranscriptionText.isEmpty {
-            Text(engine.liveTranscriptionText)
-                .font(.system(.title3, design: .rounded))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(6).contentTransition(.opacity)
-        } else {
-            Text(placeholder).font(.callout).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        ZStack(alignment: .topLeading) {
+            liveTextReservation
+                .hidden()
+                .accessibilityHidden(true)
+            if !engine.liveTranscriptionText.isEmpty {
+                Text(engine.liveTranscriptionText)
+                    .font(.system(.title3, design: .rounded))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(6).contentTransition(.opacity)
+            } else {
+                Text(placeholder).font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 

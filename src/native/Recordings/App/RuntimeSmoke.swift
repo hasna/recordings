@@ -1,5 +1,6 @@
 @preconcurrency import Cocoa
 import SwiftUI
+import RecordingsLib
 
 @MainActor
 final class RuntimeSmokeProbe: ObservableObject {
@@ -20,7 +21,8 @@ final class RuntimeSmokeProbe: ObservableObject {
     var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: phase == .recording,
-            isTranscribing: phase == .transcribing
+            canStartRecording: phase == .idle,
+            statusMessage: phase == .transcribing ? "Transcribing" : "Ready"
         )
     }
 
