@@ -62,6 +62,16 @@ struct MenuBarPresentationTests {
     }
 }
 
+/// Reduce Transparency surface contract: chrome must resolve to an opaque surface — never
+/// a translucent material — whenever the user has reduced transparency.
+struct ChromeSurfaceTests {
+    @Test("Reduce Transparency resolves to the opaque surface; otherwise Liquid Glass")
+    func reducedTransparencyIsOpaque() {
+        #expect(ChromeSurface.forReducedTransparency(true) == .opaque)
+        #expect(ChromeSurface.forReducedTransparency(false) == .liquidGlass)
+    }
+}
+
 /// Voice-shortcut matching contract: exact utterance only.
 struct VoiceShortcutMatchingTests {
     @Test("a shortcut fires for the exact utterance, ignoring case, punctuation, and spacing")

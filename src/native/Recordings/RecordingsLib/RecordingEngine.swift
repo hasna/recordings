@@ -315,6 +315,14 @@ struct PasteboardWriteResult: Equatable, Sendable {
     let ownershipChangeCount: Int
 }
 
+/// Outcome of revalidating the frozen rewrite target immediately before a rewrite runs.
+/// Anything but a live, matching selection fails the rewrite closed.
+enum RewriteTargetResolution: Equatable, Sendable {
+    case selection(String)
+    case targetAppMissing
+    case selectionUnavailable
+}
+
 @MainActor
 final class PasteTransactionCoordinator {
     private enum State: Equatable {
@@ -334,7 +342,18 @@ final class PasteTransactionCoordinator {
     private let schedule: Scheduler
     private let writeAndVerify: PayloadWriter
     private let postPaste: PastePoster
-    private var state: State = .idle
+    /// Fires immediately before `hasPendingTransaction` changes value. The settlement hop
+    /// back to idle runs on its own scheduled turn with no other state write, so an owner
+    /// deriving gates from this coordinator (e.g. `canStartRecording`) must publish here or
+    /// its observers never recompute after settlement.
+    var pendingTransactionWillChange: (@MainActor () -> Void)?
+    private var state: State = .idle {
+        willSet {
+            if (newValue == .idle) != (state == .idle) {
+                pendingTransactionWillChange?()
+            }
+        }
+    }
 
     init(
         schedule: @escaping Scheduler,
@@ -671,6 +690,25 @@ public final class RecordingEngine: ObservableObject {
     var commandCLI: @Sendable (_ args: [String], _ home: String, _ timeout: TimeInterval) -> String = {
         CLIRunner.run($0, home: $1, timeout: $2)
     }
+    /// Resolves and revalidates the frozen rewrite target immediately before a rewrite:
+    /// re-finds the recorded target app, activates it, waits for focus to settle, and
+    /// re-reads the frozen Accessibility selection. Production performs real NSWorkspace/AX
+    /// I/O; tests replace it to drive the rewrite pipeline (Rewriting busy state, CLI
+    /// budget, cancellation, staleness) headless.
+    lazy var rewriteSelectionResolver: @MainActor (
+        _ targetAppBundleIdentifier: String?,
+        _ targetAppPid: pid_t?,
+        _ selectionToken: AccessibilitySelectionToken?,
+        _ pipelineGeneration: UInt64?
+    ) async -> RewriteTargetResolution = { [weak self] bundleIdentifier, pid, token, generation in
+        guard let self else { return .targetAppMissing }
+        return await self.resolveRewriteSelection(
+            targetAppBundleIdentifier: bundleIdentifier,
+            targetAppPid: pid,
+            selectionToken: token,
+            pipelineGeneration: generation
+        )
+    }
     lazy var openAIAPIKeyProvider: () -> String = { [home] in
         OpenAIAPIKeyStore.load(homePath: home)
     }
@@ -695,7 +733,7 @@ public final class RecordingEngine: ObservableObject {
     lazy var intentClassifier = SpeechIntentClassifier(
         apiKeyProvider: { [home] in OpenAIAPIKeyStore.load(homePath: home) }
     )
-    private lazy var pasteTransactionCoordinator = PasteTransactionCoordinator(
+    private lazy var pasteTransactionCoordinator = makePasteTransactionCoordinator(
         schedule: { delay, operation in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 MainActor.assumeIsolated { operation() }
@@ -719,12 +757,52 @@ public final class RecordingEngine: ObservableObject {
         }
     )
 
+    /// Every coordinator the engine owns must publish its idle transitions:
+    /// `canStartRecording` derives from coordinator state, and settlement back to idle is
+    /// otherwise invisible to observers — the menu bar would stay busy with Start disabled
+    /// until some unrelated published change.
+    private func makePasteTransactionCoordinator(
+        schedule: @escaping PasteTransactionCoordinator.Scheduler,
+        writeAndVerify: @escaping PasteTransactionCoordinator.PayloadWriter,
+        postPaste: @escaping PasteTransactionCoordinator.PastePoster
+    ) -> PasteTransactionCoordinator {
+        let coordinator = PasteTransactionCoordinator(
+            schedule: schedule,
+            writeAndVerify: writeAndVerify,
+            postPaste: postPaste
+        )
+        coordinator.pendingTransactionWillChange = { [weak self] in
+            self?.objectWillChange.send()
+        }
+        return coordinator
+    }
+
+    #if DEBUG
+    /// Test-only: swaps in a coordinator with injected I/O while keeping the production
+    /// observation wiring, so settlement observability can be driven deterministically.
+    @discardableResult
+    func installPasteCoordinatorForTesting(
+        schedule: @escaping PasteTransactionCoordinator.Scheduler,
+        writeAndVerify: @escaping PasteTransactionCoordinator.PayloadWriter,
+        postPaste: @escaping PasteTransactionCoordinator.PastePoster
+    ) -> PasteTransactionCoordinator {
+        let coordinator = makePasteTransactionCoordinator(
+            schedule: schedule,
+            writeAndVerify: writeAndVerify,
+            postPaste: postPaste
+        )
+        pasteTransactionCoordinator = coordinator
+        return coordinator
+    }
+    #endif
+
     private nonisolated static let realtimePeriodicCommitIntervalMilliseconds: UInt64 = 900
     private nonisolated static let realtimeFinishTimeoutMilliseconds: UInt64 = 700
     /// Hard budget for the rewrite helper (CLI spawn + one model call). The user is waiting
-    /// with recording blocked, so the generic 120 s CLI ceiling must never apply here;
+    /// with recording blocked, so this matches the interactive answer ceiling
+    /// (`SpeechIntentClassifier.conversationTimeout`) — never the generic 120 s CLI ceiling;
     /// cancellation stays available the whole time.
-    nonisolated static let commandRewriteTimeout: TimeInterval = 25
+    nonisolated static let commandRewriteTimeout: TimeInterval = 10
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -1125,12 +1203,13 @@ public final class RecordingEngine: ObservableObject {
         intentDeliveryPendingGeneration != nil && !pasteTransactionCoordinator.hasPendingTransaction
     }
 
-    /// Cancels the pending intent delivery. Every route that can be pending here persisted
-    /// the transcript before deciding, so cancelling only abandons the delivery: the
-    /// recording stays in the library and Recent. Bumping the generation makes every
-    /// in-flight completion stale, and every completion path re-checks the generation
-    /// before touching state, the clipboard, or the target app — a cancelled decision,
-    /// answer, or rewrite can never land later.
+    /// Cancels the pending intent delivery. Every phase that can be pending here —
+    /// Deciding, Answering, Rewriting — inserted the transcript into Recent before the
+    /// phase began (and the recording was already persisted to the library), so cancelling
+    /// only abandons the delivery: "transcript saved to Recent" is literally true. Bumping
+    /// the generation makes every in-flight completion stale, and every completion path
+    /// re-checks the generation before touching state, the clipboard, or the target app —
+    /// a cancelled decision, answer, or rewrite can never land later.
     public func cancelIntentProcessing() {
         guard canCancelIntentDelivery else { return }
         log("intent delivery cancelled by user generation=\(recordingGeneration)")
@@ -1927,7 +2006,7 @@ public final class RecordingEngine: ObservableObject {
             return
         }
 
-        let execute: @MainActor @Sendable (RoutedSpeechAction, IntentDecisionOrigin) -> Void = { [weak self] action, origin in
+        let execute: @MainActor @Sendable (RoutedSpeechAction, IntentDecisionOrigin, Bool) -> Void = { [weak self] action, origin, transcriptRetainedInRecent in
             guard let self else {
                 deliveryCompleted?()
                 return
@@ -1935,6 +2014,7 @@ public final class RecordingEngine: ObservableObject {
             self.executeRoutedAction(
                 action,
                 origin: origin,
+                transcriptRetainedInRecent: transcriptRetainedInRecent,
                 text: text,
                 rawTranscript: rawTranscript,
                 targetAppBundleIdentifier: targetAppBundleIdentifier,
@@ -1981,14 +2061,15 @@ public final class RecordingEngine: ObservableObject {
             accessibilityTrusted: accessibilityTrustCheck()
         )
         if !routingContext.detectionEnabled {
-            execute(IntentRouter.route(decision: nil, context: routingContext), .localScreen)
+            execute(IntentRouter.route(decision: nil, context: routingContext), .localScreen, false)
             return
         }
         if let localDecision = IntentScreen.screen(text: rawTranscript, hasSelection: routingContext.hasSelection) {
             log("intent decided locally intent=\(localDecision.intent.rawValue) reason=\(localDecision.reason)")
             execute(
                 IntentRouter.route(decision: localDecision, context: routingContext),
-                .localScreen
+                .localScreen,
+                false
             )
             return
         }
@@ -1996,6 +2077,15 @@ public final class RecordingEngine: ObservableObject {
         // Consult the classifier. New recordings are blocked while the decision is pending,
         // and the generation is re-checked afterwards so a stale (or user-cancelled)
         // decision can never act on a later recording.
+        // The transcript enters Recent before the pending phase begins: cancelling while
+        // Deciding (or any later phase) promises "transcript saved to Recent", so it must
+        // already be there.
+        insertRecentTranscription(
+            rawText: rawTranscript,
+            processedText: nil,
+            projectId: activeProjectId,
+            projectName: activeProjectName
+        )
         let deliveryGeneration = pipelineGeneration ?? recordingGeneration
         beginIntentDelivery(for: deliveryGeneration)
         updateDeliveryStatus("Deciding...", kind: .progress, pipelineGeneration: pipelineGeneration)
@@ -2038,13 +2128,14 @@ public final class RecordingEngine: ObservableObject {
                     accessibilityTrusted: trustCheck()
                 )
             )
-            execute(action, .classifier)
+            execute(action, .classifier, true)
         }
     }
 
     private func executeRoutedAction(
         _ action: RoutedSpeechAction,
         origin: IntentDecisionOrigin,
+        transcriptRetainedInRecent: Bool,
         text: String,
         rawTranscript: String,
         targetAppBundleIdentifier: String?,
@@ -2072,14 +2163,31 @@ public final class RecordingEngine: ObservableObject {
                 pipelineGeneration: pipelineGeneration,
                 deliveryCompleted: deliveryCompleted
             )
-            insertRecentTranscription(
-                rawText: rawTranscript,
-                processedText: output == rawTranscript ? nil : output,
-                projectId: activeProjectId,
-                projectName: activeProjectName
-            )
+            if transcriptRetainedInRecent {
+                attachProcessedTextToRecentTranscription(
+                    rawText: rawTranscript,
+                    processedText: output == rawTranscript ? nil : output
+                )
+            } else {
+                insertRecentTranscription(
+                    rawText: rawTranscript,
+                    processedText: output == rawTranscript ? nil : output,
+                    projectId: activeProjectId,
+                    projectName: activeProjectName
+                )
+            }
         case .rewriteSelection(let reason):
             log("intent route=rewriteSelection origin=\(origin.rawValue) reason=\(reason)")
+            // Retention before processing: the Rewriting phase can be cancelled (or fail),
+            // and the Cancel affordance promises the transcript stays in Recent.
+            if !transcriptRetainedInRecent {
+                insertRecentTranscription(
+                    rawText: rawTranscript,
+                    processedText: nil,
+                    projectId: activeProjectId,
+                    projectName: activeProjectName
+                )
+            }
             runCommandMode(
                 instruction: rawTranscript,
                 targetAppBundleIdentifier: targetAppBundleIdentifier,
@@ -2093,12 +2201,14 @@ public final class RecordingEngine: ObservableObject {
             )
         case .answerConversation(let reason):
             log("intent route=answerConversation origin=\(origin.rawValue) reason=\(reason)")
-            insertRecentTranscription(
-                rawText: rawTranscript,
-                processedText: nil,
-                projectId: activeProjectId,
-                projectName: activeProjectName
-            )
+            if !transcriptRetainedInRecent {
+                insertRecentTranscription(
+                    rawText: rawTranscript,
+                    processedText: nil,
+                    projectId: activeProjectId,
+                    projectName: activeProjectName
+                )
+            }
             runConversationMode(
                 question: rawTranscript,
                 processingConfiguration: processingConfiguration,
@@ -2126,6 +2236,22 @@ public final class RecordingEngine: ObservableObject {
             at: 0
         )
         if recentTranscriptions.count > 20 { recentTranscriptions.removeLast() }
+    }
+
+    /// Backfills the processed text onto a transcript that entered Recent when its pending
+    /// phase began, so the entry shows exactly what was pasted. The original timestamp is
+    /// preserved.
+    private func attachProcessedTextToRecentTranscription(rawText: String, processedText: String?) {
+        guard let processedText,
+              let index = recentTranscriptions.firstIndex(where: { $0.rawText == rawText }) else { return }
+        let existing = recentTranscriptions[index]
+        recentTranscriptions[index] = TranscriptionResult(
+            rawText: existing.rawText,
+            processedText: processedText,
+            timestamp: existing.timestamp,
+            projectId: existing.projectId,
+            projectName: existing.projectName
+        )
     }
 
     private func writeCapturedWAV(to path: String) -> Bool {
@@ -2805,64 +2931,38 @@ public final class RecordingEngine: ObservableObject {
             finishCommandDelivery()
             return
         }
-        let requiredProcessIdentity = pipelineGeneration.flatMap {
-            pasteTargetProcessIdentityByGeneration[$0]
-        }
-        let targetApp = selectedRunningPasteTarget(
-            targetAppBundleIdentifier: targetAppBundleIdentifier,
-            targetAppPid: targetAppPid,
-            frontmostPid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-            pipelineGeneration: pipelineGeneration
-        )
-        guard let targetApp else {
-            log("command mode target app not found")
-            updateDeliveryStatus("No target app found", kind: .failure, pipelineGeneration: pipelineGeneration)
-            finishCommandDelivery()
-            return
-        }
-        let alreadyFrontmost = targetApp.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if !alreadyFrontmost {
-            targetApp.activate()
-        }
 
         let homePath = home
+        let resolveTarget = rewriteSelectionResolver
         Task { @MainActor in
-            let focusDelay: TimeInterval = alreadyFrontmost ? 0.05 : 0.35
-            try? await Task.sleep(for: .milliseconds(Int(focusDelay * 1_000)))
-            let frontmostBeforeRead = NSWorkspace.shared.frontmostApplication
-            guard Self.pasteTargetIsReady(
-                expectedPid: targetApp.processIdentifier,
-                expectedBundleIdentifier: targetApp.bundleIdentifier,
-                frontmostPid: frontmostBeforeRead?.processIdentifier,
-                frontmostBundleIdentifier: frontmostBeforeRead?.bundleIdentifier,
-                accessibilityTrusted: AXIsProcessTrusted(),
-                expectedLaunchDate: requiredProcessIdentity?.launchDate,
-                frontmostLaunchDate: frontmostBeforeRead?.launchDate,
-                requiresProcessIdentity: pipelineGeneration != nil && targetAppPid != nil
-            ) else {
+            let resolution = await resolveTarget(
+                targetAppBundleIdentifier,
+                targetAppPid,
+                selectionToken,
+                pipelineGeneration
+            )
+            let selected: String
+            switch resolution {
+            case .targetAppMissing:
+                self.log("command mode target app not found")
+                self.updateDeliveryStatus("No target app found", kind: .failure, pipelineGeneration: pipelineGeneration)
+                finishCommandDelivery()
+                return
+            case .selectionUnavailable:
                 self.updateDeliveryStatus("No text selected", kind: .failure, pipelineGeneration: pipelineGeneration)
                 finishCommandDelivery()
                 return
+            case .selection(let validated):
+                selected = validated
             }
-            let frontmostAfterRead = NSWorkspace.shared.frontmostApplication
-            let selected = Self.validAccessibilitySelection(
-                selectionToken?.selectedText,
-                targetStillFrontmost: Self.pasteTargetIsReady(
-                    expectedPid: targetApp.processIdentifier,
-                    expectedBundleIdentifier: targetApp.bundleIdentifier,
-                    frontmostPid: frontmostAfterRead?.processIdentifier,
-                    frontmostBundleIdentifier: frontmostAfterRead?.bundleIdentifier,
-                    accessibilityTrusted: AXIsProcessTrusted(),
-                    expectedLaunchDate: requiredProcessIdentity?.launchDate,
-                    frontmostLaunchDate: frontmostAfterRead?.launchDate,
-                    requiresProcessIdentity: pipelineGeneration != nil && targetAppPid != nil
-                )
-            )
-            guard let selected,
-                  selectionToken?.matchesCurrentSelection(
-                    for: targetApp.processIdentifier
-                  ) == true else {
-                self.updateDeliveryStatus("No text selected", kind: .failure, pipelineGeneration: pipelineGeneration)
+            // A cancellation (or newer recording) during target resolution makes the whole
+            // rewrite stale — never spawn the CLI for a delivery that can only be abandoned.
+            guard !Self.shouldAbandonDelivery(
+                pipelineGeneration: pipelineGeneration,
+                currentGeneration: self.recordingGeneration,
+                isRecording: self.isRecording
+            ) else {
+                self.log("stale rewrite abandoned before CLI pipeline_generation=\(pipelineGeneration.map(String.init) ?? "nil")")
                 finishCommandDelivery()
                 return
             }
@@ -2918,6 +3018,70 @@ public final class RecordingEngine: ObservableObject {
                 finishCommandDelivery()
             }
         }
+    }
+
+    /// Production body of `rewriteSelectionResolver`: real NSWorkspace/AX I/O. The frozen
+    /// target app is re-found and activated, focus settles, and the frozen selection is
+    /// revalidated element-for-element before any rewrite may run.
+    private func resolveRewriteSelection(
+        targetAppBundleIdentifier: String?,
+        targetAppPid: pid_t?,
+        selectionToken: AccessibilitySelectionToken?,
+        pipelineGeneration: UInt64?
+    ) async -> RewriteTargetResolution {
+        let requiredProcessIdentity = pipelineGeneration.flatMap {
+            pasteTargetProcessIdentityByGeneration[$0]
+        }
+        let targetApp = selectedRunningPasteTarget(
+            targetAppBundleIdentifier: targetAppBundleIdentifier,
+            targetAppPid: targetAppPid,
+            frontmostPid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            pipelineGeneration: pipelineGeneration
+        )
+        guard let targetApp else {
+            return .targetAppMissing
+        }
+        let alreadyFrontmost = targetApp.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if !alreadyFrontmost {
+            targetApp.activate()
+        }
+
+        let focusDelay: TimeInterval = alreadyFrontmost ? 0.05 : 0.35
+        try? await Task.sleep(for: .milliseconds(Int(focusDelay * 1_000)))
+        let frontmostBeforeRead = NSWorkspace.shared.frontmostApplication
+        guard Self.pasteTargetIsReady(
+            expectedPid: targetApp.processIdentifier,
+            expectedBundleIdentifier: targetApp.bundleIdentifier,
+            frontmostPid: frontmostBeforeRead?.processIdentifier,
+            frontmostBundleIdentifier: frontmostBeforeRead?.bundleIdentifier,
+            accessibilityTrusted: AXIsProcessTrusted(),
+            expectedLaunchDate: requiredProcessIdentity?.launchDate,
+            frontmostLaunchDate: frontmostBeforeRead?.launchDate,
+            requiresProcessIdentity: pipelineGeneration != nil && targetAppPid != nil
+        ) else {
+            return .selectionUnavailable
+        }
+        let frontmostAfterRead = NSWorkspace.shared.frontmostApplication
+        let selected = Self.validAccessibilitySelection(
+            selectionToken?.selectedText,
+            targetStillFrontmost: Self.pasteTargetIsReady(
+                expectedPid: targetApp.processIdentifier,
+                expectedBundleIdentifier: targetApp.bundleIdentifier,
+                frontmostPid: frontmostAfterRead?.processIdentifier,
+                frontmostBundleIdentifier: frontmostAfterRead?.bundleIdentifier,
+                accessibilityTrusted: AXIsProcessTrusted(),
+                expectedLaunchDate: requiredProcessIdentity?.launchDate,
+                frontmostLaunchDate: frontmostAfterRead?.launchDate,
+                requiresProcessIdentity: pipelineGeneration != nil && targetAppPid != nil
+            )
+        )
+        guard let selected,
+              selectionToken?.matchesCurrentSelection(
+                for: targetApp.processIdentifier
+              ) == true else {
+            return .selectionUnavailable
+        }
+        return .selection(selected)
     }
 
     nonisolated static func validAccessibilitySelection(

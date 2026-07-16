@@ -69,14 +69,20 @@ struct RecordWorkspaceView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 208)
         .padding(26)
-        if reduceTransparency {
+        switch ChromeSurface.forReducedTransparency(reduceTransparency) {
+        case .opaque:
+            // Reduce Transparency: a fully opaque system background — never a material,
+            // which still composites the desktop through the window.
             content
-                .background(.ultraThinMaterial, in: .rect(cornerRadius: Theme.cornerLarge))
+                .background(
+                    Color(NSColor.windowBackgroundColor),
+                    in: .rect(cornerRadius: Theme.cornerLarge)
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
-                        .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
+                        .strokeBorder(.separator, lineWidth: 1)
                 )
-        } else {
+        case .liquidGlass:
             content
                 .glassEffect(heroGlass, in: .rect(cornerRadius: Theme.cornerLarge))
                 .glassEffectID("record-hero", in: glass)

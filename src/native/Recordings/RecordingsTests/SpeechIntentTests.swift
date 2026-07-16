@@ -82,12 +82,31 @@ struct IntentScreenTests {
         #expect(decision?.literalTranscript == true)
     }
 
-    @Test("command-shaped speech without a selection pastes immediately — no network wait")
-    func commandWithoutSelectionIsInstantDictation() {
-        let decision = IntentScreen.screen(text: "add milk to the shopping list", hasSelection: false)
-        #expect(decision?.intent == .dictate)
-        #expect(decision?.confidence == 1)
-        #expect(decision?.literalTranscript == false)
+    @Test("command-shaped speech without a selection is dictated literally, even when it misses the clear-edit heuristic")
+    func commandWithoutSelectionIsInstantLiteralDictation() {
+        // "make the release tomorrow" is command-shaped but has no selection reference, so
+        // it misses `isClearSelectionCommand` — it must still fail closed to the raw words,
+        // never an enhancer rendition of the instruction.
+        for text in ["add milk to the shopping list", "make the release tomorrow"] {
+            let decision = IntentScreen.screen(text: text, hasSelection: false)
+            #expect(decision?.intent == .dictate, "expected local dictation for: \(text)")
+            #expect(decision?.confidence == 1)
+            #expect(decision?.literalTranscript == true, "expected literal flag for: \(text)")
+        }
+    }
+
+    @Test("a no-selection command fallback routes to a literal raw paste")
+    func commandWithoutSelectionRoutesToLiteralPaste() {
+        let decision = IntentScreen.screen(text: "make the release tomorrow", hasSelection: false)
+        let action = IntentRouter.route(
+            decision: decision,
+            context: IntentRoutingContext(detectionEnabled: true, hasSelection: false, accessibilityTrusted: true)
+        )
+        guard case .paste(_, let literalRawTranscript) = action else {
+            Issue.record("expected a paste route, got \(action)")
+            return
+        }
+        #expect(literalRawTranscript)
     }
 
     @Test("injection-shaped speech is dictated literally and never consults the classifier")
@@ -529,10 +548,11 @@ struct IntentFlowStateTests {
         #expect(!RecordingEngine.shouldAbandonDelivery(pipelineGeneration: nil, currentGeneration: 9, isRecording: false))
     }
 
-    @Test("the rewrite helper runs under a tight practical budget, not the generic CLI ceiling")
+    @Test("the rewrite helper runs under the interactive ceiling — at most 10 seconds")
     func rewriteTimeoutIsBounded() {
         #expect(RecordingEngine.commandRewriteTimeout > 0)
-        #expect(RecordingEngine.commandRewriteTimeout <= 30)
+        #expect(RecordingEngine.commandRewriteTimeout <= 10)
+        #expect(RecordingEngine.commandRewriteTimeout <= SpeechIntentClassifier.conversationTimeout)
     }
 
     @Test("busy phases block and terminal phases do not")

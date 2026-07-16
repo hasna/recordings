@@ -362,10 +362,51 @@ describe("native app companion contract", () => {
 
     expect(intent).toContain("literalRawTranscript: true");
     expect(engine).toContain("literalRawTranscript ? rawTranscript : text");
-    expect(engine).toContain("commandRewriteTimeout: TimeInterval = 25");
+    expect(engine).toContain("commandRewriteTimeout: TimeInterval = 10");
     expect(engine).toContain("runCLI(rewriteArguments, homePath, Self.commandRewriteTimeout)");
     expect(engine).toContain("public func cancelIntentProcessing()");
     expect(engine).toContain("shouldAbandonDelivery");
+
+    // Every no-selection command fallback is literal: the local screen must never hand a
+    // command-shaped utterance to the enhancer just because it missed the clear-edit shape.
+    expect(intent).toContain('reason: "No selection for an edit — dictating literally"');
+    const literalDecisions = intent.match(/literalTranscript: true/g) ?? [];
+    expect(literalDecisions.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("pending intent phases retain the transcript in Recent and paste settlement is observable", () => {
+    const engine = readFileSync(
+      "src/native/Recordings/RecordingsLib/RecordingEngine.swift",
+      "utf8",
+    );
+
+    // Cancel promises "transcript saved to Recent" — every route that can be pending
+    // (Deciding, Answering, Rewriting) inserts before its pending phase begins.
+    expect(engine).toContain("transcriptRetainedInRecent");
+    expect(engine).toContain("attachProcessedTextToRecentTranscription");
+
+    // The paste coordinator's settlement back to idle must publish, or canStartRecording
+    // never recomputes and the menu bar stays busy after a completed paste.
+    expect(engine).toContain("var pendingTransactionWillChange: (@MainActor () -> Void)?");
+    expect(engine).toContain("coordinator.pendingTransactionWillChange = { [weak self] in");
+    expect(engine).toContain("self?.objectWillChange.send()");
+  });
+
+  test("Reduce Transparency renders chrome on an opaque surface, never a translucent material", () => {
+    const chrome = readFileSync(
+      "src/native/Recordings/RecordingsLib/ChromeSurface.swift",
+      "utf8",
+    );
+    const workspace = readFileSync("src/native/Recordings/App/RecordWorkspaceView.swift", "utf8");
+    const theme = readFileSync("src/native/Recordings/App/Theme.swift", "utf8");
+
+    expect(chrome).toContain("reduceTransparency ? .opaque : .liquidGlass");
+    expect(workspace).toContain("ChromeSurface.forReducedTransparency(reduceTransparency)");
+    expect(theme).toContain("ChromeSurface.forReducedTransparency(reduceTransparency)");
+    expect(workspace).not.toContain("ultraThinMaterial");
+    expect(theme).not.toContain("ultraThinMaterial");
+    expect(workspace).toContain("Color(NSColor.windowBackgroundColor)");
+    expect(theme).toContain("Color(NSColor.windowBackgroundColor)");
   });
 
   test("the menu bar reports the true start gate and the Record hero is dimensionally stable", () => {

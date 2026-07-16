@@ -88,6 +88,43 @@ struct PasteTargetTests {
         #expect(completions.map(\.1) == [.pasted, .pasted])
     }
 
+    @Test("every idle transition — submit, failure, and delayed settlement — announces itself")
+    @MainActor
+    func pendingTransitionsAreObservable() {
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        var announcements = 0
+        let coordinator = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
+            postPaste: { true }
+        )
+        coordinator.pendingTransactionWillChange = { announcements += 1 }
+
+        #expect(coordinator.submit(text: "A", generation: 1, delay: 0.5, settlementDelay: 0.6) { _, _ in })
+        #expect(announcements == 1, "entering the pending state must announce")
+
+        scheduled.removeFirst()()
+        #expect(announcements == 1, "scheduled → settling keeps hasPendingTransaction true — no announcement")
+        #expect(coordinator.hasPendingTransaction)
+
+        scheduled.removeFirst()()
+        #expect(announcements == 2, "delayed settlement back to idle must announce — the menu bar recomputes from it")
+        #expect(!coordinator.hasPendingTransaction)
+
+        // A failing transaction announces its return to idle from the completion turn.
+        let failing = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in PasteboardWriteResult(verified: false, ownershipChangeCount: 1) },
+            postPaste: { false }
+        )
+        var failureAnnouncements = 0
+        failing.pendingTransactionWillChange = { failureAnnouncements += 1 }
+        #expect(failing.submit(text: "B", generation: 2, delay: 0) { _, _ in })
+        scheduled.removeFirst()()
+        #expect(failureAnnouncements == 2)
+        #expect(!failing.hasPendingTransaction)
+    }
+
     @Test("paste failures complete once with exact write and post outcomes")
     @MainActor
     func pasteFailureOutcomesAreExact() {

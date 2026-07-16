@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 import Testing
 @testable import RecordingsLib
@@ -171,6 +172,18 @@ struct RoutedDeliveryPayloadTests {
         let raw = "rewrite this to be more formal"
         await deliver(engine, text: enhanced, rawTranscript: raw, selectionToken: nil)
         #expect(recorder.deliveries.map(\.text) == [raw])
+    }
+
+    @Test("a command-shaped utterance without a selection that misses the clear-edit heuristic still pastes raw")
+    func commandShapedWithoutSelectionPastesRaw() async {
+        let recorder = PasteRecorder()
+        let engine = makeEngine(pasteRecorder: recorder)
+        // Command opener, no selection reference: `isClearSelectionCommand` misses this,
+        // yet an enhancer must never get to render the instruction.
+        let raw = "make the release tomorrow"
+        await deliver(engine, text: enhanced, rawTranscript: raw, selectionToken: nil)
+        #expect(recorder.deliveries.map(\.text) == [raw])
+        #expect(recorder.deliveries.first?.kind == .ordinaryDictation)
     }
 
     @Test("classifier offline (transport failure) fails closed to the literal raw transcript")
@@ -371,16 +384,189 @@ struct CommandRouteTests {
             cliCalls.append(nil)
             return "never"
         }
+        let raw = "rewrite this to be more formal"
         await deliver(
             engine,
             text: "An enhanced version.",
-            rawTranscript: "rewrite this to be more formal",
+            rawTranscript: raw,
             selectionToken: AccessibilitySelectionToken.unsafeTestToken(selectedText: "the draft")
         )
         #expect(recorder.deliveries.isEmpty)
         #expect(cliCalls.count == 0)
         #expect(engine.statusMessage == "No target app found")
         #expect(engine.canStartRecording)
+        #expect(
+            engine.recentTranscriptions.first?.rawText == raw,
+            "a rewrite-routed transcript must be retained in Recent no matter how the rewrite ends"
+        )
+    }
+
+    @Test("cancelling while Rewriting keeps the transcript in Recent, unblocks recording, and drops the late rewrite")
+    func cancelWhileRewriting() async {
+        let recorder = PasteRecorder()
+        let engine = makeEngine(pasteRecorder: recorder)
+        engine.rewriteSelectionResolver = { _, _, _, _ in .selection("the draft") }
+        let cliRelease = DispatchSemaphore(value: 0)
+        let cliBudgetWithinBound = LockedBox(false)
+        engine.commandCLI = { _, _, timeout in
+            cliBudgetWithinBound.set(timeout <= 10)
+            cliRelease.wait()
+            return "A late rewrite that must never paste."
+        }
+
+        let generation = engine.beginPipelineForTesting()
+        let completed = LockedBox(false)
+        let raw = "rewrite this to be more formal"
+        engine.finishWithText(
+            "Enhanced.",
+            rawTranscript: raw,
+            targetAppBundleIdentifier: "com.example.editor",
+            targetAppPid: 99_999,
+            selectionToken: AccessibilitySelectionToken.unsafeTestToken(selectedText: "the draft"),
+            canonicalProjectId: nil,
+            activeProjectId: nil,
+            activeProjectName: nil,
+            processingConfiguration: makeProcessingConfiguration(),
+            pipelineTrace: nil,
+            pipelineGeneration: generation,
+            deliveryCompleted: { completed.set(true) }
+        )
+
+        #expect(await waitUntil { engine.statusMessage == "Rewriting..." })
+        #expect(engine.flowPhase == .processing("Rewriting..."))
+        #expect(
+            engine.recentTranscriptions.first?.rawText == raw,
+            "the transcript must already be in Recent while the rewrite is pending"
+        )
+        #expect(!engine.canStartRecording)
+        #expect(engine.canCancelIntentDelivery)
+
+        engine.cancelIntentProcessing()
+        #expect(engine.canStartRecording, "cancelling must unblock a new recording immediately")
+        #expect(engine.statusMessage == "Cancelled — transcript saved to Recent")
+        #expect(
+            engine.recentTranscriptions.first?.rawText == raw,
+            "the Cancel copy promises Recent retention — the entry must exist"
+        )
+        #expect(engine.flowPhase == .idle)
+
+        cliRelease.signal()
+        #expect(await waitUntil { completed.value })
+        #expect(cliBudgetWithinBound.value, "the rewrite CLI must run under the 10 s interactive budget")
+        #expect(recorder.deliveries.isEmpty, "a cancelled rewrite must never paste")
+        #expect(engine.flowPhase == .idle, "a stale rewrite completion must not repaint state")
+        #expect(engine.canStartRecording)
+    }
+}
+
+// MARK: - Recent retention across pending intent phases
+
+@MainActor
+struct RecentRetentionTests {
+    @Test("a classifier-routed transcript enters Recent at Deciding and shows the pasted text afterwards")
+    func classifierPathRetainsRecentAtDeciding() async {
+        let recorder = PasteRecorder()
+        let engine = makeEngine(pasteRecorder: recorder)
+        let gate = TransportGate()
+        engine.intentClassifier = SpeechIntentClassifier(
+            apiKeyProvider: { "test-key" },
+            transport: { _ in
+                await gate.wait()
+                return (chatEnvelope(content: #"{"intent":"dictate","confidence":0.95,"reason":"content"}"#), ok200())
+            }
+        )
+        let generation = engine.beginPipelineForTesting()
+        let completed = LockedBox(false)
+        let raw = "should we ship the release tomorrow"
+        let enhanced = "An enhanced, rewritten rendition of the speech."
+        engine.finishWithText(
+            enhanced,
+            rawTranscript: raw,
+            targetAppBundleIdentifier: nil,
+            targetAppPid: nil,
+            selectionToken: nil,
+            canonicalProjectId: nil,
+            activeProjectId: nil,
+            activeProjectName: nil,
+            processingConfiguration: makeProcessingConfiguration(),
+            pipelineTrace: nil,
+            pipelineGeneration: generation,
+            deliveryCompleted: { completed.set(true) }
+        )
+        #expect(engine.statusMessage == "Deciding...")
+        #expect(
+            engine.recentTranscriptions.first?.rawText == raw,
+            "the transcript must be in Recent before the classifier decides — Cancel promises it"
+        )
+        #expect(engine.recentTranscriptions.count == 1)
+
+        await gate.open()
+        #expect(await waitUntil { completed.value })
+        #expect(recorder.deliveries.map(\.text) == [enhanced])
+        #expect(engine.recentTranscriptions.count == 1, "routing after Deciding must not duplicate the Recent entry")
+        #expect(
+            engine.recentTranscriptions.first?.displayText == enhanced,
+            "the Recent entry must show exactly what was pasted"
+        )
+    }
+
+    @Test("a locally-answered question is retained in Recent exactly once")
+    func conversationRouteRetainsRecentOnce() async {
+        let engine = makeEngine(pasteRecorder: PasteRecorder())
+        engine.intentClassifier = SpeechIntentClassifier(
+            apiKeyProvider: { "test-key" },
+            transport: { _ in (chatEnvelope(content: "Paris."), ok200()) }
+        )
+        let raw = "What is the capital of France?"
+        await deliver(engine, text: raw, rawTranscript: raw)
+        #expect(engine.recentTranscriptions.map(\.rawText) == [raw])
+    }
+}
+
+// MARK: - Paste settlement observability
+
+@MainActor
+struct PasteSettlementObservationTests {
+    @Test("settlement back to idle publishes an observation so canStartRecording recomputes")
+    func settlementEmitsObservation() {
+        let engine = makeEngine()
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        let coordinator = engine.installPasteCoordinatorForTesting(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 7) },
+            postPaste: { true }
+        )
+        var observations = 0
+        let subscription = engine.objectWillChange.sink { _ in observations += 1 }
+        defer { subscription.cancel() }
+
+        let accepted = coordinator.submit(
+            text: "hello",
+            generation: 1,
+            delay: 0.5,
+            settlementDelay: 0.6,
+            completion: { _, _ in }
+        )
+        #expect(accepted)
+        #expect(!engine.canStartRecording, "a pending paste transaction must gate Start")
+
+        scheduled.removeFirst()()
+        #expect(!engine.canStartRecording, "the settling window still gates Start")
+
+        let observationsBeforeSettlement = observations
+        scheduled.removeFirst()()
+        #expect(
+            observations > observationsBeforeSettlement,
+            "settlement-to-idle must publish — at 15eb17c nothing fires here and the menu bar stays busy forever"
+        )
+        #expect(engine.canStartRecording)
+        let presentation = MenuBarPresentation(
+            isRecording: engine.isRecording,
+            canStartRecording: engine.canStartRecording,
+            statusMessage: "Ready"
+        )
+        #expect(presentation.iconName == "mic.fill")
+        #expect(presentation.primaryActionEnabled, "Start must re-enable from the settlement event alone")
     }
 }
 

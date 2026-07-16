@@ -100,8 +100,15 @@ public enum IntentScreen {
         }
         if commandShaped {
             // Command-shaped speech with nothing selected can never become a command, so it
-            // pastes immediately instead of waiting on the classifier.
-            return IntentDecision(intent: .dictate, confidence: 1, reason: "No selection for an edit — dictating")
+            // pastes immediately instead of waiting on the classifier — and it pastes the
+            // raw words verbatim: an enhancer must never get to "execute" an instruction
+            // like "make the release tomorrow" by rewriting it.
+            return IntentDecision(
+                intent: .dictate,
+                confidence: 1,
+                reason: "No selection for an edit — dictating literally",
+                literalTranscript: true
+            )
         }
         return IntentDecision(intent: .dictate, confidence: 1, reason: "No command or question markers")
     }
