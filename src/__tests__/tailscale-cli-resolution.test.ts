@@ -100,6 +100,20 @@ describe("Tailscale CLI resolution", () => {
     expect(result.stdout.trim()).toBe(`resolved=${fallback}`);
   });
 
+  test("uses the app fallback when PATH shadows Tailscale with a non-executable file", async () => {
+    const root = temporaryDirectory();
+    const pathCli = join(root, "bin", "tailscale");
+    const fallback = join(root, "app", "Tailscale");
+    mkdirSync(dirname(pathCli), { recursive: true });
+    writeFileSync(pathCli, "not executable\n");
+    chmodSync(pathCli, 0o644);
+    writeExecutable(fallback);
+
+    const result = await resolveWith({ path: dirname(pathCli), fallback });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(`resolved=${fallback}`);
+  });
+
   test("accepts an executable PATH symlink and preserves its resolved command path", async () => {
     const root = temporaryDirectory();
     const realCli = join(root, "libexec", "tailscale-real");
