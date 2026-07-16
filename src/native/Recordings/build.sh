@@ -26,6 +26,7 @@ LOCAL_APPROVED_TARGET_IDENTITY_SHA256="${RECORDINGS_LOCAL_APPROVED_TARGET_IDENTI
 PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 PLUTIL="${PLUTIL:-/usr/bin/plutil}"
 BUN_EXECUTABLE="${BUN_EXECUTABLE:-$(command -v bun)}"
+TAILSCALE_RESOLVER="$PACKAGE_ROOT/scripts/resolve_tailscale_cli.sh"
 
 BUILD_CONFIGURATION="release"
 ARTIFACT_POLICY="release"
@@ -65,11 +66,17 @@ elif [ "$MODE" = "local" ]; then
         echo "Local-only artifacts must be built on a non-target Mac." >&2
         exit 1
     fi
-    if ! command -v tailscale >/dev/null 2>&1; then
+    if [ ! -r "$TAILSCALE_RESOLVER" ]; then
+        echo "Packaged Tailscale CLI resolver is missing." >&2
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$TAILSCALE_RESOLVER"
+    if ! TAILSCALE_CLI="$(recordings_resolve_tailscale_cli)"; then
         echo "Tailscale is required to authenticate the non-target build Mac." >&2
         exit 1
     fi
-    if ! BUILDER_IDENTITY_SHA256="$(tailscale status --json | "$BUN_EXECUTABLE" "$PACKAGE_ROOT/scripts/macos_artifact.ts" tailscale-node-id-sha256 --expected-hostname "$BUILD_HOST")"; then
+    if ! BUILDER_IDENTITY_SHA256="$("$TAILSCALE_CLI" status --json | "$BUN_EXECUTABLE" "$PACKAGE_ROOT/scripts/macos_artifact.ts" tailscale-node-id-sha256 --expected-hostname "$BUILD_HOST")"; then
         echo "Could not authenticate the live Tailscale node identity for the build Mac." >&2
         exit 1
     fi

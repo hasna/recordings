@@ -116,7 +116,9 @@ artifacts, use `tailscale_node_id_sha256`: the authenticated operator input is t
 exact target's Tailscale node ID. The non-target builder separately reads and hashes its own live
 online `Self.ID`, records `builder_identity_kind=tailscale_node_id_sha256`, and requires that
 same-namespace digest to differ from the target digest. Before locking or mutating local state, the
-installer reads local `tailscale status --json`, requires online `Self` with hostname `station06`,
+installer resolves an executable `tailscale` from `PATH` or the exact standard app CLI at
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`, reads local `tailscale status --json`,
+requires online `Self` with hostname `station06`,
 requires the single nonempty `Self.ID` to contain no whitespace or NUL, hashes its exact decoded
 bytes without a newline, and compares the digest. Neither raw node ID is written to the manifest,
 build log, or installer log. Older schema-v3 artifacts without an

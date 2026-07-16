@@ -47,6 +47,19 @@ function writeExecutable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
+function overrideFixtureTailscaleAppCli(root: string, fallbackPath: string): void {
+  const resolver = join(root, "scripts", "resolve_tailscale_cli.sh");
+  const source = readFileSync(resolver, "utf8");
+  const standardPath = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+  expect(source).toContain(standardPath);
+  const pathLookup = 'candidate="$(builtin type -P tailscale 2>/dev/null || true)"';
+  expect(source).toContain(pathLookup);
+  writeFileSync(
+    resolver,
+    source.replace(standardPath, fallbackPath).replace(pathLookup, 'candidate=""'),
+  );
+}
+
 function createApp(path: string, marker: string): void {
   mkdirSync(join(path, "Contents", "MacOS"), { recursive: true });
   mkdirSync(join(path, "Contents", "Helpers"), { recursive: true });
@@ -78,6 +91,10 @@ function createInstallerFixture() {
   cpSync(join(repositoryRoot, "scripts", "install_macos_app.sh"), installer);
   chmodSync(installer, 0o755);
   cpSync(join(repositoryRoot, "scripts", "macos_artifact.ts"), join(root, "scripts", "macos_artifact.ts"));
+  cpSync(
+    join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh"),
+    join(root, "scripts", "resolve_tailscale_cli.sh"),
+  );
   writeExecutable(
     join(root, "scripts", "smoke_macos_app.sh"),
     "#!/usr/bin/env bash\n[ \"${FAIL_RUNTIME_SMOKE:-0}\" = 0 ] || exit 1\nprintf '%s\\n' \"$1\" >> \"$MARKER_DIRECTORY/runtime-smoke.log\"\n",
@@ -95,6 +112,7 @@ printf '    "IOPlatformUUID" = "%s"\n' "\${FIXTURE_PLATFORM_IDENTITY:-${targetPl
     join(bin, "tailscale"),
     `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$0" >> "$MARKER_DIRECTORY/tailscale.log"
 [ "\${FAIL_TAILSCALE_STATUS:-0}" = 0 ] || exit 1
 if [ -n "\${TAILSCALE_STATUS_JSON:-}" ]; then
   printf '%s\n' "$TAILSCALE_STATUS_JSON"
@@ -463,9 +481,59 @@ describe("macOS finalized artifact installer", () => {
     const fixture = createInstallerFixture();
     const result = await runTailscaleLocalInstaller(fixture);
     expect(result.exitCode, result.stderr).toBe(0);
+    expect(readFileSync(join(fixture.markers, "tailscale.log"), "utf8").trim()).toBe(
+      join(fixture.bin, "tailscale"),
+    );
     expect(readFileSync(join(fixture.markers, "bun.log"), "utf8")).toContain(
       "tailscale-node-id-sha256 --expected-hostname station06",
     );
+  });
+
+  test("Tailscale-bound local install invokes a PATH CLI whose path contains spaces", async () => {
+    const fixture = createInstallerFixture();
+    const spacedBin = join(fixture.root, "Tailscale CLI bin");
+    mkdirSync(spacedBin, { recursive: true });
+    cpSync(join(fixture.bin, "tailscale"), join(spacedBin, "tailscale"));
+    chmodSync(join(spacedBin, "tailscale"), 0o755);
+    rmSync(join(fixture.bin, "tailscale"));
+
+    const result = await runTailscaleLocalInstaller(fixture, [], {
+      PATH: `${spacedBin}:${fixture.bin}:${Bun.env.PATH ?? ""}`,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(readFileSync(join(fixture.markers, "tailscale.log"), "utf8").trim()).toBe(
+      join(spacedBin, "tailscale"),
+    );
+  });
+
+  test("Tailscale-bound local install uses the standard app CLI fallback", async () => {
+    const fixture = createInstallerFixture();
+    const fallback = join(fixture.root, "Applications", "Tailscale.app", "Contents", "MacOS", "Tailscale");
+    mkdirSync(dirname(fallback), { recursive: true });
+    cpSync(join(fixture.bin, "tailscale"), fallback);
+    chmodSync(fallback, 0o755);
+    rmSync(join(fixture.bin, "tailscale"));
+    overrideFixtureTailscaleAppCli(fixture.root, fallback);
+
+    const result = await runTailscaleLocalInstaller(fixture);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(readFileSync(join(fixture.markers, "tailscale.log"), "utf8").trim()).toBe(fallback);
+  });
+
+  test("Tailscale-bound local install rejects a non-executable app fallback before mutation", async () => {
+    const fixture = createInstallerFixture();
+    const fallback = join(fixture.root, "Applications", "Tailscale.app", "Contents", "MacOS", "Tailscale");
+    mkdirSync(dirname(fallback), { recursive: true });
+    writeFileSync(fallback, "not executable\n");
+    chmodSync(fallback, 0o644);
+    rmSync(join(fixture.bin, "tailscale"));
+    overrideFixtureTailscaleAppCli(fixture.root, fallback);
+
+    const result = await runTailscaleLocalInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("not an executable file");
+    expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
   });
 
   test("Tailscale-bound local install fails closed when Tailscale is missing", async () => {
@@ -473,6 +541,16 @@ describe("macOS finalized artifact installer", () => {
     rmSync(join(fixture.bin, "tailscale"));
     const result = await runTailscaleLocalInstaller(fixture);
     expect(result.exitCode).not.toBe(0);
+    expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+  });
+
+  test("Tailscale-bound local install fails closed when the packaged resolver is missing", async () => {
+    const fixture = createInstallerFixture();
+    rmSync(join(fixture.root, "scripts", "resolve_tailscale_cli.sh"));
+    const result = await runTailscaleLocalInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Packaged Tailscale CLI resolver is missing");
     expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
     expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
   });
@@ -1289,6 +1367,10 @@ describe("macOS signed artifact build", () => {
     mkdirSync(markers, { recursive: true });
     cpSync(join(repositoryRoot, "src", "native", "Recordings", "build.sh"), join(native, "build.sh"));
     chmodSync(join(native, "build.sh"), 0o755);
+    cpSync(
+      join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh"),
+      join(root, "scripts", "resolve_tailscale_cli.sh"),
+    );
     writeFileSync(join(native, "RecordingsLib", "Info.plist"), "<plist><dict/></plist>\n");
     writeFileSync(join(native, "RecordingsLib", "Recordings.entitlements"), "<plist><dict/></plist>\n");
     cpSync(
@@ -1372,6 +1454,7 @@ process.exit(64);
       join(bin, "tailscale"),
       `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$0" >> "$MARKER_DIRECTORY/tailscale.log"
 [ "\${FAIL_BUILDER_TAILSCALE_STATUS:-0}" = 0 ] || exit 1
 if [ -n "\${BUILDER_TAILSCALE_STATUS_JSON:-}" ]; then
   printf '%s\n' "$BUILDER_TAILSCALE_STATUS_JSON"
@@ -1580,6 +1663,48 @@ fi
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station06-local-only.manifest.json"))).toBeTrue();
   });
 
+  test("local-only build uses the standard Tailscale app CLI fallback", async () => {
+    const fixture = createBuildFixture();
+    const fallback = join(fixture.root, "Applications", "Tailscale.app", "Contents", "MacOS", "Tailscale");
+    mkdirSync(dirname(fallback), { recursive: true });
+    cpSync(join(fixture.bin, "tailscale"), fallback);
+    chmodSync(fallback, 0o755);
+    rmSync(join(fixture.bin, "tailscale"));
+    overrideFixtureTailscaleAppCli(fixture.root, fallback);
+
+    const result = await runLocalBuild(fixture);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Built immutable local-only app artifact");
+    expect(readFileSync(join(fixture.markers, "tailscale.log"), "utf8").trim()).toBe(fallback);
+  });
+
+  test("local-only build fails closed when no executable Tailscale CLI exists", async () => {
+    const fixture = createBuildFixture();
+    const missingFallback = join(fixture.root, "missing", "Tailscale");
+    rmSync(join(fixture.bin, "tailscale"));
+    overrideFixtureTailscaleAppCli(fixture.root, missingFallback);
+
+    const result = await runLocalBuild(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Tailscale is required to authenticate");
+    expect(existsSync(join(fixture.native, ".build"))).toBeFalse();
+  });
+
+  test("local-only build fails closed before compilation when identity status or resolver fails", async () => {
+    const failedStatus = createBuildFixture();
+    const statusResult = await runLocalBuild(failedStatus, { FAIL_BUILDER_TAILSCALE_STATUS: "1" });
+    expect(statusResult.exitCode).not.toBe(0);
+    expect(statusResult.stderr).toContain("Could not authenticate");
+    expect(existsSync(join(failedStatus.native, ".build"))).toBeFalse();
+
+    const missingResolver = createBuildFixture();
+    rmSync(join(missingResolver.root, "scripts", "resolve_tailscale_cli.sh"));
+    const resolverResult = await runLocalBuild(missingResolver);
+    expect(resolverResult.exitCode).not.toBe(0);
+    expect(resolverResult.stderr).toContain("Packaged Tailscale CLI resolver is missing");
+    expect(existsSync(join(missingResolver.native, ".build"))).toBeFalse();
+  });
+
   test("local-only build rejects missing or same-host target scope", async () => {
     const missing = createBuildFixture();
     const missingResult = await runLocalBuild(missing, { RECORDINGS_LOCAL_APPROVED_TARGET: "" });
@@ -1611,7 +1736,7 @@ fi
       join(repositoryRoot, "src", "native", "Recordings", "build.sh"),
       "utf8",
     );
-    expect(buildScript).toContain("command -v tailscale");
+    expect(buildScript).toContain("recordings_resolve_tailscale_cli");
     expect(buildScript).toContain("Tailscale is required to authenticate");
 
     const offlineBuilder = createBuildFixture();
