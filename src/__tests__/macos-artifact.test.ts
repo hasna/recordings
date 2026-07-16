@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type MacOSArtifactManifest,
   assertCleanGitStatus,
+  assertExpectedCodeLayout,
+  assertVersionTransition,
   parseDesignatedRequirement,
   verifyArchiveManifest,
   compareVersions,
@@ -92,6 +94,24 @@ function fixture(): {
 }
 
 describe("macOS artifact manifest", () => {
+  test.each([
+    ["thin", "feedfacf"],
+    ["fat", "cafebabe"],
+  ])("rejects non-executable %s Mach-O code outside the allowlist", (_label, magic) => {
+    const root = mkdtempSync(join(tmpdir(), "recordings-code-layout-"));
+    temporaryDirectories.push(root);
+    const app = join(root, "Recordings.app");
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(app, "Contents", "Helpers"), { recursive: true });
+    writeFileSync(join(app, "Contents", "MacOS", "Recordings"), "app");
+    writeFileSync(join(app, "Contents", "Helpers", "recordings"), "helper");
+    chmodSync(join(app, "Contents", "MacOS", "Recordings"), 0o755);
+    chmodSync(join(app, "Contents", "Helpers", "recordings"), 0o755);
+    writeFileSync(join(app, "Contents", "Resources.dylib"), Buffer.from(`${magic}00000000`, "hex"));
+    chmodSync(join(app, "Contents", "Resources.dylib"), 0o644);
+    expect(() => assertExpectedCodeLayout(app)).toThrow("unexpected executable code");
+  });
+
   test("refuses to bind a git SHA to uncommitted source", () => {
     expect(() => assertCleanGitStatus(" M src/cli/index.ts\n")).toThrow("dirty source worktree");
     expect(() => assertCleanGitStatus("?? local-source.ts\n")).toThrow("dirty source worktree");
@@ -123,6 +143,24 @@ describe("macOS artifact manifest", () => {
       "0.2.12",
     );
     expect(manifest.bundle_id).toBe("com.hasna.recordings");
+  });
+
+  test("rejects malformed numeric platform and bundle versions", () => {
+    const { archivePath, manifestPath, manifest } = fixture();
+    for (const field of ["minimum_macos", "bundle_version", "bundle_build_version"] as const) {
+      const malformed = { ...manifest, [field]: "26.beta" };
+      writeFileSync(manifestPath, `${JSON.stringify(malformed)}\n`);
+      expect(() =>
+        verifyArchiveManifest(
+          archivePath,
+          manifestPath,
+          "EXAMPLE123",
+          fileDigest(manifestPath),
+          "a".repeat(40),
+          "0.2.12",
+        ),
+      ).toThrow("not a numeric version");
+    }
   });
 
   test("rejects archive tampering and checksum mismatch", () => {
@@ -169,5 +207,16 @@ describe("macOS artifact manifest", () => {
     expect(compareVersions("0.2.12", "0.2.9")).toBe(1);
     expect(compareVersions("1.0", "1.0.0")).toBe(0);
     expect(compareVersions("0.2.9", "0.2.12")).toBe(-1);
+  });
+
+  test("rejects downgrades and unproven same-version replacements", () => {
+    const { manifest } = fixture();
+    expect(() => assertVersionTransition("0.2.13", manifest.git_sha, manifest)).toThrow("downgrade");
+    expect(() => assertVersionTransition("0.2.12", null, manifest)).toThrow("without verifiable");
+    expect(() => assertVersionTransition("0.2.12", "b".repeat(40), manifest)).toThrow(
+      "different source commit",
+    );
+    expect(() => assertVersionTransition("0.2.12", manifest.git_sha, manifest)).not.toThrow();
+    expect(() => assertVersionTransition("0.2.11", null, manifest)).not.toThrow();
   });
 });

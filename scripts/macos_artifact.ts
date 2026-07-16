@@ -309,10 +309,20 @@ function nestedPolicyDigest(items: NestedCodeItem[]): string {
   return sha256(JSON.stringify(items));
 }
 
-function assertExpectedCodeLayout(appPath: string): void {
+export function assertExpectedCodeLayout(appPath: string): void {
   const allowedExecutables = new Set([
     join(appPath, "Contents", "MacOS", "Recordings"),
     join(appPath, "Contents", "Helpers", "recordings"),
+  ]);
+  const machOMagic = new Set([
+    "feedface",
+    "feedfacf",
+    "cefaedfe",
+    "cffaedfe",
+    "cafebabe",
+    "bebafeca",
+    "cafebabf",
+    "bfbafeca",
   ]);
   const visit = (path: string): void => {
     const details = lstatSync(path);
@@ -322,7 +332,8 @@ function assertExpectedCodeLayout(appPath: string): void {
       return;
     }
     if (!details.isFile()) throw new Error(`app bundle contains a special file: ${path}`);
-    if ((details.mode & 0o111) !== 0 && !allowedExecutables.has(path)) {
+    const magic = readFileSync(path).subarray(0, 4).toString("hex");
+    if (((details.mode & 0o111) !== 0 || machOMagic.has(magic)) && !allowedExecutables.has(path)) {
       throw new Error(`app bundle contains unexpected executable code: ${path}`);
     }
   };
@@ -378,6 +389,13 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
     ["nested-code allowlist hash", manifest.nested_code_policy?.allowlist_sha256],
   ] as const) {
     if (!value || typeof value !== "string") throw new Error(`manifest is missing ${label}`);
+  }
+  for (const [label, value] of [
+    ["bundle version", manifest.bundle_version],
+    ["bundle build version", manifest.bundle_build_version],
+    ["minimum macOS", manifest.minimum_macos],
+  ] as const) {
+    if (!/^\d+(?:\.\d+)*$/.test(value)) throw new Error(`manifest ${label} is not a numeric version`);
   }
   if (!Array.isArray(manifest.architectures) || manifest.architectures.length === 0) {
     throw new Error("manifest is missing architectures");
@@ -744,26 +762,37 @@ export function compareVersions(left: string, right: string): number {
   return 0;
 }
 
-function assertInstallTransition(existingAppPath: string, manifestPath: string): void {
-  const manifest = readJson<MacOSArtifactManifest>(manifestPath);
+export function assertVersionTransition(
+  installedVersion: string,
+  installedSource: string | null,
+  manifest: MacOSArtifactManifest,
+): void {
   assertManifestShape(manifest);
-  const installedVersion = plistValue(existingAppPath, "CFBundleShortVersionString");
   if (compareVersions(manifest.bundle_version, installedVersion) < 0) {
     throw new Error(
       `refusing to downgrade Recordings.app from ${installedVersion} to ${manifest.bundle_version}`,
     );
   }
   if (compareVersions(manifest.bundle_version, installedVersion) === 0) {
-    let installedSource = "";
-    try {
-      installedSource = readJson<BuildProvenance>(provenancePath(existingAppPath)).git_sha;
-    } catch {
+    if (!installedSource) {
       throw new Error("refusing same-version replacement without verifiable installed provenance");
     }
     if (installedSource !== manifest.git_sha) {
       throw new Error("refusing same-version replacement from a different source commit");
     }
   }
+}
+
+function assertInstallTransition(existingAppPath: string, manifestPath: string): void {
+  const manifest = readJson<MacOSArtifactManifest>(manifestPath);
+  const installedVersion = plistValue(existingAppPath, "CFBundleShortVersionString");
+  let installedSource: string | null = null;
+  try {
+    installedSource = readJson<BuildProvenance>(provenancePath(existingAppPath)).git_sha;
+  } catch {
+    // Older installs can lack provenance; upgrades remain allowed, same-version replacement does not.
+  }
+  assertVersionTransition(installedVersion, installedSource, manifest);
 }
 
 function requirementDigest(appPath: string): void {
@@ -778,6 +807,10 @@ function assertFilesystemTree(root: string, expectedUid: number): void {
     if (details.uid !== expectedUid) throw new Error(`filesystem tree has an unexpected owner: ${path}`);
     if ((details.mode & 0o022) !== 0) {
       throw new Error(`filesystem tree is group/world writable: ${path}`);
+    }
+    const aclLines = run("/bin/ls", ["-lde", path]).split(/\r?\n/).slice(1);
+    if (aclLines.some((line) => line.trim())) {
+      throw new Error(`filesystem tree has an unexpected ACL: ${path}`);
     }
     if (details.isDirectory()) {
       for (const entry of readdirSync(path)) visit(join(path, entry));
@@ -921,8 +954,10 @@ function readJournal(path: string): InstallJournal {
     "processes-stopped",
     "originals-moving",
     "originals-moved",
+    "candidate-moving",
     "candidate-installed",
     "activated",
+    "launching",
     "committed",
   ]);
   if (!allowedPhases.has(journal.phase)) throw new Error("invalid install transaction phase");
@@ -967,7 +1002,23 @@ function readJournal(path: string): InstallJournal {
 }
 
 function fsyncDirectory(path: string): void {
-  const descriptor = openSync(path, constants.O_RDONLY);
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function fsyncTree(root: string): void {
+  const details = lstatSync(root);
+  if (details.isSymbolicLink()) throw new Error(`refusing to fsync symlink: ${root}`);
+  if (details.isDirectory()) {
+    for (const entry of readdirSync(root)) fsyncTree(join(root, entry));
+  } else if (!details.isFile()) {
+    throw new Error(`refusing to fsync special file: ${root}`);
+  }
+  const descriptor = openSync(root, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     fsyncSync(descriptor);
   } finally {
@@ -987,11 +1038,13 @@ function recoverJournal(path: string): void {
   const mutationPhases = new Set([
     "originals-moving",
     "originals-moved",
+    "candidate-moving",
     "candidate-installed",
     "activated",
+    "launching",
   ]);
   if (mutationPhases.has(journal.phase)) {
-    if (["candidate-installed", "activated"].includes(journal.phase)) {
+    if (["candidate-moving", "candidate-installed", "activated", "launching"].includes(journal.phase)) {
       rmSync(journal.app_destination, { recursive: true, force: true });
     }
     for (const entry of [...journal.originals].reverse()) {
@@ -999,11 +1052,15 @@ function recoverJournal(path: string): void {
       mkdirSync(dirname(entry.path), { recursive: true, mode: 0o700 });
       rmSync(entry.path, { recursive: true, force: true });
       renameSync(entry.backup, entry.path);
+      fsyncTree(entry.path);
+      fsyncDirectory(dirname(entry.path));
     }
   }
   if (mutationPhases.has(journal.phase) && existsSync(journal.state_backup)) {
     rmSync(journal.data_dir, { recursive: true, force: true });
     cpSync(journal.state_backup, journal.data_dir, { recursive: true, preserveTimestamps: true });
+    fsyncTree(journal.data_dir);
+    fsyncDirectory(dirname(journal.data_dir));
   }
   rmSync(path, { force: true });
   rmSync(journal.transaction_dir, { recursive: true, force: true });
@@ -1084,6 +1141,10 @@ function main(): void {
     requirementDigest(argument("--app"));
   } else if (command === "verify-filesystem-tree") {
     assertFilesystemTree(argument("--path"), Number(argument("--uid")));
+  } else if (command === "fsync-tree") {
+    fsyncTree(argument("--path"));
+  } else if (command === "fsync-directory") {
+    fsyncDirectory(argument("--path"));
   } else if (command === "journal-write") {
     writeDurableJournal(argument("--journal"), journalArgument());
   } else if (command === "journal-get") {

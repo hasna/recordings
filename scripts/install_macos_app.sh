@@ -115,6 +115,8 @@ APP_DEST="${HOME}/Applications/Recordings.app"
 APP_PARENT="$(dirname "$APP_DEST")"
 ROLLBACK_DIR="${DATA_DIR}/rollbacks"
 JOURNAL_PATH="${APP_PARENT}/.Recordings-install-transaction.json"
+LOCK_DIR="${APP_PARENT}/.Recordings-install-lock"
+LOCK_OWNED=0
 TRANSACTION_COMMITTED=0
 STOPPED_RUNNING_APP=0
 was_running=0
@@ -124,11 +126,182 @@ MOVED_ORIGINALS=()
 MOVED_PATHS=()
 MOVED_ORIGINAL_COUNT=0
 
+verify_secure_parent() {
+  local path="$1"
+  local private_mode="${2:-0}"
+  [ -d "$path" ] && [ ! -L "$path" ] || { echo "Secure install path must be a non-symlink directory: ${path}" >&2; exit 1; }
+  local actual_uid
+  local mode
+  actual_uid="$(stat -f '%u' "$path")"
+  mode="$(stat -f '%Lp' "$path")"
+  [ "$actual_uid" = "$(id -u)" ] || { echo "Secure install path has an unexpected owner: ${path}" >&2; exit 1; }
+  if [ "$private_mode" -eq 1 ] && [ "$mode" != 700 ]; then
+    echo "Private Recordings state path must have mode 700: ${path}" >&2
+    exit 1
+  fi
+  case "$mode" in
+    *[2367][0-7]|*[0-7][2367])
+      echo "Secure install path is group/world writable: ${path}" >&2
+      exit 1
+      ;;
+  esac
+  if ls -lde "$path" | tail -n +2 | grep -q '[^[:space:]]'; then
+    echo "Secure install path has an unexpected ACL: ${path}" >&2
+    exit 1
+  fi
+}
+
+[ ! -L "$APP_PARENT" ] && [ ! -L "$DATA_DIR" ] && [ ! -L "$ROLLBACK_DIR" ] || {
+  echo "Recordings install or rollback parent must not be a symlink." >&2
+  exit 1
+}
 mkdir -p "${DATA_DIR}/audio" "$ROLLBACK_DIR" "$APP_PARENT"
+verify_secure_parent "$APP_PARENT"
+verify_secure_parent "$DATA_DIR" 1
+verify_secure_parent "$ROLLBACK_DIR" 1
+if [ -e "$JOURNAL_PATH" ] || [ -L "$JOURNAL_PATH" ]; then
+  [ -f "$JOURNAL_PATH" ] && [ ! -L "$JOURNAL_PATH" ] || {
+    echo "Install transaction journal is not a secure regular file." >&2
+    exit 1
+  }
+fi
+
+release_install_lock() {
+  if [ "$LOCK_OWNED" -eq 1 ] && [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
+    owner_pid="$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)"
+    [ "$owner_pid" != "$$" ] || rm -rf "$LOCK_DIR"
+  fi
+  LOCK_OWNED=0
+}
+
+acquire_install_lock() {
+  local stale_claim
+  local owner_pid
+  local owner_start
+  local actual_start
+  local lock_age
+  local now
+  local stale_seconds="${RECORDINGS_LOCK_STALE_SECONDS:-30}"
+  case "$stale_seconds" in
+    ''|*[!0-9]*) echo "Install lock stale threshold must be an integer." >&2; exit 2 ;;
+  esac
+  if [ "$stale_seconds" -gt 3600 ]; then
+    echo "Install lock stale threshold must not exceed 3600 seconds." >&2
+    exit 2
+  fi
+  if ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; then
+    [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || {
+      echo "Install lock path is not a secure directory." >&2
+      exit 1
+    }
+    [ "$(stat -f '%u' "$LOCK_DIR")" = "$(id -u)" ] && \
+      [ "$(stat -f '%Lp' "$LOCK_DIR")" = 700 ] || {
+        echo "Install lock has unsafe ownership or mode." >&2
+        exit 1
+      }
+    if ls -lde "$LOCK_DIR" | tail -n +2 | grep -q '[^[:space:]]'; then
+      echo "Install lock has an unexpected ACL." >&2
+      exit 1
+    fi
+    if [ -e "$LOCK_DIR/owner" ] || [ -L "$LOCK_DIR/owner" ]; then
+      [ -f "$LOCK_DIR/owner" ] && [ ! -L "$LOCK_DIR/owner" ] && \
+        [ "$(stat -f '%u' "$LOCK_DIR/owner")" = "$(id -u)" ] && \
+        [ "$(stat -f '%Lp' "$LOCK_DIR/owner")" = 600 ] || {
+          echo "Install lock owner metadata has an unsafe type, owner, or mode." >&2
+          exit 1
+        }
+      if ls -lde "$LOCK_DIR/owner" | tail -n +2 | grep -q '[^[:space:]]'; then
+        echo "Install lock owner metadata has an unexpected ACL." >&2
+        exit 1
+      fi
+    fi
+    owner_pid="$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)"
+    owner_start="$(sed -n '2p' "$LOCK_DIR/owner" 2>/dev/null || true)"
+    actual_start=""
+    case "$owner_pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        if kill -0 "$owner_pid" 2>/dev/null; then
+          actual_start="$(ps -o lstart= -p "$owner_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' || true)"
+          if [ -z "$owner_start" ] || [ -z "$actual_start" ] || [ "$owner_start" = "$actual_start" ]; then
+            echo "Another Recordings.app installer owns the active install lock." >&2
+            exit 1
+          fi
+        fi
+        ;;
+    esac
+    owner_valid=1
+    case "$owner_pid" in ''|*[!0-9]*) owner_valid=0 ;; esac
+    [ -n "$owner_start" ] || owner_valid=0
+    if [ "$owner_valid" -eq 0 ] || [ ! -f "$LOCK_DIR/owner" ] || [ -L "$LOCK_DIR/owner" ]; then
+      now="$(date +%s)"
+      lock_age=$((now - $(stat -f '%m' "$LOCK_DIR")))
+      if [ "$lock_age" -lt "$stale_seconds" ]; then
+        echo "Recordings.app install lock is incomplete and too recent to reclaim safely." >&2
+        exit 1
+      fi
+    fi
+    stale_claim="${LOCK_DIR}.stale.$$"
+    if ! mv "$LOCK_DIR" "$stale_claim" 2>/dev/null; then
+      echo "Recordings.app install lock changed during stale-owner recovery." >&2
+      exit 1
+    fi
+    rm -rf "$stale_claim"
+    mkdir -m 700 "$LOCK_DIR" || { echo "Could not acquire Recordings.app install lock." >&2; exit 1; }
+  fi
+  LOCK_OWNED=1
+  local start
+  start="$(ps -o lstart= -p $$ 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' || true)"
+  printf '%s\n%s\n' "$$" "$start" >"$LOCK_DIR/owner.tmp.$$"
+  chmod 600 "$LOCK_DIR/owner.tmp.$$"
+  mv "$LOCK_DIR/owner.tmp.$$" "$LOCK_DIR/owner"
+}
+
+trap release_install_lock EXIT
+acquire_install_lock
+if [ -n "${RECORDINGS_TEST_HOLD_AFTER_LOCK_SECONDS:-}" ]; then
+  sleep "$RECORDINGS_TEST_HOLD_AFTER_LOCK_SECONDS"
+fi
+
+pids_for_exact_executable() {
+  local expected="$1"
+  local pid
+  local command
+  while read -r pid command; do
+    [ -n "${pid:-}" ] || continue
+    case "$command" in
+      "$expected"|"$expected "*) printf '%s\n' "$pid" ;;
+    esac
+  done < <(ps -axo pid=,command= 2>/dev/null || true)
+}
+
+stop_uncommitted_candidate() {
+  local expected="$APP_DEST/Contents/MacOS/Recordings"
+  local candidate_pids
+  local pid
+  local attempts
+  local attempt
+  candidate_pids="$(pids_for_exact_executable "$expected")"
+  [ -n "$candidate_pids" ] || return 0
+  while IFS= read -r pid; do kill -TERM "$pid" 2>/dev/null || true; done <<< "$candidate_pids"
+  attempts=$((LAUNCH_TIMEOUT_SECONDS * 10))
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    [ -z "$(pids_for_exact_executable "$expected")" ] && return 0
+    sleep 0.1
+  done
+  while IFS= read -r pid; do kill -KILL "$pid" 2>/dev/null || true; done <<< "$candidate_pids"
+  sleep 0.1
+  [ -z "$(pids_for_exact_executable "$expected")" ] || {
+    echo "Uncommitted Recordings.app process could not be stopped before recovery." >&2
+    exit 1
+  }
+}
 
 if [ -f "$JOURNAL_PATH" ]; then
   echo "Recovering incomplete Recordings.app installation transaction." >&2
   RECOVER_WAS_RUNNING="$(bun "$ARTIFACT_TOOL" journal-get --journal "$JOURNAL_PATH" --field was_running)"
+  RECOVER_PHASE="$(bun "$ARTIFACT_TOOL" journal-get --journal "$JOURNAL_PATH" --field phase)"
+  case "$RECOVER_PHASE" in candidate-installed|activated|launching) stop_uncommitted_candidate ;; esac
   bun "$ARTIFACT_TOOL" journal-recover --journal "$JOURNAL_PATH"
   if [ "$RECOVER_WAS_RUNNING" = 1 ] && [ -d "$APP_DEST" ]; then
     open -n "$APP_DEST" >/dev/null 2>&1 || true
@@ -163,35 +336,9 @@ case " ${MANIFEST_ARCHITECTURES} " in
   *) echo "Recordings.app artifact does not support target architecture ${TARGET_ARCH}." >&2; exit 1 ;;
 esac
 
-verify_secure_parent() {
-  local path="$1"
-  [ ! -L "$path" ] || { echo "Secure install path must not be a symlink: ${path}" >&2; exit 1; }
-  local actual_uid
-  local mode
-  actual_uid="$(stat -f '%u' "$path")"
-  mode="$(stat -f '%Lp' "$path")"
-  [ "$actual_uid" = "$(id -u)" ] || { echo "Secure install path has an unexpected owner: ${path}" >&2; exit 1; }
-  case "$mode" in
-    *[2367][0-7]|*[0-7][2367])
-      echo "Secure install path is group/world writable: ${path}" >&2
-      exit 1
-      ;;
-  esac
-  if ls -lde "$path" | tail -n +2 | grep -q '[^[:space:]]'; then
-    echo "Secure install path has an unexpected ACL: ${path}" >&2
-    exit 1
-  fi
-}
 verify_secure_parent "$APP_PARENT"
-verify_secure_parent "$DATA_DIR"
-verify_secure_parent "$ROLLBACK_DIR"
-
-required_kb=$(( ($(du -sk "$ARTIFACT_PATH" "$DATA_DIR" 2>/dev/null | awk '{sum += $1} END {print sum + 1024}') ) * 4 ))
-available_kb="$(df -Pk "$APP_PARENT" | awk 'NR == 2 {print $4}')"
-if [ -z "$available_kb" ] || [ "$available_kb" -lt "$required_kb" ]; then
-  echo "Insufficient free space for transactional app and state backups." >&2
-  exit 1
-fi
+verify_secure_parent "$DATA_DIR" 1
+verify_secure_parent "$ROLLBACK_DIR" 1
 
 WORK_DIR="$(mktemp -d)"
 UNPACK_DIR="${WORK_DIR}/unpacked"
@@ -214,6 +361,12 @@ bun "$ARTIFACT_TOOL" verify-archive \
 add_unique_app() {
   local candidate="$1"
   local existing
+  if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || {
+      echo "Recordings.app path is not a secure directory: ${candidate}" >&2
+      exit 1
+    }
+  fi
   [ -d "$candidate" ] || return 0
   for existing in ${DISCOVERED_APPS[@]+"${DISCOVERED_APPS[@]}"}; do
     [ "$existing" = "$candidate" ] && return 0
@@ -303,6 +456,7 @@ cleanup() {
   elif [ ! -f "$JOURNAL_PATH" ] && [ -d "$TRANSACTION_DIR" ]; then
     rmdir "$TRANSACTION_DIR" 2>/dev/null || true
   fi
+  release_install_lock
   exit "$status"
 }
 trap cleanup EXIT
@@ -393,6 +547,34 @@ for existing_app in ${DISCOVERED_APPS[@]+"${DISCOVERED_APPS[@]}"}; do
   esac
 done
 
+measure_kb() {
+  local measured
+  measured="$(du -sk "$@" 2>/dev/null | awk '{sum += $1} END {print sum + 0}')"
+  case "$measured" in ''|*[!0-9]*) echo "Could not measure transactional storage requirements." >&2; exit 1 ;; esac
+  printf '%s\n' "$measured"
+}
+
+require_space() {
+  local path="$1"
+  local required="$2"
+  local available
+  available="$(df -Pk "$path" | awk 'NR == 2 {print $4}')"
+  case "$available" in ''|*[!0-9]*) echo "Could not determine free space for ${path}." >&2; exit 1 ;; esac
+  if [ "$available" -lt "$required" ]; then
+    echo "Insufficient free space for transactional app and state backups at ${path}." >&2
+    exit 1
+  fi
+}
+
+candidate_kb="$(measure_kb "$CANDIDATE_APP")"
+data_kb="$(measure_kb "$DATA_DIR")"
+existing_kb=0
+for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
+  existing_kb=$((existing_kb + $(measure_kb "$existing_app")))
+done
+require_space "$APP_PARENT" $((candidate_kb * 3 + existing_kb * 2 + data_kb * 2 + 10240))
+require_space "$DATA_DIR" $((existing_kb * 2 + data_kb * 2 + 10240))
+
 candidate_requirement="$(codesign -d -r- "$CANDIDATE_APP" 2>&1 | sed -n 's/^designated => //p' | head -n 1 || true)"
 if [ -z "$candidate_requirement" ]; then
   echo "Candidate app has no designated requirement." >&2
@@ -449,6 +631,8 @@ if ! diff -qr "$DATA_DIR" "$STATE_BACKUP" >/dev/null; then
 fi
 chmod -R go-rwx "$STATE_BACKUP"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STATE_BACKUP" --uid "$(id -u)"
+bun "$ARTIFACT_TOOL" fsync-tree --path "$STATE_BACKUP"
+bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR"
 
 MOVED_ORIGINALS=()
 MOVED_PATHS=()
@@ -469,6 +653,8 @@ for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
   ditto -c -k --sequesterRsrc --keepParent \
     "$existing_app" \
     "$ROLLBACK_DIR/Recordings-pre-install-${stamp}.zip"
+  bun "$ARTIFACT_TOOL" fsync-tree --path "$ROLLBACK_DIR/Recordings-pre-install-${stamp}.zip"
+  bun "$ARTIFACT_TOOL" fsync-directory --path "$ROLLBACK_DIR"
 done
 
 ditto "$CANDIDATE_APP" "$STAGED_APP"
@@ -490,6 +676,8 @@ if ! diff -qr "$DATA_DIR" "$STATE_BACKUP" >/dev/null; then
 fi
 chmod -R go-rwx "$STATE_BACKUP"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STATE_BACKUP" --uid "$(id -u)"
+bun "$ARTIFACT_TOOL" fsync-tree --path "$STATE_BACKUP"
+bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR"
 write_journal processes-stopped
 
 write_journal originals-moving
@@ -499,10 +687,17 @@ for ((move_index = 0; move_index < MOVED_ORIGINAL_COUNT; move_index++)); do
   mv "$existing_app" "$moved_path"
   chmod -R go-w "$moved_path"
   bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$moved_path" --uid "$(id -u)"
+  bun "$ARTIFACT_TOOL" fsync-tree --path "$moved_path"
+  bun "$ARTIFACT_TOOL" fsync-directory --path "$(dirname "$existing_app")"
+  bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR/apps"
 done
 write_journal originals-moved
 
+write_journal candidate-moving
 mv "$STAGED_APP" "$APP_DEST"
+maybe_crash_after_phase candidate-moved-before-journal
+bun "$ARTIFACT_TOOL" fsync-tree --path "$APP_DEST"
+bun "$ARTIFACT_TOOL" fsync-directory --path "$APP_PARENT"
 write_journal candidate-installed
 bun "$ARTIFACT_TOOL" verify-app \
   --app "$APP_DEST" \
@@ -522,6 +717,7 @@ write_journal activated
 if [ "$LAUNCH_APP" -eq 1 ] || [ "$was_running" -eq 1 ]; then
   EXPECTED_EXECUTABLE="$APP_DEST/Contents/MacOS/Recordings"
   RUNNING_EXECUTABLES+=("$EXPECTED_EXECUTABLE")
+  write_journal launching
   open -n "$APP_DEST"
   attempts=$((LAUNCH_TIMEOUT_SECONDS * 10))
   launched_pid=""
@@ -549,6 +745,7 @@ if [ "$LAUNCH_APP" -eq 1 ] || [ "$was_running" -eq 1 ]; then
     echo "Canonical app process exited before the stability window completed." >&2
     exit 1
   fi
+  maybe_crash_after_phase candidate-launched-before-commit
   STOPPED_RUNNING_APP=0
 fi
 

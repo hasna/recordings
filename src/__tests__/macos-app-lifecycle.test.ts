@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,7 +71,7 @@ function createInstallerFixture() {
   writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
   writeExecutable(
     join(bin, "stat"),
-    "#!/usr/bin/env bash\nif [ \"${2:-}\" = '%u' ] || [ \"${1:-}\" = -f ] && [ \"${2:-}\" = '%u' ]; then id -u; else printf '700\\n'; fi\n",
+    "#!/usr/bin/env bash\ncase \"${2:-}\" in '%u') id -u ;; '%m') date +%s ;; '%Lp') case \"${3:-}\" in */owner) printf '600\\n' ;; *) printf '700\\n' ;; esac ;; *) printf '700\\n' ;; esac\n",
   );
   writeExecutable(join(bin, "ls"), "#!/usr/bin/env bash\nprintf 'drwx------ fixture\\n'\n");
   writeExecutable(
@@ -93,7 +94,7 @@ case "$*" in
     fi
     exit 0
     ;;
-  *" assert-transition "*|*" verify-filesystem-tree "*) exit 0 ;;
+  *" assert-transition "*|*" verify-filesystem-tree "*|*" fsync-tree "*|*" fsync-directory "*) exit 0 ;;
   *" verify-active "*) [ "\${FAIL_ACTIVE_VERIFY:-0}" = 0 ]; exit $? ;;
   *" verify-archive "*)
     [ "\${FAIL_ARCHIVE_VERIFY:-0}" = 1 ] && exit 1
@@ -147,12 +148,22 @@ exit 0
   writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
   writeExecutable(join(bin, "syspolicy_check"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/syspolicy.log\"\nexit 0\n");
   writeExecutable(
+    join(bin, "df"),
+    "#!/usr/bin/env bash\nif [ -n \"${AVAILABLE_KB:-}\" ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 100000 1 %s 1%% /\\n' \"$AVAILABLE_KB\"; else exec /bin/df \"$@\"; fi\n",
+  );
+  writeExecutable(
     join(bin, "mdfind"),
     "#!/usr/bin/env bash\n[ -n \"${MDFIND_RESULT:-}\" ] && printf '%s\\n' \"$MDFIND_RESULT\"\n",
   );
   writeExecutable(
     join(bin, "open"),
-    "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/open.log\"\n",
+    `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MARKER_DIRECTORY/open.log"
+if [ "\${SPAWN_LAUNCHED_PROCESS:-0}" = 1 ]; then
+  bash -c 'exec -a "$1" sleep 30' _ "$CANONICAL_EXECUTABLE" >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$MARKER_DIRECTORY/launched.pid"
+fi
+`,
   );
   writeExecutable(
     join(bin, "ps"),
@@ -162,7 +173,12 @@ if [ ! -e "$MARKER_DIRECTORY/open.log" ]; then
   [ -n "\${EXISTING_PID:-}" ] && printf '%s %s\n' "$EXISTING_PID" "$EXISTING_PROCESS_PATH"
   [ -n "\${UNRELATED_PID:-}" ] && printf '%s %s\n' "$UNRELATED_PID" "$UNRELATED_PROCESS_PATH"
 elif [ "\${LAUNCH_SUCCEEDS:-1}" = 1 ]; then
-  printf '99999 %s\n' "$CANONICAL_EXECUTABLE"
+  if [ "\${SPAWN_LAUNCHED_PROCESS:-0}" = 1 ] && [ -f "$MARKER_DIRECTORY/launched.pid" ]; then
+    launched_pid="$(sed -n '1p' "$MARKER_DIRECTORY/launched.pid")"
+    if kill -0 "$launched_pid" 2>/dev/null; then printf '%s %s\n' "$launched_pid" "$CANONICAL_EXECUTABLE"; fi
+  else
+    printf '99999 %s\n' "$CANONICAL_EXECUTABLE"
+  fi
 fi
 `,
   );
@@ -408,12 +424,153 @@ fi
     expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
     writeFileSync(stateFile, "mutated-after-crash\n");
 
-    const recovered = await runInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+    const recovered = await runInstaller(fixture, [], {
+      FAIL_ARCHIVE_VERIFY: "1",
+      RECORDINGS_LOCK_STALE_SECONDS: "0",
+    });
     expect(recovered.exitCode).not.toBe(0);
     expect(recovered.stderr).toContain("Recovering incomplete");
     expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
     expect(readFileSync(stateFile, "utf8")).toBe("original-state\n");
     expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeFalse();
+  });
+
+  test("stops a launched uncommitted candidate before restoring the previous app", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const crashed = await runInstaller(fixture, ["--launch", "--launch-timeout", "2"], {
+      SPAWN_LAUNCHED_PROCESS: "1",
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-launched-before-commit",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    const launchedPid = Number(readFileSync(join(fixture.markers, "launched.pid"), "utf8").trim());
+    expect(() => process.kill(launchedPid, 0)).not.toThrow();
+
+    const recovered = await runInstaller(fixture, [], {
+      SPAWN_LAUNCHED_PROCESS: "1",
+      RECORDINGS_LOCK_STALE_SECONDS: "0",
+      FAIL_ARCHIVE_VERIFY: "1",
+    });
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(() => process.kill(launchedPid, 0)).toThrow();
+  });
+
+  test("first-install SIGKILL after candidate move removes the uncommitted app on recovery", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const crashed = await runInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-moved-before-journal",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+
+    const recovered = await runInstaller(fixture, [], {
+      FAIL_ARCHIVE_VERIFY: "1",
+      RECORDINGS_LOCK_STALE_SECONDS: "0",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(existsSync(installed)).toBeFalse();
+  });
+
+  test("active installer lock rejects a second writer before artifact mutation", async () => {
+    const fixture = createInstallerFixture();
+    const lock = join(fixture.home, "Applications", ".Recordings-install-lock");
+    mkdirSync(lock, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lock, "owner"), `${process.pid}\n\n`, { mode: 0o600 });
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("owns the active install lock");
+    expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+  });
+
+  test("an actual concurrent installer cannot enter verification while the first owns the lock", async () => {
+    const fixture = createInstallerFixture();
+    const installer = join(fixture.root, "scripts", "install_macos_app.sh");
+    const first = Bun.spawn([
+      "bash", installer,
+      "--artifact", fixture.artifact,
+      "--manifest", fixture.manifest,
+      "--expected-team-id", "EXAMPLE123",
+      "--manifest-sha256", "a".repeat(64),
+      "--expected-source-sha", "b".repeat(40),
+      "--expected-version", "0.2.12",
+    ], {
+      env: {
+        ...Bun.env,
+        HOME: fixture.home,
+        PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
+        CANDIDATE_SOURCE: fixture.candidate,
+        CANONICAL_EXECUTABLE: join(fixture.home, "Applications", "Recordings.app", "Contents", "MacOS", "Recordings"),
+        MARKER_DIRECTORY: fixture.markers,
+        REAL_BUN: bunExecutable,
+        RECORDINGS_TEST_HOLD_AFTER_LOCK_SECONDS: "30",
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const owner = join(fixture.home, "Applications", ".Recordings-install-lock", "owner");
+    try {
+      for (let attempt = 0; attempt < 100 && !existsSync(owner); attempt += 1) {
+        await Bun.sleep(10);
+      }
+      expect(existsSync(owner)).toBeTrue();
+      const second = await runInstaller(fixture);
+      expect(second.exitCode).not.toBe(0);
+      expect(second.stderr).toContain("owns the active install lock");
+      expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+    } finally {
+      first.kill();
+      await first.exited;
+    }
+  });
+
+  test("does not reclaim a recent lock with incomplete owner metadata", async () => {
+    const fixture = createInstallerFixture();
+    const lock = join(fixture.home, "Applications", ".Recordings-install-lock");
+    mkdirSync(lock, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lock, "owner"), "incomplete\n", { mode: 0o600 });
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("incomplete and too recent");
+    expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+  });
+
+  test("rejects a dangling canonical app symlink before transition handling", async () => {
+    const fixture = createInstallerFixture();
+    const app = join(fixture.home, "Applications", "Recordings.app");
+    mkdirSync(dirname(app), { recursive: true });
+    symlinkSync(join(fixture.root, "missing.app"), app);
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("not a secure directory");
+  });
+
+  test("rejects insufficient transaction space before moving an installed app", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runInstaller(fixture, [], { AVAILABLE_KB: "1" });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Insufficient free space");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+  });
+
+  test("fsyncs state, app backups, and candidate before advancing durable phases", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).toBe(0);
+    const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(commands.indexOf("fsync-tree")).toBeLessThan(commands.indexOf("journal-write"));
+    const movedFsync = commands.indexOf("fsync-tree", commands.indexOf("originals-moving"));
+    expect(movedFsync).toBeGreaterThan(commands.indexOf("originals-moving"));
+    expect(movedFsync).toBeLessThan(commands.indexOf("originals-moved"));
+    const candidateFsync = commands.lastIndexOf("fsync-tree");
+    expect(candidateFsync).toBeLessThan(commands.indexOf("candidate-installed"));
   });
 
   test("rolls back when post-activation packaged helper verification fails", async () => {
@@ -425,6 +582,41 @@ fi
     expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
     const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
     expect(commands.indexOf("verify-active")).toBeGreaterThan(commands.indexOf("verify-app"));
+  });
+
+  test("runtime smoke rejects fast evidence without an observed exact-path process", async () => {
+    const fixture = createInstallerFixture();
+    const app = join(fixture.root, "smoke", "Recordings.app");
+    createApp(app, "app");
+    cpSync(
+      join(repositoryRoot, "scripts", "smoke_macos_app.sh"),
+      join(fixture.root, "scripts", "smoke_macos_app.sh"),
+    );
+    chmodSync(join(fixture.root, "scripts", "smoke_macos_app.sh"), 0o755);
+    writeExecutable(
+      join(fixture.bin, "open"),
+      `#!/usr/bin/env bash
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--runtime-smoke-output" ]; then output="$2"; break; fi
+  shift
+done
+printf '{"processIdentifier":123}\n' > "$output"
+`,
+    );
+    writeExecutable(join(fixture.bin, "ps"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(join(fixture.bin, "bun"), "#!/usr/bin/env bash\nprintf '123\\n'\n");
+    const smoke = Bun.spawn(["bash", join(fixture.root, "scripts", "smoke_macos_app.sh"), app], {
+      env: { ...Bun.env, PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stderr] = await Promise.all([
+      smoke.exited,
+      new Response(smoke.stderr).text(),
+    ]);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("before its exact process path could be observed");
   });
 });
 

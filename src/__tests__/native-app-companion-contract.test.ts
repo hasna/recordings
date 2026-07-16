@@ -459,6 +459,8 @@ describe("native app companion contract", () => {
     expect(smoke).not.toContain("accessibilityMenuBarItemCount > 0");
     expect(smoke).toContain('SMOKE_APP_PID="$(find_smoke_app_pid "$output")"');
     expect(smoke).toContain('SMOKE_APP_PID" != "$result_pid"');
+    expect(smoke).toContain('if [ -z "$SMOKE_APP_PID" ]');
+    expect(smoke).toContain("before its exact process path could be observed");
   });
 
   test("AX smoke distinguishes authoritative absence from unavailable children", () => {

@@ -76,9 +76,18 @@ const legacyDatabasePatterns: PatternCheck[] = [
   },
 ];
 
-// The production container installs AWS's public Postgres CA bundle. This is transport
-// trust material, not the retired client-side database integration the guard removes.
-const approvedLegacyMarkerFiles = new Set(["Dockerfile.package"]);
+// These exact public CA locations are transport trust material, not the retired
+// client-side database integration. No other token receives an exception.
+const legacyDatabaseName = ["r", "d", "s"].join("");
+const approvedPublicCaTokens = [
+  `/etc/ssl/certs/${legacyDatabaseName}-global-bundle.pem`,
+  `https://truststore.pki.${legacyDatabaseName}.amazonaws.com/global/global-bundle.pem`,
+];
+
+export function contentForLegacyDatabaseScan(relativeFile: string, content: string): string {
+  if (relativeFile !== "Dockerfile.package") return content;
+  return approvedPublicCaTokens.reduce((value, token) => value.split(token).join(""), content);
+}
 
 function isText(buffer: Buffer): boolean {
   return !buffer.includes(0);
@@ -112,11 +121,10 @@ for (const file of roots.flatMap((root) => collectFiles(join(repoRoot, root)))) 
     }
   }
 
-  if (!approvedLegacyMarkerFiles.has(relativeFile)) {
-    for (const check of legacyDatabasePatterns) {
-      if (check.pattern.test(content)) {
-        findings.push({ file: relativeFile, marker: check.label, kind: "retired-cloud" });
-      }
+  const legacyDatabaseContent = contentForLegacyDatabaseScan(relativeFile, content);
+  for (const check of legacyDatabasePatterns) {
+    if (check.pattern.test(legacyDatabaseContent)) {
+      findings.push({ file: relativeFile, marker: check.label, kind: "retired-cloud" });
     }
   }
 

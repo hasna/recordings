@@ -77,7 +77,11 @@ run_smoke() {
   wait "$SMOKE_PID"
   SMOKE_PID=""
   result_pid="$(bun -e 'const value = await Bun.file(process.argv[1]).json(); console.log(value.processIdentifier)' "$output")"
-  if [ -n "$SMOKE_APP_PID" ] && [ "$SMOKE_APP_PID" != "$result_pid" ]; then
+  if [ -z "$SMOKE_APP_PID" ]; then
+    echo "Recordings.app runtime smoke ${mode} produced evidence before its exact process path could be observed." >&2
+    return 1
+  fi
+  if [ "$SMOKE_APP_PID" != "$result_pid" ]; then
     echo "Recordings.app runtime smoke ${mode} observed a mismatched app process." >&2
     return 1
   fi
