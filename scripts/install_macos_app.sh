@@ -313,6 +313,11 @@ verify_safe_home_ancestor() {
       exit 1
       ;;
   esac
+  home_acl="$(ls -lde "$path" | tail -n +2)"
+  if [ -n "$home_acl" ] && printf '%s\n' "$home_acl" | grep -v ' deny ' | grep -q '[^[:space:]]'; then
+    echo "Home ancestor has an ACL that grants access." >&2
+    exit 1
+  fi
 }
 
 verify_existing_state_root() {

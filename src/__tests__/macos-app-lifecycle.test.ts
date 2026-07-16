@@ -174,8 +174,11 @@ printf 'drwx------ fixture\\n'
 if [ "\${@: -1}" = "$HOME/.hasna/recordings" ] && [ "\${FIXTURE_STATE_ACL:-0}" = 1 ]; then
   printf ' 0: user:fixture allow read\\n'
 fi
-if [ "\${@: -1}" = "$HOME" ] && [ "\${FIXTURE_HOME_ACL:-0}" = 1 ]; then
-  printf ' 0: group:everyone deny delete\\n'
+if [ "\${@: -1}" = "$HOME" ]; then
+  case "\${FIXTURE_HOME_ACL:-0}" in
+    deny) printf ' 0: group:everyone deny delete\\n' ;;
+    allow) printf ' 0: user:fixture allow write,delete_child\\n' ;;
+  esac
 fi
 `,
   );
@@ -812,11 +815,27 @@ describe("macOS finalized artifact installer", () => {
     const fixture = createInstallerFixture();
     const state = createLegacyState(fixture);
     const result = await runTailscaleLocalInstaller(fixture, [], {
-      FIXTURE_HOME_ACL: "1",
+      FIXTURE_HOME_ACL: "deny",
       FIXTURE_HOME_MODE: "750",
     });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(mode(state)).toBe(0o700);
+  });
+
+  test("rejects a Home ACL that grants mutation before creating install paths", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const before = readFileSync(join(state, "recordings.db"), "utf8");
+
+    const result = await runTailscaleLocalInstaller(fixture, [], { FIXTURE_HOME_ACL: "allow" });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Home ancestor has an ACL that grants access");
+    expect(mode(state)).toBe(0o755);
+    expect(readFileSync(join(state, "recordings.db"), "utf8")).toBe(before);
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+    expect(existsSync(join(state, "audio"))).toBeFalse();
+    expect(existsSync(join(state, "rollbacks"))).toBeFalse();
   });
 
   test("installs an explicit local-only artifact transactionally without release-trust claims", async () => {
