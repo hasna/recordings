@@ -83,7 +83,7 @@ run_smoke() {
   fi
   SMOKE_APP_PID=""
 
-  SMOKE_MODE="$mode" bun -e '
+  SMOKE_MODE="$mode" EXPECTED_HELPER="$APP_PATH/Contents/Helpers/recordings" bun -e '
     const path = process.argv[1];
     const mode = process.env.SMOKE_MODE;
     const result = await Bun.file(path).json();
@@ -117,6 +117,16 @@ run_smoke() {
       if (!result.applicationIsActive || !result.mainWindowIsKey) {
         fail("Open Recordings did not make the retained window active and key");
       }
+    } else if (mode === "resolver") {
+      if (result.menuBarSurfaceCount !== 0 || result.globalHandlersInstalled !== false) {
+        fail("resolver smoke installed UI surfaces or global handlers");
+      }
+      if (result.resolvedCompanionPath !== process.env.EXPECTED_HELPER) {
+        fail(`resolver selected ${JSON.stringify(result.resolvedCompanionPath)}`);
+      }
+      if (result.companionCapabilitiesPassed !== true) {
+        fail("packaged helper capability contract failed");
+      }
     } else {
       if (result.menuBarSurfaceCount !== 0) fail("permission/helper smoke inserted a menu-bar surface");
       if (result.accessibilityObservationStatus !== "absent") {
@@ -138,4 +148,5 @@ run_smoke() {
 
 run_smoke normal
 run_smoke permission-helper
-echo "Recordings.app runtime smoke passed: menu bar, status states, retained window, helper isolation."
+run_smoke resolver
+echo "Recordings.app runtime smoke passed: menu bar, retained window, helper isolation, and packaged resolver."

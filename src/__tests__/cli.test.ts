@@ -230,6 +230,11 @@ describe("recordings CLI", () => {
     expect(stdout).toContain("--artifact");
     expect(stdout).toContain("--manifest");
     expect(stdout).toContain("--expected-team-id");
+    expect(stdout).toContain("--manifest-sha256");
+    expect(stdout).toContain("--expected-source-sha");
+    expect(stdout).toContain("--expected-version");
+    expect(stdout).toContain("--expected-old-identity-sha256");
+    expect(stdout).toContain("--expected-new-identity-sha256");
     expect(stdout).toContain("--allow-signing-identity-migration");
     expect(stdout).toContain("--launch");
     expect(stdout).not.toContain("--app-source");
@@ -250,6 +255,12 @@ describe("recordings CLI", () => {
         "/definitely/missing/Recordings.manifest.json",
         "--expected-team-id",
         "EXAMPLE123",
+        "--manifest-sha256",
+        "a".repeat(64),
+        "--expected-source-sha",
+        "b".repeat(40),
+        "--expected-version",
+        "0.2.13",
       ],
       { cwd: process.cwd(), env: process.env, stdout: "pipe", stderr: "pipe" },
     );

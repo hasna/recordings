@@ -230,16 +230,38 @@ ARTIFACT_BASENAME="Recordings-${VERSION}-macos"
 NOTARY_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}-notarization.zip"
 FINAL_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}.zip"
 FINAL_MANIFEST="$BUILD_DIR/${ARTIFACT_BASENAME}.manifest.json"
+NOTARY_SUBMISSION="$BUILD_DIR/${ARTIFACT_BASENAME}.notary-submit.json"
+NOTARY_LOG="$BUILD_DIR/${ARTIFACT_BASENAME}.notary-log.json"
 
-rm -f "$NOTARY_ARCHIVE" "$FINAL_ARCHIVE" "$FINAL_MANIFEST"
+rm -f "$NOTARY_ARCHIVE" "$FINAL_ARCHIVE" "$FINAL_MANIFEST" "$NOTARY_SUBMISSION" "$NOTARY_LOG"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$NOTARY_ARCHIVE"
+NOTARY_ARCHIVE_SHA256="$(shasum -a 256 "$NOTARY_ARCHIVE" | awk '{print $1}')"
 xcrun notarytool submit "$NOTARY_ARCHIVE" \
     --keychain-profile "$NOTARY_PROFILE" \
-    --wait
+    --wait --output-format json >"$NOTARY_SUBMISSION"
+NOTARY_ID="$(NOTARY_SUBMISSION_JSON="$(cat "$NOTARY_SUBMISSION")" "$BUN_EXECUTABLE" -e '
+    const value = JSON.parse(process.env.NOTARY_SUBMISSION_JSON ?? "null");
+    if (value?.status !== "Accepted" || typeof value?.id !== "string" || !value.id) process.exit(1);
+    process.stdout.write(value.id);
+')" || {
+    echo "Notarization submission was not accepted or omitted its submission ID." >&2
+    exit 1
+}
+xcrun notarytool log "$NOTARY_ID" \
+    --keychain-profile "$NOTARY_PROFILE" >"$NOTARY_LOG"
+NOTARY_LOG_JSON="$(cat "$NOTARY_LOG")" "$BUN_EXECUTABLE" -e '
+    const value = JSON.parse(process.env.NOTARY_LOG_JSON ?? "null");
+    if (value?.status !== "Accepted") process.exit(1);
+    if (Array.isArray(value?.issues) && value.issues.length > 0) process.exit(1);
+' || {
+    echo "Accepted notarization log contains a rejected status or reported issues." >&2
+    exit 1
+}
 rm -f "$NOTARY_ARCHIVE"
 xcrun stapler staple "$APP_DIR"
 xcrun stapler validate "$APP_DIR"
 spctl --assess --type execute --verbose=2 "$APP_DIR"
+syspolicy_check distribution "$APP_DIR"
 verify_signed_code "$HELPERS/recordings" "Companion CLI"
 verify_signed_code "$APP_DIR" "Recordings.app"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
@@ -249,7 +271,11 @@ bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" finalize \
     --app "$APP_DIR" \
     --archive "$FINAL_ARCHIVE" \
     --manifest "$FINAL_MANIFEST" \
-    --team-id "$EXPECTED_TEAM_ID"
+    --team-id "$EXPECTED_TEAM_ID" \
+    --notary-log "$NOTARY_LOG" \
+    --notary-submission-id "$NOTARY_ID" \
+    --submitted-archive-sha256 "$NOTARY_ARCHIVE_SHA256"
 
 echo "Built immutable app artifact: $FINAL_ARCHIVE"
 echo "Built artifact manifest: $FINAL_MANIFEST"
+echo "Captured accepted notarization log: $NOTARY_LOG"

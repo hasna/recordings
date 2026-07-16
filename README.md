@@ -36,17 +36,26 @@ share one store without depending on a possibly stale global CLI installation.
 ```bash
 # Install the finalized ZIP and matching provenance manifest without changing the app:
 recordings app install \
-  --artifact /path/to/Recordings-0.2.12-macos.zip \
-  --manifest /path/to/Recordings-0.2.12-macos.manifest.json \
+  --artifact /path/to/Recordings-0.2.13-macos.zip \
+  --manifest /path/to/Recordings-0.2.13-macos.manifest.json \
+  --manifest-sha256 AUTHENTICATED_MANIFEST_SHA256 \
+  --expected-source-sha APPROVED_40_CHARACTER_COMMIT_SHA \
+  --expected-version 0.2.13 \
   --expected-team-id TEAMID1234 \
   --launch
 
 # The first migration from an ad-hoc or different signing identity is explicit:
 recordings app install \
-  --artifact /path/to/Recordings-0.2.12-macos.zip \
-  --manifest /path/to/Recordings-0.2.12-macos.manifest.json \
+  --artifact /path/to/Recordings-0.2.13-macos.zip \
+  --manifest /path/to/Recordings-0.2.13-macos.manifest.json \
+  --manifest-sha256 AUTHENTICATED_MANIFEST_SHA256 \
+  --expected-source-sha APPROVED_40_CHARACTER_COMMIT_SHA \
+  --expected-version 0.2.13 \
   --expected-team-id TEAMID1234 \
-  --allow-signing-identity-migration --launch
+  --allow-signing-identity-migration \
+  --expected-old-identity-sha256 APPROVED_OLD_REQUIREMENT_SHA256 \
+  --expected-new-identity-sha256 APPROVED_NEW_REQUIREMENT_SHA256 \
+  --launch
 
 recordings app open           # launch it
 recordings app status         # show install state
@@ -62,14 +71,18 @@ swift test                    # run the native test suite
 ```
 
 The canonical install location is `~/Applications/Recordings.app`. Release installation
-accepts only a finalized ZIP plus its manifest. The manifest binds the bundle identifier, version,
+accepts only a finalized ZIP plus its manifest and operator-supplied authenticated manifest digest,
+exact source commit, and exact version. The manifest binds the bundle identifier, version,
 source commit, architectures, pinned Team ID, designated-requirement digest, companion version and
 hash, app executable hash, archive hash, and trusted signing timestamps. Installation verifies the
-signed embedded provenance, notarization, Gatekeeper, and bidirectional signing compatibility with
+signed embedded provenance, accepted notarization log, Gatekeeper, distribution policy, nested-code
+allowlist, and bidirectional signing compatibility with
 every discovered app copy before mutation. Migrating once from an ad-hoc build to the stable
-release identity requires approving Microphone and Accessibility again; compatible signed updates
+release identity requires exact old/new designated-requirement digests and approving Microphone and Accessibility again; compatible signed updates
 do not reset those permissions. The installer never calls `tccutil reset`, clears quarantine,
-re-signs an artifact, or builds on the target machine.
+re-signs an artifact, or builds on the target machine. A private, fsynced phase journal and verified
+app/state backups recover interrupted replacement before the next install attempt; staged bundles are
+verified statically and only the activated canonical path runs readiness and packaged-helper probes.
 
 Requires macOS 26+; source builds also require a Swift toolchain (Xcode or Command Line Tools).
 Set the OpenAI API key in **Settings** or via `recordings` config;

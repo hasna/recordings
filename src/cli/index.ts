@@ -734,6 +734,11 @@ appCommand
   .requiredOption("--artifact <path>", "Finalized Recordings.app ZIP artifact")
   .requiredOption("--manifest <path>", "Artifact provenance manifest")
   .requiredOption("--expected-team-id <team>", "Required Developer ID TeamIdentifier")
+  .requiredOption("--manifest-sha256 <sha256>", "Authenticated release-manifest SHA-256")
+  .requiredOption("--expected-source-sha <sha>", "Exact approved 40-character source commit")
+  .requiredOption("--expected-version <version>", "Exact approved release version")
+  .option("--expected-old-identity-sha256 <sha256>", "Exact installed identity approved for migration")
+  .option("--expected-new-identity-sha256 <sha256>", "Exact candidate identity approved for migration")
   .option(
     "--allow-signing-identity-migration",
     "Allow one reviewed signer change that requires new macOS permission approval",
@@ -744,6 +749,11 @@ appCommand
     artifact: string;
     manifest: string;
     expectedTeamId: string;
+    manifestSha256: string;
+    expectedSourceSha: string;
+    expectedVersion: string;
+    expectedOldIdentitySha256?: string;
+    expectedNewIdentitySha256?: string;
     allowSigningIdentityMigration?: boolean;
     launch?: boolean;
     launchTimeout: string;
@@ -766,11 +776,23 @@ appCommand
       opts.manifest,
       "--expected-team-id",
       opts.expectedTeamId,
+      "--manifest-sha256",
+      opts.manifestSha256,
+      "--expected-source-sha",
+      opts.expectedSourceSha,
+      "--expected-version",
+      opts.expectedVersion,
       "--launch-timeout",
       opts.launchTimeout,
     ];
     if (opts.allowSigningIdentityMigration) {
       installerArgs.push("--allow-signing-identity-migration");
+      if (opts.expectedOldIdentitySha256) {
+        installerArgs.push("--expected-old-identity-sha256", opts.expectedOldIdentitySha256);
+      }
+      if (opts.expectedNewIdentitySha256) {
+        installerArgs.push("--expected-new-identity-sha256", opts.expectedNewIdentitySha256);
+      }
     }
     if (opts.launch) installerArgs.push("--launch");
 

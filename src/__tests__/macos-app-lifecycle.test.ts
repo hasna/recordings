@@ -61,14 +61,40 @@ function createInstallerFixture() {
   cpSync(join(repositoryRoot, "scripts", "install_macos_app.sh"), installer);
   chmodSync(installer, 0o755);
   cpSync(join(repositoryRoot, "scripts", "macos_artifact.ts"), join(root, "scripts", "macos_artifact.ts"));
+  writeExecutable(
+    join(root, "scripts", "smoke_macos_app.sh"),
+    "#!/usr/bin/env bash\n[ \"${FAIL_RUNTIME_SMOKE:-0}\" = 0 ] || exit 1\nprintf '%s\\n' \"$1\" >> \"$MARKER_DIRECTORY/runtime-smoke.log\"\n",
+  );
 
-  writeExecutable(join(bin, "uname"), "#!/usr/bin/env bash\nprintf 'Darwin\\n'\n");
+  writeExecutable(join(bin, "uname"), "#!/usr/bin/env bash\nif [ \"${1:-}\" = -m ]; then printf 'arm64\\n'; else printf 'Darwin\\n'; fi\n");
+  writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
+  writeExecutable(
+    join(bin, "stat"),
+    "#!/usr/bin/env bash\nif [ \"${2:-}\" = '%u' ] || [ \"${1:-}\" = -f ] && [ \"${2:-}\" = '%u' ]; then id -u; else printf '700\\n'; fi\n",
+  );
+  writeExecutable(join(bin, "ls"), "#!/usr/bin/env bash\nprintf 'drwx------ fixture\\n'\n");
   writeExecutable(
     join(bin, "bun"),
     `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$MARKER_DIRECTORY/bun.log"
 case "$*" in
+  *" journal-write "*|*" journal-get "*|*" journal-recover "*)
+    exec "$REAL_BUN" "$@"
+    ;;
+  *" manifest-get "*"--field minimum_macos"*) printf '26.0\n'; exit 0 ;;
+  *" manifest-get "*"--field architectures"*) printf 'arm64\n'; exit 0 ;;
+  *" manifest-get "*"--field identity"*) printf '%064d\n' 0 | tr '0' c; exit 0 ;;
+  *" requirement-digest "*)
+    if [[ "$*" == *"/unpacked/"* ]] || [[ "$*" == *"/.Recordings-install-"* ]]; then
+      printf '%064d\n' 0 | tr '0' c
+    else
+      printf '%064d\n' 0 | tr '0' d
+    fi
+    exit 0
+    ;;
+  *" assert-transition "*|*" verify-filesystem-tree "*) exit 0 ;;
+  *" verify-active "*) [ "\${FAIL_ACTIVE_VERIFY:-0}" = 0 ]; exit $? ;;
   *" verify-archive "*)
     [ "\${FAIL_ARCHIVE_VERIFY:-0}" = 1 ] && exit 1
     [[ "$*" == *"--team-id \${REQUIRED_TEAM_ID:-EXAMPLE123}"* ]] || exit 1
@@ -77,6 +103,7 @@ case "$*" in
     [ "\${FAIL_APP_VERIFY:-0}" = 1 ] && exit 1
     [ "\${MISSING_TIMESTAMP:-0}" = 1 ] && exit 1
     ;;
+  -e*) exec "$REAL_BUN" "$@" ;;
 esac
 exit 0
 `,
@@ -118,6 +145,7 @@ exit 0
   );
   writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
   writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(join(bin, "syspolicy_check"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/syspolicy.log\"\nexit 0\n");
   writeExecutable(
     join(bin, "mdfind"),
     "#!/usr/bin/env bash\n[ -n \"${MDFIND_RESULT:-}\" ] && printf '%s\\n' \"$MDFIND_RESULT\"\n",
@@ -158,6 +186,12 @@ async function runInstaller(
       fixture.manifest,
       "--expected-team-id",
       "EXAMPLE123",
+      "--manifest-sha256",
+      "a".repeat(64),
+      "--expected-source-sha",
+      "b".repeat(40),
+      "--expected-version",
+      "0.2.12",
       ...args,
     ],
     {
@@ -168,6 +202,7 @@ async function runInstaller(
         CANDIDATE_SOURCE: fixture.candidate,
         CANONICAL_EXECUTABLE: join(app, "Contents", "MacOS", "Recordings"),
         MARKER_DIRECTORY: fixture.markers,
+        REAL_BUN: bunExecutable,
         ...environment,
       },
       stdout: "pipe",
@@ -353,6 +388,43 @@ fi
     expect(existsSync(duplicate)).toBeFalse();
     expect(readdirSync(join(fixture.home, ".hasna", "recordings", "rollbacks")).length).toBe(2);
     expect(existsSync(join(fixture.markers, "tccutil.log"))).toBeFalse();
+    expect(readFileSync(join(fixture.markers, "runtime-smoke.log"), "utf8")).toContain(installed);
+    expect(readFileSync(join(fixture.markers, "syspolicy.log"), "utf8")).toContain(installed);
+  });
+
+  test("recovers a SIGKILL after candidate activation and restores app plus external state", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const stateFile = join(fixture.home, ".hasna", "recordings", "config.json");
+    createApp(installed, "installed");
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, "original-state\n");
+
+    const crashed = await runInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeTrue();
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+    writeFileSync(stateFile, "mutated-after-crash\n");
+
+    const recovered = await runInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(readFileSync(stateFile, "utf8")).toBe("original-state\n");
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeFalse();
+  });
+
+  test("rolls back when post-activation packaged helper verification fails", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runInstaller(fixture, [], { FAIL_ACTIVE_VERIFY: "1" });
+    expect(result.exitCode).not.toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(commands.indexOf("verify-active")).toBeGreaterThan(commands.indexOf("verify-app"));
   });
 });
 
@@ -460,8 +532,31 @@ exit 0
       join(bin, "ditto"),
       "#!/usr/bin/env bash\nif [ \"$1\" = -c ]; then printf archive > \"${@: -1}\"; else cp -R \"$1\" \"$2\"; fi\n",
     );
-    writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(
+      join(bin, "xcrun"),
+      `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MARKER_DIRECTORY/xcrun.log"
+if [[ "$*" == *"notarytool submit"* ]]; then
+  if [ "\${NOTARY_SUBMIT_REJECTED:-0}" = 1 ]; then
+    printf '{"id":"11111111-1111-4111-8111-111111111111","status":"Invalid"}\n'
+  else
+    printf '{"id":"11111111-1111-4111-8111-111111111111","status":"Accepted"}\n'
+  fi
+elif [[ "$*" == *"notarytool log"* ]]; then
+  if [ "\${NOTARY_LOG_ISSUES:-0}" = 1 ]; then
+    printf '{"jobId":"11111111-1111-4111-8111-111111111111","status":"Accepted","issues":[{"severity":"warning"}]}\n'
+  else
+    printf '{"jobId":"11111111-1111-4111-8111-111111111111","status":"Accepted","issues":null}\n'
+  fi
+fi
+exit 0
+`,
+    );
     writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(
+      join(bin, "syspolicy_check"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/syspolicy.log\"\nexit 0\n",
+    );
     writeExecutable(join(bin, "plistbuddy"), "#!/usr/bin/env bash\nprintf '0.2.12\\n'\n");
     writeExecutable(
       join(bin, "plutil"),
@@ -644,5 +739,17 @@ fi
     expect(appSigning).toBeGreaterThan(provenance);
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos.zip"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos.manifest.json"))).toBeTrue();
+    expect(readFileSync(join(fixture.markers, "xcrun.log"), "utf8")).toContain("notarytool log");
+    expect(readFileSync(join(fixture.markers, "syspolicy.log"), "utf8")).toContain("distribution");
+  });
+
+  test("rejects a rejected submission or accepted notary log with issues", async () => {
+    const rejected = await runBuild(createBuildFixture(), { NOTARY_SUBMIT_REJECTED: "1" });
+    expect(rejected.exitCode).not.toBe(0);
+    expect(rejected.stderr).toContain("not accepted");
+
+    const issues = await runBuild(createBuildFixture(), { NOTARY_LOG_ISSUES: "1" });
+    expect(issues.exitCode).not.toBe(0);
+    expect(issues.stderr).toContain("reported issues");
   });
 });

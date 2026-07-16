@@ -18,6 +18,9 @@ const repoRoot = process.cwd();
 const roots = [
   "package.json",
   "README.md",
+  "LICENSE",
+  "Dockerfile.package",
+  "bun.lock",
   "scripts",
   "src/storage.ts",
   "src/index.ts",
@@ -73,6 +76,10 @@ const legacyDatabasePatterns: PatternCheck[] = [
   },
 ];
 
+// The production container installs AWS's public Postgres CA bundle. This is transport
+// trust material, not the retired client-side database integration the guard removes.
+const approvedLegacyMarkerFiles = new Set(["Dockerfile.package"]);
+
 function isText(buffer: Buffer): boolean {
   return !buffer.includes(0);
 }
@@ -105,9 +112,11 @@ for (const file of roots.flatMap((root) => collectFiles(join(repoRoot, root)))) 
     }
   }
 
-  for (const check of legacyDatabasePatterns) {
-    if (check.pattern.test(content)) {
-      findings.push({ file: relativeFile, marker: check.label, kind: "retired-cloud" });
+  if (!approvedLegacyMarkerFiles.has(relativeFile)) {
+    for (const check of legacyDatabasePatterns) {
+      if (check.pattern.test(content)) {
+        findings.push({ file: relativeFile, marker: check.label, kind: "retired-cloud" });
+      }
     }
   }
 

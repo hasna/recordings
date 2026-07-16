@@ -2,7 +2,7 @@
 // Regenerate: bun run scripts/generate-sdk.ts
 
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
-// Source: Recordings V1 API 0.2.12
+// Source: Recordings V1 API 0.2.13
 
 export interface Recording { "id"?: string; "audio_path"?: string | null; "raw_text"?: string; "processed_text"?: string | null; "processing_mode"?: "raw" | "enhanced"; "model_used"?: string; "enhancement_model"?: string | null; "duration_ms"?: number; "language"?: string | null; "tags"?: Array<string>; "agent_id"?: string | null; "project_id"?: string | null; "session_id"?: string | null; "goal"?: string | null; "role"?: string | null; "task_list_id"?: string | null; "machine_id"?: string | null; "metadata"?: Record<string, unknown>; "created_at"?: string }
 

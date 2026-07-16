@@ -91,6 +91,8 @@ struct RuntimeSmokeResult: Codable {
     let mainWindowIsVisible: Bool
     let mainWindowCanBecomeKey: Bool
     let mainWindowIsKey: Bool
+    let resolvedCompanionPath: String?
+    let companionCapabilitiesPassed: Bool
 }
 
 enum RuntimeSmokeAccessibilityObservationStatus: String {
