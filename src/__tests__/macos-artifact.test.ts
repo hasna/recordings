@@ -747,6 +747,59 @@ describe("macOS artifact manifest", () => {
 });
 
 describe("macOS install journal compatibility", () => {
+  test.each([
+    [4, undefined, "invalid original state mode"],
+    [4, "750", "invalid original state mode"],
+    [4, "777", "invalid original state mode"],
+    [3, "755", "unsupported state-mode fields"],
+  ])("rejects untrusted schema-%i original state mode %s", (schemaVersion, originalStateMode, message) => {
+    const root = mkdtempSync(join(tmpdir(), "recordings-state-mode-journal-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const appParent = join(home, "Applications");
+    const transaction = join(appParent, ".Recordings-transaction.state-mode");
+    const journalPath = join(appParent, ".Recordings-install-transaction.json");
+    mkdirSync(appParent, { recursive: true });
+    writeFileSync(
+      journalPath,
+      `${JSON.stringify({
+        schema_version: schemaVersion,
+        phase: "committed",
+        transaction_dir: transaction,
+        app_parent: appParent,
+        app_destination: join(appParent, "Recordings.app"),
+        data_dir: join(home, ".hasna", "recordings"),
+        state_backup: join(transaction, "state.initial"),
+        state_backup_sha256: "1".repeat(64),
+        originals: [],
+        was_running: false,
+        expected_manifest_sha256: "2".repeat(64),
+        expected_source_sha: "3".repeat(40),
+        expected_version: "0.2.13",
+        artifact_policy: "release",
+        approved_target: "fleet",
+        approved_target_identity_kind: "none",
+        approved_target_identity_sha256: "none",
+        builder_identity_kind: "none",
+        candidate_identity_sha256: "4".repeat(64),
+        previous_identity_sha256: "none",
+        ...(originalStateMode === undefined ? {} : { original_state_mode: originalStateMode }),
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const result = Bun.spawnSync([
+      process.execPath,
+      join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
+      "journal-get",
+      "--journal",
+      journalPath,
+      "--field",
+      "phase",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain(message);
+  });
+
   test("reads a pre-policy schema-v2 release journal as release/fleet", () => {
     const root = mkdtempSync(join(tmpdir(), "recordings-legacy-journal-"));
     temporaryDirectories.push(root);

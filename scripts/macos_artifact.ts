@@ -19,6 +19,8 @@ import {
   statSync,
   writeFileSync,
   fsyncSync,
+  fchmodSync,
+  fstatSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -1324,7 +1326,7 @@ function verifyActiveApp(
 }
 
 export type InstallJournal = {
-  schema_version: 2 | 3;
+  schema_version: 2 | 3 | 4;
   phase: string;
   transaction_dir: string;
   app_parent: string;
@@ -1344,6 +1346,7 @@ export type InstallJournal = {
   builder_identity_kind?: TargetIdentityKind | "none";
   candidate_identity_sha256: string;
   previous_identity_sha256: string;
+  original_state_mode?: "700" | "755";
 };
 
 function writeDurableJournal(path: string, journal: InstallJournal): void {
@@ -1370,8 +1373,12 @@ function writeDurableJournal(path: string, journal: InstallJournal): void {
 }
 
 function journalArgument(): InstallJournal {
+  const originalStateMode = argument("--original-state-mode");
+  if (originalStateMode !== "700" && originalStateMode !== "755") {
+    throw new Error("install transaction journal has an invalid original state mode");
+  }
   const value: InstallJournal = {
-    schema_version: 3,
+    schema_version: 4,
     phase: argument("--phase"),
     transaction_dir: argument("--transaction-dir"),
     app_parent: argument("--app-parent"),
@@ -1393,6 +1400,7 @@ function journalArgument(): InstallJournal {
     builder_identity_kind: argument("--builder-identity-kind") as TargetIdentityKind | "none",
     candidate_identity_sha256: argument("--candidate-identity-sha256"),
     previous_identity_sha256: argument("--previous-identity-sha256"),
+    original_state_mode: originalStateMode,
   };
   for (let index = 0; index < Bun.argv.length; index += 1) {
     if (Bun.argv[index] === "--original") {
@@ -1408,7 +1416,11 @@ function journalArgument(): InstallJournal {
 
 function readJournal(path: string): InstallJournal {
   const journal = readJson<InstallJournal>(path);
-  if ((journal.schema_version !== 2 && journal.schema_version !== 3) || !journal.transaction_dir || !journal.phase) {
+  if (
+    (journal.schema_version !== 2 && journal.schema_version !== 3 && journal.schema_version !== 4) ||
+    !journal.transaction_dir ||
+    !journal.phase
+  ) {
     throw new Error("invalid install transaction journal");
   }
   const allowedPhases = new Set([
@@ -1434,6 +1446,16 @@ function readJournal(path: string): InstallJournal {
   ) {
     throw new Error("install transaction journal has invalid release identity fields");
   }
+  if (journal.schema_version !== 4 && journal.original_state_mode !== undefined) {
+    throw new Error("legacy install transaction journal contains unsupported state-mode fields");
+  }
+  if (journal.schema_version === 4) {
+    if (journal.original_state_mode !== "700" && journal.original_state_mode !== "755") {
+      throw new Error("install transaction journal has an invalid original state mode");
+    }
+  } else {
+    journal.original_state_mode = "700";
+  }
   if (journal.schema_version === 2) {
     if (
       journal.artifact_policy !== undefined ||
@@ -1455,7 +1477,7 @@ function readJournal(path: string): InstallJournal {
     journal.builder_identity_kind ??=
       journal.artifact_policy === "local_only" ? LEGACY_LOCAL_TARGET_IDENTITY_KIND : "none";
   }
-  if (journal.schema_version === 3 && (
+  if ((journal.schema_version === 3 || journal.schema_version === 4) && (
     (journal.artifact_policy !== "release" && journal.artifact_policy !== "local_only") ||
     !journal.approved_target ||
     (journal.artifact_policy === "release" &&
@@ -1522,6 +1544,30 @@ function fsyncDirectory(path: string): void {
   } finally {
     closeSync(descriptor);
   }
+}
+
+function transitionStateMode(
+  path: string,
+  expectedUid: number,
+  desiredMode: "700" | "755",
+  allowedCurrentModes: ReadonlySet<string>,
+): void {
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    const details = fstatSync(descriptor);
+    const currentMode = (details.mode & 0o777).toString(8);
+    if (!details.isDirectory() || details.uid !== expectedUid || !allowedCurrentModes.has(currentMode)) {
+      throw new Error("state-mode transition found an unsafe type, owner, or mode");
+    }
+    if (currentMode !== desiredMode) fchmodSync(descriptor, Number.parseInt(desiredMode, 8));
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  fsyncDirectory(dirname(path));
 }
 
 function fsyncTree(root: string): void {
@@ -1600,6 +1646,7 @@ function recoverJournal(path: string): void {
   }
 
   const mutationPhases = new Set([
+    "processes-stopped",
     "originals-moving",
     "originals-moved",
     "candidate-moving",
@@ -1641,6 +1688,12 @@ function recoverJournal(path: string): void {
     fsyncTree(journal.data_dir);
     fsyncDirectory(dirname(journal.data_dir));
   }
+  transitionStateMode(
+    journal.data_dir,
+    uid,
+    journal.original_state_mode ?? "700",
+    new Set(["700", journal.original_state_mode ?? "700"]),
+  );
   rmSync(path, { force: true });
   fsyncDirectory(dirname(path));
   rmSync(journal.transaction_dir, { recursive: true, force: true });
@@ -1823,6 +1876,13 @@ function main(): void {
     journalGet(argument("--journal"), argument("--field"));
   } else if (command === "journal-recover") {
     recoverJournal(argument("--journal"));
+  } else if (command === "state-mode-harden") {
+    transitionStateMode(
+      argument("--path"),
+      Number(argument("--uid")),
+      "700",
+      new Set(["755"]),
+    );
   } else if (command === "manifest-get") {
     manifestGet(argument("--manifest"), argument("--field"));
   } else {

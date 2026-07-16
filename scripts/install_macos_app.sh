@@ -237,6 +237,7 @@ fi
 
 [ -x "$RUNTIME_SMOKE" ] || { echo "Packaged runtime smoke verifier is missing." >&2; exit 1; }
 DATA_DIR="${HOME}/.hasna/recordings"
+DATA_PARENT="$(dirname "$DATA_DIR")"
 APP_DEST="${HOME}/Applications/Recordings.app"
 APP_PARENT="$(dirname "$APP_DEST")"
 ROLLBACK_DIR="${DATA_DIR}/rollbacks"
@@ -278,26 +279,86 @@ verify_secure_parent() {
   fi
 }
 
-[ ! -L "$APP_PARENT" ] && [ ! -L "$DATA_DIR" ] && [ ! -L "$ROLLBACK_DIR" ] || {
-  echo "Recordings install or rollback parent must not be a symlink." >&2
-  exit 1
+verify_secure_file() {
+  local path="$1"
+  local label="$2"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] && \
+      [ "$(stat -f '%u' "$path")" = "$(id -u)" ] && \
+      [ "$(stat -f '%Lp' "$path")" = 600 ] || {
+      echo "${label} has an unsafe type, owner, or mode." >&2
+      exit 1
+    }
+    if ls -lde "$path" | tail -n +2 | grep -q '[^[:space:]]'; then
+      echo "${label} has an unexpected ACL." >&2
+      exit 1
+    fi
+  fi
 }
-mkdir -p "${DATA_DIR}/audio" "$ROLLBACK_DIR" "$APP_PARENT"
-verify_secure_parent "$APP_PARENT"
-verify_secure_parent "$DATA_DIR" 1
-verify_secure_parent "$ROLLBACK_DIR" 1
-if [ -e "$JOURNAL_PATH" ] || [ -L "$JOURNAL_PATH" ]; then
-  [ -f "$JOURNAL_PATH" ] && [ ! -L "$JOURNAL_PATH" ] && \
-    [ "$(stat -f '%u' "$JOURNAL_PATH")" = "$(id -u)" ] && \
-    [ "$(stat -f '%Lp' "$JOURNAL_PATH")" = 600 ] || {
-    echo "Install transaction journal has an unsafe type, owner, or mode." >&2
+
+verify_safe_home_ancestor() {
+  local path="$1"
+  [ -d "$path" ] && [ ! -L "$path" ] || {
+    echo "Home ancestor must be a non-symlink directory." >&2
     exit 1
   }
-  if ls -lde "$JOURNAL_PATH" | tail -n +2 | grep -q '[^[:space:]]'; then
-    echo "Install transaction journal has an unexpected ACL." >&2
+  [ "$(stat -f '%u' "$path")" = "$(id -u)" ] || {
+    echo "Home ancestor has an unexpected owner." >&2
+    exit 1
+  }
+  home_mode="$(stat -f '%Lp' "$path")"
+  case "$home_mode" in
+    *[2367][0-7]|*[0-7][2367])
+      echo "Home ancestor is group/world writable." >&2
+      exit 1
+      ;;
+  esac
+  home_acl="$(ls -lde "$path" | tail -n +2)"
+  if [ -n "$home_acl" ] && printf '%s\n' "$home_acl" | grep -v ' deny ' | grep -q '[^[:space:]]'; then
+    echo "Home ancestor has an ACL that grants access." >&2
     exit 1
   fi
+}
+
+verify_existing_state_root() {
+  [ -e "$DATA_DIR" ] || [ -L "$DATA_DIR" ] || return 0
+  [ -d "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ] || {
+    echo "Recordings state path must be a non-symlink directory." >&2
+    exit 1
+  }
+  [ "$(stat -f '%u' "$DATA_DIR")" = "$(id -u)" ] || {
+    echo "Recordings state path has an unexpected owner." >&2
+    exit 1
+  }
+  state_mode="$(stat -f '%Lp' "$DATA_DIR")"
+  case "$state_mode" in
+    700|755) ;;
+    *) echo "Recordings state path must have mode 700 or the supported legacy mode 755." >&2; exit 1 ;;
+  esac
+  if ls -lde "$DATA_DIR" | tail -n +2 | grep -q '[^[:space:]]'; then
+    echo "Recordings state path has an unexpected ACL." >&2
+    exit 1
+  fi
+  bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$DATA_DIR" --uid "$(id -u)"
+}
+
+# The target identity above and every existing state path are validated read-only
+# before creating an install parent, lock, journal, or state child.
+verify_safe_home_ancestor "$HOME"
+if [ -e "$DATA_PARENT" ] || [ -L "$DATA_PARENT" ]; then
+  verify_secure_parent "$DATA_PARENT"
 fi
+if [ -e "$APP_PARENT" ] || [ -L "$APP_PARENT" ]; then
+  verify_secure_parent "$APP_PARENT"
+fi
+verify_existing_state_root
+[ ! -L "$ROLLBACK_DIR" ] || { echo "Recordings rollback parent must not be a symlink." >&2; exit 1; }
+
+if [ ! -e "$APP_PARENT" ]; then
+  mkdir -m 700 "$APP_PARENT"
+fi
+verify_secure_parent "$APP_PARENT"
+verify_secure_file "$JOURNAL_PATH" "Install transaction journal"
 
 release_install_lock() {
   if [ "$LOCK_OWNED" -eq 1 ] && [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
@@ -446,6 +507,19 @@ if [ -f "$JOURNAL_PATH" ]; then
   fi
 fi
 
+# Recheck under the install lock. New state is private from creation; legacy
+# state remains read-only until its original mode is in the durable journal.
+verify_existing_state_root
+if [ ! -e "$DATA_PARENT" ]; then
+  mkdir -m 700 "$DATA_PARENT"
+fi
+verify_secure_parent "$DATA_PARENT"
+if [ ! -e "$DATA_DIR" ]; then
+  mkdir -m 700 "$DATA_DIR"
+fi
+verify_existing_state_root
+ORIGINAL_STATE_MODE="$(stat -f '%Lp' "$DATA_DIR")"
+
 bun "$ARTIFACT_TOOL" verify-archive \
   --archive "$ARTIFACT_PATH" \
   --manifest "$MANIFEST_PATH" \
@@ -480,8 +554,7 @@ case " ${MANIFEST_ARCHITECTURES} " in
 esac
 
 verify_secure_parent "$APP_PARENT"
-verify_secure_parent "$DATA_DIR" 1
-verify_secure_parent "$ROLLBACK_DIR" 1
+verify_existing_state_root
 
 WORK_DIR="$(mktemp -d)"
 UNPACK_DIR="${WORK_DIR}/unpacked"
@@ -650,6 +723,7 @@ write_journal() {
     --builder-identity-kind "$MANIFEST_BUILDER_IDENTITY_KIND"
     --candidate-identity-sha256 "$candidate_identity_sha256"
     --previous-identity-sha256 "$previous_identity_sha256"
+    --original-state-mode "$ORIGINAL_STATE_MODE"
   )
   [ "$was_running" -eq 0 ] || arguments+=(--was-running)
   local index
@@ -798,6 +872,7 @@ fi
 
 chmod 700 "$TRANSACTION_DIR"
 mkdir -m 700 "$TRANSACTION_DIR/apps"
+mkdir -m 700 "$TRANSACTION_DIR/archives"
 verify_secure_parent "$TRANSACTION_DIR"
 STATE_BACKUP="$TRANSACTION_DIR/state.initial"
 ditto "$DATA_DIR" "$STATE_BACKUP"
@@ -805,7 +880,6 @@ if ! diff -qr "$DATA_DIR" "$STATE_BACKUP" >/dev/null; then
   echo "Recordings state backup verification failed before replacement." >&2
   exit 1
 fi
-chmod -R go-rwx "$STATE_BACKUP"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STATE_BACKUP" --uid "$(id -u)"
 bun "$ARTIFACT_TOOL" fsync-tree --path "$STATE_BACKUP"
 bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR"
@@ -831,10 +905,10 @@ for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
   stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-${ARCHIVE_SEQUENCE}"
   ditto -c -k --sequesterRsrc --keepParent \
     "$existing_app" \
-    "$ROLLBACK_DIR/Recordings-pre-install-${stamp}.zip"
-  bun "$ARTIFACT_TOOL" fsync-tree --path "$ROLLBACK_DIR/Recordings-pre-install-${stamp}.zip"
-  bun "$ARTIFACT_TOOL" fsync-directory --path "$ROLLBACK_DIR"
+    "$TRANSACTION_DIR/archives/Recordings-pre-install-${stamp}.zip"
+  bun "$ARTIFACT_TOOL" fsync-tree --path "$TRANSACTION_DIR/archives/Recordings-pre-install-${stamp}.zip"
 done
+bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR/archives"
 
 ditto "$CANDIDATE_APP" "$STAGED_APP"
 bun "$ARTIFACT_TOOL" verify-app \
@@ -857,7 +931,6 @@ if ! diff -qr "$DATA_DIR" "$NEXT_STATE_BACKUP" >/dev/null; then
   echo "Stopped-state backup verification failed before replacement." >&2
   exit 1
 fi
-chmod -R go-rwx "$NEXT_STATE_BACKUP"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$NEXT_STATE_BACKUP" --uid "$(id -u)"
 bun "$ARTIFACT_TOOL" fsync-tree --path "$NEXT_STATE_BACKUP"
 bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR"
@@ -866,6 +939,29 @@ maybe_crash_after_phase state-refresh-copied-before-journal
 STATE_BACKUP="$NEXT_STATE_BACKUP"
 STATE_BACKUP_SHA256="$NEXT_STATE_BACKUP_SHA256"
 write_journal processes-stopped
+
+verify_existing_state_root
+[ "$(stat -f '%Lp' "$DATA_DIR")" = "$ORIGINAL_STATE_MODE" ] || {
+  echo "Recordings state mode changed after transactional backup." >&2
+  exit 1
+}
+if [ "$ORIGINAL_STATE_MODE" = 755 ]; then
+  bun "$ARTIFACT_TOOL" state-mode-harden --path "$DATA_DIR" --uid "$(id -u)"
+  maybe_crash_after_phase state-mode-hardened
+  [ "${RECORDINGS_TEST_FAIL_AFTER_STATE_MODE_HARDEN:-0}" = 0 ] || exit 1
+fi
+verify_secure_parent "$DATA_DIR" 1
+mkdir -m 700 -p "${DATA_DIR}/audio" "$ROLLBACK_DIR"
+verify_secure_parent "$ROLLBACK_DIR" 1
+bun "$ARTIFACT_TOOL" fsync-directory --path "$ROLLBACK_DIR"
+bun "$ARTIFACT_TOOL" fsync-directory --path "$DATA_DIR"
+
+for rollback_archive in "$TRANSACTION_DIR"/archives/*.zip; do
+  [ -e "$rollback_archive" ] || continue
+  mv "$rollback_archive" "$ROLLBACK_DIR/$(basename "$rollback_archive")"
+  bun "$ARTIFACT_TOOL" fsync-tree --path "$ROLLBACK_DIR/$(basename "$rollback_archive")"
+  bun "$ARTIFACT_TOOL" fsync-directory --path "$ROLLBACK_DIR"
+done
 
 write_journal originals-moving
 for ((move_index = 0; move_index < MOVED_ORIGINAL_COUNT; move_index++)); do
