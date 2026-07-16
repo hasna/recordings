@@ -2,34 +2,6 @@
 import SwiftUI
 import RecordingsLib
 
-struct MenuBarPresentation: Equatable {
-    let iconName: String
-    let accessibilityLabel: String
-    let statusText: String
-
-    init(
-        isRecording: Bool,
-        isTranscribing: Bool,
-        idleStatus: String = "Ready",
-        busyStatus: String = "Transcribing"
-    ) {
-        if isRecording {
-            iconName = "waveform"
-            accessibilityLabel = "Recordings, recording"
-            statusText = "Recording"
-        } else if isTranscribing {
-            iconName = "ellipsis.circle"
-            let normalizedBusyStatus = busyStatus.trimmingCharacters(in: .punctuationCharacters)
-            accessibilityLabel = "Recordings, \(normalizedBusyStatus.lowercased())"
-            statusText = normalizedBusyStatus
-        } else {
-            iconName = "mic.fill"
-            accessibilityLabel = "Recordings"
-            statusText = idleStatus
-        }
-    }
-}
-
 struct MenuBarStatusLabel: View {
     @ObservedObject var store: RecordingsStore
 
@@ -41,9 +13,8 @@ struct MenuBarStatusLabel: View {
     private var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
-            isTranscribing: store.engine.isTranscribing,
-            idleStatus: store.engine.statusMessage,
-            busyStatus: store.engine.statusMessage
+            canStartRecording: store.engine.canStartRecording,
+            statusMessage: store.engine.statusMessage
         )
     }
 }
@@ -55,12 +26,12 @@ struct MenuBarStatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: statusIcon)
+                Image(systemName: presentation.iconName)
                     .foregroundStyle(statusColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Recordings")
                         .font(.headline)
-                    Text(statusText)
+                    Text(presentation.statusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -73,7 +44,7 @@ struct MenuBarStatusView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(store.engine.isRecording ? .red : .accentColor)
-            .disabled(store.engine.isTranscribing)
+            .disabled(!presentation.primaryActionEnabled)
 
             Divider()
 
@@ -101,24 +72,15 @@ struct MenuBarStatusView: View {
         .frame(width: 260)
     }
 
-    private var statusIcon: String {
-        presentation.iconName
-    }
-
     private var statusColor: Color {
         store.engine.isRecording ? .red : .accentColor
-    }
-
-    private var statusText: String {
-        presentation.statusText
     }
 
     private var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
-            isTranscribing: store.engine.isTranscribing,
-            idleStatus: store.engine.statusMessage,
-            busyStatus: store.engine.statusMessage
+            canStartRecording: store.engine.canStartRecording,
+            statusMessage: store.engine.statusMessage
         )
     }
 

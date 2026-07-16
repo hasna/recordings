@@ -13,6 +13,54 @@ public enum RecordingsCLI {
         FileManager.default.homeDirectoryForCurrentUser.path
     }
 
+    public struct PackagedCompanionProbe: Sendable, Equatable {
+        public let executablePath: String
+        public let version: String
+
+        public init(executablePath: String, version: String) {
+            self.executablePath = executablePath
+            self.version = version
+        }
+    }
+
+    /// Exercise the resolver and the read/write capabilities the installed app depends on.
+    /// A packaged app must resolve only its embedded helper; PATH fallbacks are rejected.
+    public static func probePackagedCompanion(home: String) throws -> PackagedCompanionProbe {
+        let command = CLIRunner.resolveCommand(home: home)
+        let expected = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/recordings").path
+        guard Bundle.main.bundleURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
+              command.executable == expected,
+              command.argumentsPrefix.isEmpty else {
+            throw Failure(message: "Packaged companion resolver did not select the embedded helper")
+        }
+        let versionOutput = CLIRunner.run(["--version"], home: home)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let error = CLIRunner.parseError(versionOutput) { throw Failure(message: error) }
+        let expectedVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        guard !versionOutput.isEmpty, versionOutput == expectedVersion else {
+            throw Failure(message: "Packaged companion version does not match the app")
+        }
+        let project = try registerProject(
+            name: "Activated Helper Contract",
+            path: "recordings-app://install/activated-helper-contract",
+            description: "Installed app resolver verification",
+            home: home
+        )
+        guard project.name == "Activated Helper Contract" else {
+            throw Failure(message: "Packaged companion project capability failed")
+        }
+        let saved = CLIRunner.run(
+            ["--json", "save-text", "Activated helper contract", "--source", "native_install_contract", "--post-processing", "off"],
+            home: home
+        )
+        struct SavedRecording: Decodable { let raw_text: String }
+        let recording = try decode(SavedRecording.self, from: saved)
+        guard recording.raw_text == "Activated helper contract" else {
+            throw Failure(message: "Packaged companion recording capability failed")
+        }
+        return PackagedCompanionProbe(executablePath: command.executable, version: versionOutput)
+    }
+
     // MARK: - Library
 
     public static func list(limit: Int = 100, offset: Int = 0, projectId: String? = nil, home: String = defaultHome) throws -> [Recording] {

@@ -23,10 +23,10 @@ private final class PermissionRequestResultBox: @unchecked Sendable {
 }
 
 /// Recordings — a full native macOS app. The main window is the Recordings workspace
-/// (record + library); the menu-bar surface, global shortcuts, and dictation/command modes
-/// keep working while the window is in the background.
+/// (record + library); the menu-bar surface, global shortcuts, and the intent-routed
+/// recording flow keep working while the window is in the background.
 /// Keeps the app (and therefore the RecordingEngine + global shortcuts) alive after the
-/// last window is closed, so background dictation/command shortcuts keep working.
+/// last window is closed, so background recording shortcuts keep working.
 @MainActor
 final class RecordingsAppDelegate: NSObject, NSApplicationDelegate {
     weak var state: RecordingsAppState?
@@ -127,6 +127,34 @@ final class RecordingsAppState: ObservableObject {
             }
             return
         }
+        if mode == "resolver" {
+            let probeHome = FileManager.default.temporaryDirectory
+                .appendingPathComponent("recordings-resolver-smoke-\(UUID().uuidString)")
+            do {
+                try FileManager.default.createDirectory(at: probeHome, withIntermediateDirectories: true)
+                let probe = try RecordingsCLI.probePackagedCompanion(home: probeHome.path)
+                try? FileManager.default.removeItem(at: probeHome)
+                finishRuntimeSmoke(
+                    mode: mode,
+                    surfaceCount: 0,
+                    labels: [],
+                    accessibility: RuntimeSmokeAccessibilitySnapshot.processMenuBarExtras(),
+                    resolvedCompanionPath: probe.executablePath,
+                    companionCapabilitiesPassed: true
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: probeHome)
+                fputs("Packaged companion resolver smoke failed: \(error)\n", stderr)
+                finishRuntimeSmoke(
+                    mode: mode,
+                    surfaceCount: 0,
+                    labels: [],
+                    accessibility: RuntimeSmokeAccessibilitySnapshot.processMenuBarExtras(),
+                    companionCapabilitiesPassed: false
+                )
+            }
+            return
+        }
         guard mode == "normal", let runtimeSmokeProbe else {
             finishRuntimeSmoke(
                 mode: mode,
@@ -188,7 +216,9 @@ final class RecordingsAppState: ObservableObject {
         surfaceCount: Int,
         labels: [String],
         accessibility: RuntimeSmokeAccessibilitySnapshot,
-        retainedWindowReused: Bool = false
+        retainedWindowReused: Bool = false,
+        resolvedCompanionPath: String? = nil,
+        companionCapabilitiesPassed: Bool = false
     ) {
         guard let runtimeSmokeOutputPath else { return }
         let result = RuntimeSmokeResult(
@@ -208,7 +238,9 @@ final class RecordingsAppState: ObservableObject {
             applicationIsActive: NSApplication.shared.isActive,
             mainWindowIsVisible: mainWindow?.isVisible ?? false,
             mainWindowCanBecomeKey: mainWindow?.canBecomeKey ?? false,
-            mainWindowIsKey: mainWindow?.isKeyWindow ?? false
+            mainWindowIsKey: mainWindow?.isKeyWindow ?? false,
+            resolvedCompanionPath: resolvedCompanionPath,
+            companionCapabilitiesPassed: companionCapabilitiesPassed
         )
         do {
             let data = try JSONEncoder().encode(result)

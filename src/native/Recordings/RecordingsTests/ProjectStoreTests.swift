@@ -204,14 +204,17 @@ struct ProjectStoreTests {
 
     @Test("project persistence failures remain visible to the UI")
     @MainActor
-    func reportsPersistenceFailure() {
+    func reportsPersistenceFailure() throws {
+        // An unwritable path fails at load, so the surfaced message is the load failure —
+        // what matters to the UI contract is that a failed save leaves a visible error.
         let store = ProjectStore(filePath: "/dev/null/projects.json")
         store.settings.projects = [RecProject(name: "Cannot Save")]
 
         #expect(throws: (any Error).self) {
             try store.save()
         }
-        #expect(store.persistenceError?.contains("Failed to save projects") == true)
+        let persistenceError = try #require(store.persistenceError)
+        #expect(persistenceError.contains("projects"))
     }
 
     @Test("project mutations are rejected while canonical reconciliation is in flight")

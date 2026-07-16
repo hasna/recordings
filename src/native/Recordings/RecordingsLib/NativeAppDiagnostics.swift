@@ -9,6 +9,9 @@ public enum NativeErrorSanitizer {
         (#"(?i)((?:[{,]\s*)"?(?:(?:api|secret|private)[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?(?:secret|password)|password|passcode|token|secret|private)"?\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)"#, "$1[REDACTED]"),
         (#"(?i)((?:[?&]|\b)(?:(?:api|secret|private)[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?(?:secret|password)|password|passcode|token|secret|private)=)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s,;]+)"#, "$1[REDACTED]"),
         (#"(?i)((?:api\s+key(?:\s+provided)?|client\s+(?:secret|password)|password|passcode|private\s+key|secret(?:\s+key)?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;\n}]+)"#, "$1[REDACTED]"),
+        // Bare "private:" labels a value only at the start of a clause; mid-sentence uses
+        // like "resource is private: access denied" are ordinary error prose and stay.
+        (#"(?i)((?:^|[;,{\n])\s*)(private\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;\n}]+)"#, "$1$2[REDACTED]"),
     ]
 
     public static func sanitize(_ message: String) -> String {

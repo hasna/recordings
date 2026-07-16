@@ -284,6 +284,875 @@ struct CLIRunnerTests {
         expectProcessIsGone(try #require(Self.readPID(from: childPidFile)))
     }
 
+    @Test("a total wall-clock budget bounds execution, termination grace, kill grace, and pipe drain together")
+    func totalWallClockBudgetBoundsCleanup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-cli-wall-budget-\(UUID().uuidString)")
+        let script = root.appendingPathComponent("ignore-term.sh")
+        let pidFile = root.appendingPathComponent("pid")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            if let pid = Self.readPID(from: pidFile) {
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > "$1"
+        while :; do /bin/sleep 0.05; done
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let startedAt = ContinuousClock.now
+        var lifecycleEvents: [CLIRunner.ProcessLifecycleEvent] = []
+        do {
+            _ = try CLIRunner.runExecutable(
+                script.path,
+                arguments: [pidFile.path],
+                executionTimeout: 60,
+                totalWallClockBudget: 2,
+                lifecycleObserver: { lifecycleEvents.append($0) }
+            )
+            Issue.record("command unexpectedly completed inside its wall budget")
+        } catch let error as CLIRunner.ExecutionError {
+            guard case let .timedOut(_, seconds) = error else {
+                Issue.record("command returned the wrong execution error: \(error)")
+                return
+            }
+            // The execution window is the budget minus the cleanup reserve, never the
+            // caller's larger execution timeout.
+            #expect(seconds == 2 - CLIRunner.wallClockCleanupReserve)
+        }
+        #expect(ContinuousClock.now - startedAt < .seconds(2))
+        #expect(lifecycleEvents.contains(.processGroupSignaled(SIGTERM)))
+        #expect(lifecycleEvents.contains(.processGroupSignaled(SIGKILL)))
+        if let pid = Self.readPID(from: pidFile) {
+            expectProcessIsGone(pid)
+        }
+    }
+
+    @Test("a hung rewrite helper returns within the 10 s interactive budget, cleanup included")
+    @MainActor
+    func hungRewriteHelperReturnsWithinInteractiveBudget() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-rewrite-budget-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        let pidFile = home.appendingPathComponent("pid")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > '\(pidFile.path)'
+        while :; do /bin/sleep 0.05; done
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        defer {
+            if let pid = Self.readPID(from: pidFile) {
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        // The production seam exactly as runCommandMode uses it: the engine's default
+        // commandCLI closure on a detached task, budgeted by commandRewriteTimeout — the
+        // observable wall time must stay inside the budget even though the helper never
+        // exits on its own and ignores SIGTERM.
+        let runCLI = RecordingEngine().commandCLI
+        let homePath = home.path
+        let startedAt = ContinuousClock.now
+        let output = await Task.detached {
+            runCLI(["rewrite-selection"], homePath, RecordingEngine.commandRewriteTimeout)
+        }.value
+        let elapsed = ContinuousClock.now - startedAt
+
+        #expect(elapsed < .seconds(RecordingEngine.commandRewriteTimeout))
+        #expect(output.hasPrefix("ERROR:"))
+        #expect(output.contains("timed out"))
+    }
+
+    @Test("an exhausted rewrite deadline with pipes held by an escaped descendant returns under the public ceiling")
+    @MainActor
+    func exhaustedRewriteDeadlineWithHeldPipesReturnsUnderCeiling() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-rewrite-exhaustion-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        let leaderPidFile = home.appendingPathComponent("leader-pid")
+        let holderPidFile = home.appendingPathComponent("holder-pid")
+        let markerFile = home.appendingPathComponent("holder-epipe")
+        let holderSource = home.appendingPathComponent("pipe-holder.c")
+        let holderBinary = home.appendingPathComponent("pipe-holder")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer {
+            if let holderPid = Self.readPID(from: holderPidFile) {
+                _ = Darwin.kill(holderPid, SIGKILL)
+            }
+            if let leaderPid = Self.readPID(from: leaderPidFile) {
+                _ = Darwin.kill(-leaderPid, SIGKILL)
+                _ = Darwin.kill(leaderPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        // The holder escapes the CLI process group via setsid before any group-directed
+        // signal can reach it, inherits both capture pipes, and keeps their write ends open
+        // until the runner closes its read ends — at which point every write fails with
+        // EPIPE and the marker file records that both descriptor readers were shut down.
+        try """
+        #include <errno.h>
+        #include <signal.h>
+        #include <stdio.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        int main(int argc, char **argv) {
+            if (argc < 3) return 64;
+            if (setsid() == -1) return 65;
+            signal(SIGPIPE, SIG_IGN);
+            FILE *pid = fopen(argv[1], "w");
+            if (!pid) return 66;
+            fprintf(pid, "%d", (int)getpid());
+            fclose(pid);
+            int stdoutBroken = 0;
+            int stderrBroken = 0;
+            while (!stdoutBroken || !stderrBroken) {
+                if (!stdoutBroken && write(STDOUT_FILENO, "x", 1) == -1 && errno == EPIPE) stdoutBroken = 1;
+                if (!stderrBroken && write(STDERR_FILENO, "y", 1) == -1 && errno == EPIPE) stderrBroken = 1;
+                struct timespec delay = {0, 50000000};
+                nanosleep(&delay, 0);
+            }
+            FILE *marker = fopen(argv[2], "w");
+            if (!marker) return 67;
+            fputs("both-epipe", marker);
+            fclose(marker);
+            return 0;
+        }
+        """.write(to: holderSource, atomically: true, encoding: .utf8)
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compile.arguments = ["-o", holderBinary.path, holderSource.path]
+        try compile.run()
+        compile.waitUntilExit()
+        try #require(compile.terminationStatus == 0)
+
+        let executable = bin.appendingPathComponent("recordings")
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > '\(leaderPidFile.path)'
+        '\(holderBinary.path)' '\(holderPidFile.path)' '\(markerFile.path)' &
+        while [ ! -s '\(holderPidFile.path)' ]; do /bin/sleep 0.01; done
+        while :; do /bin/sleep 0.05; done
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        // The production seam exactly as runCommandMode uses it. The leader ignores SIGTERM
+        // (exhausting the execution window and the termination grace), only dies at the
+        // group SIGKILL, and the escaped holder keeps both pipes open so the drain wait
+        // also runs to exhaustion. The observable wall time must still land under the
+        // public ceiling — the return margin absorbs spawn, poll overshoot, capture
+        // shutdown, and the task hops.
+        let runCLI = RecordingEngine().commandCLI
+        let homePath = home.path
+        let startedAt = ContinuousClock.now
+        let output = await Task.detached {
+            runCLI(["rewrite-selection"], homePath, RecordingEngine.commandRewriteTimeout)
+        }.value
+        let elapsed = ContinuousClock.now - startedAt
+
+        // Upper bound is the public promise, with the ~1 s return margin left as CI
+        // tolerance above the internal deadline; the lower bound proves the deadline chain
+        // really ran to exhaustion instead of the helper exiting early.
+        #expect(elapsed < .seconds(RecordingEngine.commandRewriteTimeout))
+        #expect(elapsed > .seconds(8.4))
+        #expect(output.hasPrefix("ERROR:"))
+        #expect(output.contains("timed out"))
+
+        let leaderPid = try #require(Self.readPID(from: leaderPidFile))
+        expectProcessIsGone(leaderPid)
+        expectProcessGroupIsGone(leaderPid)
+
+        // The runner returned while the holder still owned both write ends; its EPIPE
+        // marker proves the capture read descriptors were closed rather than left behind
+        // with live readers, and the holder exits on its own once both pipes are broken.
+        let holderPid = try #require(Self.readPID(from: holderPidFile))
+        var marker: String?
+        let markerDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < markerDeadline {
+            if let contents = try? String(contentsOf: markerFile, encoding: .utf8), !contents.isEmpty {
+                marker = contents
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(marker == "both-epipe")
+        expectProcessIsGone(holderPid)
+    }
+
+    @Test("the replaced shutdown returned without joining its readers and could snapshot truncated output")
+    func oldShutdownReturnedBeforeReadersExited() throws {
+        // Faithful reconstruction of the shutdown this runner used before
+        // PipeCaptureReader: a blocking reader thread tracked only by a DispatchGroup,
+        // and a finishCaptures that waited with a timeout, revoked the descriptor slot
+        // with dup2(/dev/null), scheduled the close on an async notify, and returned
+        // with no happens-before edge to the reader's exit.
+        //
+        // (Measured on macOS 26.0.1: dup2 over a blocked read(2) DOES wake the reader
+        // and widow the pipe — an undocumented Darwin drain that POSIX does not promise
+        // and Linux does not perform. The suspected silent-holder hang therefore only
+        // appears if the kernel ever stops extending that courtesy; the defect provable
+        // on every schedule is this one: nothing stopped the runner from snapshotting
+        // output while a reader sat between its read(2) and its append.)
+        final class CapturedBytes: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage = Data()
+            func append(_ data: Data) {
+                lock.lock()
+                storage.append(data)
+                lock.unlock()
+            }
+            var snapshot: Data {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+        }
+
+        var ends: [Int32] = [0, 0]
+        try #require(Darwin.pipe(&ends) == 0)
+        let readDescriptor = ends[0]
+        let writeDescriptor = ends[1]
+        let capture = CapturedBytes()
+        let readers = DispatchGroup()
+        // A legal scheduler preemption point between the read returning and the append
+        // landing; the old shutdown had nothing that excluded this interleaving.
+        let preemptedBetweenReadAndAppend = DispatchSemaphore(value: 0)
+        readers.enter()
+        Thread.detachNewThread {
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            var firstRead = true
+            while true {
+                let count = buffer.withUnsafeMutableBytes {
+                    Darwin.read(readDescriptor, $0.baseAddress, $0.count)
+                }
+                if count > 0 {
+                    if firstRead {
+                        firstRead = false
+                        _ = preemptedBetweenReadAndAppend.wait(timeout: .now() + .seconds(10))
+                    }
+                    capture.append(Data(bytes: buffer, count: count))
+                    continue
+                }
+                if count == -1 && errno == EINTR { continue }
+                break
+            }
+            readers.leave()
+        }
+
+        // The child's entire output arrives and the child exits cleanly — the ordinary
+        // nil-budget success shape, no escaped holder anywhere.
+        var payload = Array("tail-data".utf8)
+        try #require(
+            payload.withUnsafeMutableBytes {
+                Darwin.write(writeDescriptor, $0.baseAddress, $0.count)
+            } == payload.count
+        )
+        Darwin.close(writeDescriptor)
+
+        // Old finishCaptures, verbatim in structure: bounded group wait, dup2
+        // revocation, async close, return.
+        _ = readers.wait(timeout: .now() + .milliseconds(500))
+        let devnull = Darwin.open("/dev/null", O_RDONLY)
+        try #require(devnull != -1)
+        try #require(Darwin.dup2(devnull, readDescriptor) != -1)
+        Darwin.close(devnull)
+        readers.notify(queue: .global(qos: .utility)) {
+            Darwin.close(readDescriptor)
+        }
+
+        // At the exact point the old runner built its ProcessOutput, the reader is still
+        // alive and the delivered bytes are missing from the snapshot: truncation.
+        #expect(readers.wait(timeout: .now()) == .timedOut)
+        #expect(capture.snapshot.isEmpty)
+
+        // Let the "preempted" reader resume: the very same bytes land after the fact,
+        // proving only the missing join — not the child, not the pipe — lost them.
+        preemptedBetweenReadAndAppend.signal()
+        #expect(readers.wait(timeout: .now() + .seconds(5)) == .success)
+        #expect(String(decoding: capture.snapshot, as: UTF8.self) == "tail-data")
+    }
+
+    @Test("capture reader wakes from a silent held-open pipe on cancellation and joins with its data intact")
+    func captureReaderCancellationWithSilentWriter() throws {
+        let reader = try CLIRunner.PipeCaptureReader()
+        defer { reader.closeWriteDescriptor() }
+        // Deliver data through the pipe, then go silent while keeping the write end
+        // open — the escaped-descendant shape a blocking read could never be woken from.
+        var payload = Array("captured-before-silence".utf8)
+        try #require(
+            payload.withUnsafeMutableBytes {
+                Darwin.write(reader.writeDescriptor, $0.baseAddress, $0.count)
+            } == payload.count
+        )
+        let dataDeadline = ContinuousClock.now + .seconds(5)
+        while reader.data.isEmpty && ContinuousClock.now < dataDeadline {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        #expect(String(decoding: reader.data, as: UTF8.self) == "captured-before-silence")
+
+        // No end-of-file is coming; a bounded natural-drain wait must report that.
+        #expect(!reader.waitUntilExited(deadline: .now() + .milliseconds(200)))
+
+        let startedAt = ContinuousClock.now
+        reader.cancel()
+        reader.join()
+        #expect(ContinuousClock.now - startedAt < .seconds(1))
+
+        // Joining proves the reader thread exited and closed the read end: the write end
+        // this test still holds must observe a widowed pipe on its very next write,
+        // exactly what a silent escaped holder sees the moment the runner returns.
+        _ = Darwin.fcntl(reader.writeDescriptor, F_SETNOSIGPIPE, 1)
+        var probeByte: UInt8 = 0
+        errno = 0
+        #expect(Darwin.write(reader.writeDescriptor, &probeByte, 1) == -1)
+        #expect(errno == EPIPE)
+        #expect(String(decoding: reader.data, as: UTF8.self) == "captured-before-silence")
+    }
+
+    @Test("capture reader cancellation still drains data already buffered in the pipe")
+    func captureReaderCancellationDrainsBufferedTail() throws {
+        let reader = try CLIRunner.PipeCaptureReader()
+        defer { reader.closeWriteDescriptor() }
+        var payload = [UInt8](repeating: UInt8(ascii: "t"), count: 8_192)
+        try #require(
+            payload.withUnsafeMutableBytes {
+                Darwin.write(reader.writeDescriptor, $0.baseAddress, $0.count)
+            } == payload.count
+        )
+        reader.cancel()
+        reader.join()
+        #expect(reader.data.count == 8_192)
+    }
+
+    @Test("capture reader retries interrupted setup and closes every descriptor when setup fails")
+    func captureReaderDescriptorSetupIsFailClosed() throws {
+        // Four descriptors each get F_GETFD/F_SETFD, followed by F_GETFL/F_SETFL on
+        // the capture read end. Force every individual setup operation to fail in turn.
+        for failingCall in 1...10 {
+            var createdDescriptors: [Int32] = []
+            var closeCalls: [Int32: Int] = [:]
+            var configurationCall = 0
+            let systemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
+                makePipe: { _ in
+                    var ends: [Int32] = [0, 0]
+                    guard Darwin.pipe(&ends) == 0 else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    createdDescriptors.append(contentsOf: ends)
+                    return (ends[0], ends[1])
+                },
+                fcntl: { descriptor, command, value in
+                    configurationCall += 1
+                    if configurationCall == failingCall {
+                        errno = EIO
+                        return -1
+                    }
+                    if let value { return Darwin.fcntl(descriptor, command, value) }
+                    return Darwin.fcntl(descriptor, command)
+                },
+                close: { descriptor in
+                    closeCalls[descriptor, default: 0] += 1
+                    return Darwin.close(descriptor)
+                }
+            )
+
+            #expect(throws: (any Error).self) {
+                _ = try CLIRunner.PipeCaptureReader(systemCalls: systemCalls)
+            }
+            #expect(createdDescriptors.count == 4)
+            #expect(Set(createdDescriptors).count == 4)
+            #expect(closeCalls.count == 4)
+            for descriptor in createdDescriptors {
+                #expect(closeCalls[descriptor] == 1)
+            }
+        }
+
+        // EINTR is retried at every setup call; successful construction still proves
+        // both inheritance protection and nonblocking capture configuration landed.
+        var interruptedCalls = Set<Int>()
+        var configurationCall = 0
+        var retryDescriptors: [Int32] = []
+        let retryingSystemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
+            makePipe: { _ in
+                var ends: [Int32] = [0, 0]
+                guard Darwin.pipe(&ends) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                retryDescriptors.append(contentsOf: ends)
+                return (ends[0], ends[1])
+            },
+            fcntl: { descriptor, command, value in
+                configurationCall += 1
+                let logicalCall = (configurationCall + 1) / 2
+                if configurationCall % 2 == 1 {
+                    interruptedCalls.insert(logicalCall)
+                    errno = EINTR
+                    return -1
+                }
+                if let value { return Darwin.fcntl(descriptor, command, value) }
+                return Darwin.fcntl(descriptor, command)
+            }
+        )
+        let reader = try CLIRunner.PipeCaptureReader(systemCalls: retryingSystemCalls)
+        defer { reader.closeWriteDescriptor() }
+        #expect(interruptedCalls == Set(1...10))
+        for descriptor in retryDescriptors {
+            #expect(Darwin.fcntl(descriptor, F_GETFD) & FD_CLOEXEC != 0)
+        }
+        #expect(Darwin.fcntl(reader.readDescriptor, F_GETFL) & O_NONBLOCK != 0)
+        reader.cancel()
+        reader.join()
+    }
+
+    @Test("capture reader closes every owned descriptor exactly once on EOF and cancellation")
+    func captureReaderDescriptorOwnershipIsExact() throws {
+        for cancelBeforeEOF in [false, true] {
+            let ledgerLock = NSLock()
+            var createdDescriptors: [Int32] = []
+            var closeCalls: [Int32: Int] = [:]
+            let systemCalls = CLIRunner.PipeCaptureReader.SystemCalls(
+                makePipe: { _ in
+                    var ends: [Int32] = [0, 0]
+                    guard Darwin.pipe(&ends) == 0 else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    ledgerLock.lock()
+                    createdDescriptors.append(contentsOf: ends)
+                    ledgerLock.unlock()
+                    return (ends[0], ends[1])
+                },
+                close: { descriptor in
+                    ledgerLock.lock()
+                    closeCalls[descriptor, default: 0] += 1
+                    ledgerLock.unlock()
+                    return Darwin.close(descriptor)
+                }
+            )
+
+            var reader: CLIRunner.PipeCaptureReader? = try .init(systemCalls: systemCalls)
+            if cancelBeforeEOF { reader?.cancel() }
+            reader?.closeWriteDescriptor()
+            if !cancelBeforeEOF {
+                #expect(reader?.waitUntilExited(deadline: .now() + .seconds(1)) == true)
+            }
+            reader?.join()
+            reader = nil
+
+            ledgerLock.lock()
+            let createdSnapshot = createdDescriptors
+            let closeSnapshot = closeCalls
+            ledgerLock.unlock()
+            #expect(createdSnapshot.count == 4)
+            #expect(Set(createdSnapshot).count == 4)
+            #expect(closeSnapshot.count == 4)
+            for descriptor in createdSnapshot {
+                #expect(closeSnapshot[descriptor] == 1)
+            }
+        }
+    }
+
+    @Test("terminal capture read and poll failures are retained after the reader joins")
+    func captureReaderRetainsTerminalIOFailures() throws {
+        let readFailure = try CLIRunner.PipeCaptureReader(
+            systemCalls: .init(read: { _, _, _ in
+                errno = EIO
+                return -1
+            })
+        )
+        readFailure.closeWriteDescriptor()
+        readFailure.join()
+        #expect(
+            readFailure.terminalError
+                == .captureFailed(operation: .read, code: EIO)
+        )
+
+        let pollFailure = try CLIRunner.PipeCaptureReader(
+            systemCalls: .init(poll: { _, _, _ in
+                errno = EIO
+                return -1
+            })
+        )
+        defer { pollFailure.closeWriteDescriptor() }
+        pollFailure.join()
+        #expect(
+            pollFailure.terminalError
+                == .captureFailed(operation: .poll, code: EIO)
+        )
+
+        let wakeupPollFailure = try CLIRunner.PipeCaptureReader(
+            systemCalls: .init(poll: { descriptors, _, _ in
+                guard let descriptors else {
+                    errno = EFAULT
+                    return -1
+                }
+                descriptors[1].revents = Int16(POLLNVAL)
+                return 1
+            })
+        )
+        defer { wakeupPollFailure.closeWriteDescriptor() }
+        wakeupPollFailure.join()
+        #expect(
+            wakeupPollFailure.terminalError
+                == .captureFailed(operation: .poll, code: EBADF)
+        )
+    }
+
+    @Test("an otherwise successful command surfaces a terminal capture failure")
+    func runExecutableSurfacesTerminalCaptureFailure() throws {
+        let failureGate = NSLock()
+        var shouldFailCapture = false
+        #expect(
+            throws: CLIRunner.ExecutionError.captureFailed(operation: .read, code: EIO)
+        ) {
+            _ = try CLIRunner.runExecutable(
+                "/bin/sleep",
+                arguments: ["0.05"],
+                beforeExecutionDeadline: {
+                    failureGate.lock()
+                    shouldFailCapture = true
+                    failureGate.unlock()
+                },
+                captureSystemCalls: .init(read: { descriptor, buffer, count in
+                    failureGate.lock()
+                    let shouldFail = shouldFailCapture
+                    failureGate.unlock()
+                    if shouldFail {
+                        errno = EIO
+                        return -1
+                    }
+                    errno = EAGAIN
+                    return -1
+                })
+            )
+        }
+    }
+
+    @Test("a command timeout remains primary over a competing capture failure")
+    func commandTimeoutRemainsPrimaryOverCaptureFailure() throws {
+        let failureGate = NSLock()
+        var shouldFailCapture = false
+        var injectedFailures = 0
+        #expect(
+            throws: CLIRunner.ExecutionError.timedOut(executable: "/bin/sleep", seconds: 0.05)
+        ) {
+            _ = try CLIRunner.runExecutable(
+                "/bin/sleep",
+                arguments: ["1"],
+                executionTimeout: 0.05,
+                terminationGracePeriod: 0,
+                forceKillGracePeriod: 0.1,
+                pipeDrainTimeout: 0.1,
+                beforeExecutionDeadline: {
+                    failureGate.lock()
+                    shouldFailCapture = true
+                    failureGate.unlock()
+                },
+                captureSystemCalls: .init(read: { descriptor, buffer, count in
+                    failureGate.lock()
+                    let shouldFail = shouldFailCapture
+                    if shouldFail { injectedFailures += 1 }
+                    failureGate.unlock()
+                    if shouldFail {
+                        errno = EIO
+                        return -1
+                    }
+                    return Darwin.read(descriptor, buffer, count)
+                })
+            )
+        }
+        failureGate.lock()
+        let injectedFailureCount = injectedFailures
+        failureGate.unlock()
+        #expect(injectedFailureCount > 0)
+    }
+
+    @Test("a reaper failure still joins capture readers and closes silent escaped pipes")
+    func reapFailureStillFinishesCaptures() throws {
+        struct InjectedReapFailure: Error {}
+        let failureGate = NSLock()
+        var shouldFailCapture = false
+        var injectedFailures = 0
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-reap-failure-\(UUID().uuidString)")
+        let source = root.appendingPathComponent("silent-holder.c")
+        let executable = root.appendingPathComponent("silent-holder")
+        let holderPidFile = root.appendingPathComponent("holder-pid")
+        let markerFile = root.appendingPathComponent("holder-probe")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            if let holderPid = Self.readPID(from: holderPidFile) {
+                _ = Darwin.kill(holderPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        try """
+        #include <errno.h>
+        #include <signal.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <sys/wait.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        static volatile sig_atomic_t probeRequested = 0;
+        static void requestProbe(int signo) { (void)signo; probeRequested = 1; }
+
+        int main(int argc, char **argv) {
+            if (argc < 3) return 64;
+            pid_t child = fork();
+            if (child == -1) return 65;
+            if (child != 0) {
+                while (access(argv[1], F_OK) == -1) {
+                    struct timespec delay = {0, 10000000};
+                    nanosleep(&delay, 0);
+                }
+                return 0;
+            }
+            if (setsid() == -1) _exit(66);
+            signal(SIGPIPE, SIG_IGN);
+            signal(SIGUSR1, requestProbe);
+            FILE *pid = fopen(argv[1], "w");
+            if (!pid) _exit(67);
+            fprintf(pid, "%d", (int)getpid());
+            fclose(pid);
+            while (!probeRequested) {
+                struct timespec delay = {0, 20000000};
+                nanosleep(&delay, 0);
+            }
+            int outBroken = (write(STDOUT_FILENO, "x", 1) == -1 && errno == EPIPE);
+            int errBroken = (write(STDERR_FILENO, "y", 1) == -1 && errno == EPIPE);
+            FILE *marker = fopen(argv[2], "w");
+            if (!marker) _exit(68);
+            fputs(outBroken && errBroken ? "both-epipe" : "still-connected", marker);
+            fclose(marker);
+            _exit(0);
+        }
+        """.write(to: source, atomically: true, encoding: .utf8)
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compile.arguments = ["-o", executable.path, source.path]
+        try compile.run()
+        compile.waitUntilExit()
+        try #require(compile.terminationStatus == 0)
+
+        let startedAt = ContinuousClock.now
+        #expect(throws: InjectedReapFailure.self) {
+            _ = try CLIRunner.runExecutable(
+                executable.path,
+                arguments: [holderPidFile.path, markerFile.path],
+                pipeDrainTimeout: 0.1,
+                leaderReaper: { processIdentifier, _ in
+                    failureGate.lock()
+                    shouldFailCapture = true
+                    failureGate.unlock()
+                    var status: Int32 = 0
+                    var result: pid_t
+                    repeat {
+                        result = Darwin.waitpid(processIdentifier, &status, 0)
+                    } while result == -1 && errno == EINTR
+                    guard result == processIdentifier else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    throw InjectedReapFailure()
+                },
+                captureSystemCalls: .init(read: { descriptor, buffer, count in
+                    failureGate.lock()
+                    let shouldFail = shouldFailCapture
+                    if shouldFail { injectedFailures += 1 }
+                    failureGate.unlock()
+                    if shouldFail {
+                        errno = EIO
+                        return -1
+                    }
+                    return Darwin.read(descriptor, buffer, count)
+                })
+            )
+        }
+        #expect(ContinuousClock.now - startedAt < .seconds(2))
+        failureGate.lock()
+        let injectedFailureCount = injectedFailures
+        failureGate.unlock()
+        #expect(injectedFailureCount > 0)
+
+        let holderPid = try #require(Self.readPID(from: holderPidFile))
+        #expect(Darwin.kill(holderPid, 0) == 0)
+        try #require(Darwin.kill(holderPid, SIGUSR1) == 0)
+        var marker: String?
+        let markerDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < markerDeadline {
+            if let contents = try? String(contentsOf: markerFile, encoding: .utf8), !contents.isEmpty {
+                marker = contents
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        #expect(marker == "both-epipe")
+        expectProcessIsGone(holderPid)
+    }
+
+    @Test("output at the exit/drain boundary is captured completely for nil-budget and budgeted runs")
+    func outputCompleteAtExitDrainBoundary() throws {
+        // 256 KiB per stream overflows the kernel pipe buffer many times over, so data is
+        // still in flight as the runner observes the exit, and the final sentinel lands
+        // in each pipe immediately before end-of-file.
+        let command = """
+        dd if=/dev/zero bs=262144 count=1 2>/dev/null | tr '\\0' o
+        dd if=/dev/zero bs=262144 count=1 2>/dev/null | tr '\\0' e >&2
+        printf 'OUT-END'
+        printf 'ERR-END' >&2
+        """
+        for budget in [nil, 5.0] as [TimeInterval?] {
+            let result = try CLIRunner.runExecutable(
+                "/bin/sh",
+                arguments: ["-c", command],
+                totalWallClockBudget: budget
+            )
+            #expect(result.terminationStatus == 0)
+            #expect(result.stdout.utf8.count == 262_144 + "OUT-END".utf8.count)
+            #expect(result.stderr.utf8.count == 262_144 + "ERR-END".utf8.count)
+            #expect(result.stdout.hasSuffix("OUT-END"))
+            #expect(result.stderr.hasSuffix("ERR-END"))
+        }
+    }
+
+    @Test("a completely silent escaped descendant cannot pin the capture readers past the ceiling")
+    @MainActor
+    func silentEscapedDescendantCannotPinCaptureReaders() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-rewrite-silent-holder-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        let leaderPidFile = home.appendingPathComponent("leader-pid")
+        let holderPidFile = home.appendingPathComponent("holder-pid")
+        let markerFile = home.appendingPathComponent("holder-probe")
+        let holderSource = home.appendingPathComponent("silent-holder.c")
+        let holderBinary = home.appendingPathComponent("silent-holder")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer {
+            if let holderPid = Self.readPID(from: holderPidFile) {
+                _ = Darwin.kill(holderPid, SIGKILL)
+            }
+            if let leaderPid = Self.readPID(from: leaderPidFile) {
+                _ = Darwin.kill(-leaderPid, SIGKILL)
+                _ = Darwin.kill(leaderPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        // Unlike the EPIPE holder above, this descendant never writes a byte while the
+        // runner is alive: a reader blocked in read(2) would never be handed the data it
+        // needs to run onto a revoked descriptor, which is exactly the shape that pinned
+        // the old blocking readers forever. Only after the runner has returned does the
+        // test send SIGUSR1, and the holder's very first write on each stream must then
+        // fail with EPIPE — possible only if the reader threads already exited and closed
+        // both read ends before the runner returned, not asynchronously afterwards.
+        try """
+        #include <errno.h>
+        #include <signal.h>
+        #include <stdio.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        static volatile sig_atomic_t probeRequested = 0;
+        static void requestProbe(int signo) { (void)signo; probeRequested = 1; }
+
+        int main(int argc, char **argv) {
+            if (argc < 3) return 64;
+            if (setsid() == -1) return 65;
+            signal(SIGPIPE, SIG_IGN);
+            signal(SIGUSR1, requestProbe);
+            FILE *pid = fopen(argv[1], "w");
+            if (!pid) return 66;
+            fprintf(pid, "%d", (int)getpid());
+            fclose(pid);
+            while (!probeRequested) {
+                struct timespec delay = {0, 20000000};
+                nanosleep(&delay, 0);
+            }
+            int stdoutBroken = (write(STDOUT_FILENO, "x", 1) == -1 && errno == EPIPE);
+            int stderrBroken = (write(STDERR_FILENO, "y", 1) == -1 && errno == EPIPE);
+            FILE *marker = fopen(argv[2], "w");
+            if (!marker) return 67;
+            fputs(stdoutBroken && stderrBroken ? "both-epipe" : "still-connected", marker);
+            fclose(marker);
+            return 0;
+        }
+        """.write(to: holderSource, atomically: true, encoding: .utf8)
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compile.arguments = ["-o", holderBinary.path, holderSource.path]
+        try compile.run()
+        compile.waitUntilExit()
+        try #require(compile.terminationStatus == 0)
+
+        let executable = bin.appendingPathComponent("recordings")
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > '\(leaderPidFile.path)'
+        '\(holderBinary.path)' '\(holderPidFile.path)' '\(markerFile.path)' &
+        while [ ! -s '\(holderPidFile.path)' ]; do /bin/sleep 0.01; done
+        while :; do /bin/sleep 0.05; done
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        // The production seam exactly as runCommandMode uses it. The leader ignores
+        // SIGTERM and the silent holder keeps both pipes open, so every deadline in the
+        // chain — execution window, termination grace, drain wait — runs to exhaustion
+        // with zero bytes ever arriving to wake a reader.
+        let runCLI = RecordingEngine().commandCLI
+        let homePath = home.path
+        let startedAt = ContinuousClock.now
+        let output = await Task.detached {
+            runCLI(["rewrite-selection"], homePath, RecordingEngine.commandRewriteTimeout)
+        }.value
+        let elapsed = ContinuousClock.now - startedAt
+
+        #expect(elapsed < .seconds(RecordingEngine.commandRewriteTimeout))
+        #expect(elapsed > .seconds(8.4))
+        #expect(output.hasPrefix("ERROR:"))
+        #expect(output.contains("timed out"))
+
+        let leaderPid = try #require(Self.readPID(from: leaderPidFile))
+        expectProcessIsGone(leaderPid)
+        expectProcessGroupIsGone(leaderPid)
+
+        // The holder escaped the group kill and stayed completely silent: it must still
+        // be alive, and must not have probed yet.
+        let holderPid = try #require(Self.readPID(from: holderPidFile))
+        #expect(Darwin.kill(holderPid, 0) == 0)
+        #expect(!FileManager.default.fileExists(atPath: markerFile.path))
+
+        // Ask for the probe only now, after the runner has returned. First-write EPIPE on
+        // both streams proves the capture read ends were closed — and the reader threads
+        // joined — before the return, with no writer traffic ever helping them along.
+        try #require(Darwin.kill(holderPid, SIGUSR1) == 0)
+        var marker: String?
+        let markerDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < markerDeadline {
+            if let contents = try? String(contentsOf: markerFile, encoding: .utf8), !contents.isEmpty {
+                marker = contents
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(marker == "both-epipe")
+        expectProcessIsGone(holderPid)
+    }
+
     @Test("transcribeCLIArgs passes project, cleanup mode, and transcriber prompt")
     func transcribeCLIArgsWithPrompt() {
         let args = RecordingEngine.transcribeCLIArgs(

@@ -49,6 +49,12 @@ public struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Intent") {
+                Toggle("Detect questions and edit commands", isOn: $engine.intentDetectionEnabled)
+                Text("When on, Recordings infers whether you dictated, asked a question, or asked it to edit the selected text. Anything uncertain is typed out literally. When off, every recording is typed out.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Recording Shortcut") {
                 HStack {
                     Text("Shortcut")

@@ -1,5 +1,5 @@
 {
-  "originHash" : "a63dc0aa4ab0839e19cd7644cfd2bb42729aafbf9ef920adeb5c3ac856b7701e",
+  "originHash" : "687b5e4737064bbc8cae591b1e3177f27923cff756de7a7c0dd0b5bfb13ab55a",
   "pins" : [
     {
       "identity" : "keyboardshortcuts",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swiftlang/swift-syntax.git",
       "state" : {
-        "revision" : "0687f71944021d616d34d922343dcef086855920",
-        "version" : "600.0.1"
+        "revision" : "4799286537280063c85a32f09884cfbca301b1a1",
+        "version" : "602.0.0"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-testing.git",
       "state" : {
-        "revision" : "399f76dcd91e4c688ca2301fa24a8cc6d9927211",
-        "version" : "0.99.0"
+        "branch" : "swift-6.2-RELEASE",
+        "revision" : "3fdabe5392108d874abae1c1e58e1328ab46f681"
       }
     }
   ],

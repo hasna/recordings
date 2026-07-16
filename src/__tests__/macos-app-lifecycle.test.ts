@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   cpSync,
@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import { dirname, join, resolve } from "node:path";
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const bunExecutable = process.execPath;
 const temporaryPaths: string[] = [];
+setDefaultTimeout(15_000);
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -40,6 +42,9 @@ function createApp(path: string, marker: string): void {
   writeFileSync(join(path, "Contents", "Helpers", "recordings"), "companion");
   chmodSync(join(path, "Contents", "MacOS", "Recordings"), 0o755);
   chmodSync(join(path, "Contents", "Helpers", "recordings"), 0o755);
+  for (const directory of [path, join(path, "Contents"), join(path, "Contents", "MacOS"), join(path, "Contents", "Helpers")]) {
+    chmodSync(directory, 0o755);
+  }
 }
 
 function createInstallerFixture() {
@@ -61,14 +66,44 @@ function createInstallerFixture() {
   cpSync(join(repositoryRoot, "scripts", "install_macos_app.sh"), installer);
   chmodSync(installer, 0o755);
   cpSync(join(repositoryRoot, "scripts", "macos_artifact.ts"), join(root, "scripts", "macos_artifact.ts"));
+  writeExecutable(
+    join(root, "scripts", "smoke_macos_app.sh"),
+    "#!/usr/bin/env bash\n[ \"${FAIL_RUNTIME_SMOKE:-0}\" = 0 ] || exit 1\nprintf '%s\\n' \"$1\" >> \"$MARKER_DIRECTORY/runtime-smoke.log\"\n",
+  );
 
-  writeExecutable(join(bin, "uname"), "#!/usr/bin/env bash\nprintf 'Darwin\\n'\n");
+  writeExecutable(join(bin, "uname"), "#!/usr/bin/env bash\nif [ \"${1:-}\" = -m ]; then printf 'arm64\\n'; else printf 'Darwin\\n'; fi\n");
+  writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
+  writeExecutable(
+    join(bin, "stat"),
+    "#!/usr/bin/env bash\ncase \"${2:-}\" in '%u') id -u ;; '%m') date +%s ;; '%Lp') case \"${3:-}\" in */owner|*/.Recordings-install-transaction.json) printf '600\\n' ;; *) printf '700\\n' ;; esac ;; *) printf '700\\n' ;; esac\n",
+  );
+  writeExecutable(join(bin, "ls"), "#!/usr/bin/env bash\nprintf 'drwx------ fixture\\n'\n");
   writeExecutable(
     join(bin, "bun"),
     `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$MARKER_DIRECTORY/bun.log"
 case "$*" in
+  *" journal-write "*"--phase committed"*)
+    [ "\${FAIL_COMMITTED_JOURNAL:-0}" = 1 ] && exit 1
+    exec "$REAL_BUN" "$@"
+    ;;
+  *" journal-write "*|*" journal-get "*|*" journal-recover "*|*" tree-digest "*)
+    exec "$REAL_BUN" "$@"
+    ;;
+  *" manifest-get "*"--field minimum_macos"*) printf '26.0\n'; exit 0 ;;
+  *" manifest-get "*"--field architectures"*) printf 'arm64\n'; exit 0 ;;
+  *" manifest-get "*"--field identity"*) printf '%064d\n' 0 | tr '0' c; exit 0 ;;
+  *" requirement-digest "*)
+    if [[ "$*" == *"/unpacked/"* ]] || [[ "$*" == *"/.Recordings-install-"* ]]; then
+      printf '%064d\n' 0 | tr '0' c
+    else
+      printf '%064d\n' 0 | tr '0' d
+    fi
+    exit 0
+    ;;
+  *" assert-transition "*|*" verify-filesystem-tree "*|*" fsync-tree "*|*" fsync-directory "*) exit 0 ;;
+  *" verify-active "*) [ "\${FAIL_ACTIVE_VERIFY:-0}" = 0 ]; exit $? ;;
   *" verify-archive "*)
     [ "\${FAIL_ARCHIVE_VERIFY:-0}" = 1 ] && exit 1
     [[ "$*" == *"--team-id \${REQUIRED_TEAM_ID:-EXAMPLE123}"* ]] || exit 1
@@ -77,6 +112,7 @@ case "$*" in
     [ "\${FAIL_APP_VERIFY:-0}" = 1 ] && exit 1
     [ "\${MISSING_TIMESTAMP:-0}" = 1 ] && exit 1
     ;;
+  -e*) exec "$REAL_BUN" "$@" ;;
 esac
 exit 0
 `,
@@ -118,23 +154,41 @@ exit 0
   );
   writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
   writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(join(bin, "syspolicy_check"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/syspolicy.log\"\nexit 0\n");
+  writeExecutable(
+    join(bin, "df"),
+    "#!/usr/bin/env bash\nif [ -n \"${AVAILABLE_KB:-}\" ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 100000 1 %s 1%% /\\n' \"$AVAILABLE_KB\"; else exec /bin/df \"$@\"; fi\n",
+  );
   writeExecutable(
     join(bin, "mdfind"),
     "#!/usr/bin/env bash\n[ -n \"${MDFIND_RESULT:-}\" ] && printf '%s\\n' \"$MDFIND_RESULT\"\n",
   );
   writeExecutable(
     join(bin, "open"),
-    "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/open.log\"\n",
+    `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MARKER_DIRECTORY/open.log"
+if [ "\${SPAWN_LAUNCHED_PROCESS:-0}" = 1 ]; then
+  bash -c 'exec -a "$1" sleep 30' _ "$CANONICAL_EXECUTABLE" >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$MARKER_DIRECTORY/launched.pid"
+  printf '%s\n' "$!" >> "$MARKER_DIRECTORY/launched-pids.log"
+fi
+`,
   );
   writeExecutable(
     join(bin, "ps"),
     `#!/usr/bin/env bash
 set -euo pipefail
+if [ "\${1:-}" = "-o" ] && [ "\${2:-}" = "lstart=" ]; then exec /bin/ps "$@"; fi
 if [ ! -e "$MARKER_DIRECTORY/open.log" ]; then
   [ -n "\${EXISTING_PID:-}" ] && printf '%s %s\n' "$EXISTING_PID" "$EXISTING_PROCESS_PATH"
   [ -n "\${UNRELATED_PID:-}" ] && printf '%s %s\n' "$UNRELATED_PID" "$UNRELATED_PROCESS_PATH"
 elif [ "\${LAUNCH_SUCCEEDS:-1}" = 1 ]; then
-  printf '99999 %s\n' "$CANONICAL_EXECUTABLE"
+  if [ "\${SPAWN_LAUNCHED_PROCESS:-0}" = 1 ] && [ -f "$MARKER_DIRECTORY/launched.pid" ]; then
+    launched_pid="$(sed -n '1p' "$MARKER_DIRECTORY/launched.pid")"
+    if kill -0 "$launched_pid" 2>/dev/null; then printf '%s %s\n' "$launched_pid" "$CANONICAL_EXECUTABLE"; fi
+  else
+    printf '99999 %s\n' "$CANONICAL_EXECUTABLE"
+  fi
 fi
 `,
   );
@@ -158,6 +212,12 @@ async function runInstaller(
       fixture.manifest,
       "--expected-team-id",
       "EXAMPLE123",
+      "--manifest-sha256",
+      "a".repeat(64),
+      "--expected-source-sha",
+      "b".repeat(40),
+      "--expected-version",
+      "0.2.12",
       ...args,
     ],
     {
@@ -168,6 +228,7 @@ async function runInstaller(
         CANDIDATE_SOURCE: fixture.candidate,
         CANONICAL_EXECUTABLE: join(app, "Contents", "MacOS", "Recordings"),
         MARKER_DIRECTORY: fixture.markers,
+        REAL_BUN: bunExecutable,
         ...environment,
       },
       stdout: "pipe",
@@ -353,6 +414,447 @@ fi
     expect(existsSync(duplicate)).toBeFalse();
     expect(readdirSync(join(fixture.home, ".hasna", "recordings", "rollbacks")).length).toBe(2);
     expect(existsSync(join(fixture.markers, "tccutil.log"))).toBeFalse();
+    expect(readFileSync(join(fixture.markers, "runtime-smoke.log"), "utf8")).toContain(installed);
+    expect(readFileSync(join(fixture.markers, "syspolicy.log"), "utf8")).toContain(installed);
+  });
+
+  test("recovers a SIGKILL after candidate activation and restores app plus external state", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const stateFile = join(fixture.home, ".hasna", "recordings", "config.json");
+    createApp(installed, "installed");
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, "original-state\n");
+
+    const crashed = await runInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeTrue();
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+    writeFileSync(stateFile, "mutated-after-crash\n");
+
+    const recovered = await runInstaller(fixture, [], {
+      FAIL_ARCHIVE_VERIFY: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(readFileSync(stateFile, "utf8")).toBe("original-state\n");
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeFalse();
+  });
+
+  test("stops a launched uncommitted candidate before restoring the previous app", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const crashed = await runInstaller(fixture, ["--launch", "--launch-timeout", "2"], {
+      SPAWN_LAUNCHED_PROCESS: "1",
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-launched-before-commit",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    const launchedPid = Number(readFileSync(join(fixture.markers, "launched.pid"), "utf8").trim());
+    expect(() => process.kill(launchedPid, 0)).not.toThrow();
+
+    const recovered = await runInstaller(fixture, [], {
+      SPAWN_LAUNCHED_PROCESS: "1",
+      FAIL_ARCHIVE_VERIFY: "1",
+    });
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(() => process.kill(launchedPid, 0)).toThrow();
+  });
+
+  test("same-process rollback stops a launched candidate when committed journal write fails", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const prior = Bun.spawn(["sleep", "30"]);
+    try {
+      const result = await runInstaller(fixture, ["--launch", "--launch-timeout", "2"], {
+        EXISTING_PID: String(prior.pid),
+        EXISTING_PROCESS_PATH: join(installed, "Contents", "MacOS", "Recordings"),
+        SPAWN_LAUNCHED_PROCESS: "1",
+        FAIL_COMMITTED_JOURNAL: "1",
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+      const pids = readFileSync(join(fixture.markers, "launched-pids.log"), "utf8")
+        .trim()
+        .split("\n")
+        .map(Number);
+      expect(pids).toHaveLength(2);
+      expect(() => process.kill(pids[0]!, 0)).toThrow();
+      expect(() => process.kill(pids[1]!, 0)).not.toThrow();
+      process.kill(pids[1]!);
+    } finally {
+      prior.kill();
+      await prior.exited;
+    }
+  });
+
+  test("committed crash recovery does not launch a second canonical instance", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const prior = Bun.spawn(["sleep", "30"]);
+    let launchedPid = 0;
+    try {
+      const crashed = await runInstaller(fixture, ["--launch", "--launch-timeout", "2"], {
+        EXISTING_PID: String(prior.pid),
+        EXISTING_PROCESS_PATH: join(installed, "Contents", "MacOS", "Recordings"),
+        SPAWN_LAUNCHED_PROCESS: "1",
+        RECORDINGS_TEST_CRASH_AFTER_PHASE: "committed",
+      });
+      expect(crashed.exitCode).not.toBe(0);
+      launchedPid = Number(readFileSync(join(fixture.markers, "launched.pid"), "utf8").trim());
+      const recovered = await runInstaller(fixture, [], {
+        SPAWN_LAUNCHED_PROCESS: "1",
+        FAIL_ARCHIVE_VERIFY: "1",
+      });
+      expect(recovered.stderr).toContain("Recovering incomplete");
+      expect(readFileSync(join(fixture.markers, "launched-pids.log"), "utf8").trim().split("\n")).toHaveLength(1);
+      expect(() => process.kill(launchedPid, 0)).not.toThrow();
+    } finally {
+      if (launchedPid) process.kill(launchedPid);
+      prior.kill();
+      await prior.exited;
+    }
+  });
+
+  test("recovery rejects a journal redirected to a noncanonical state directory", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const victim = join(fixture.root, "victim-state");
+    createApp(installed, "installed");
+    mkdirSync(victim, { recursive: true });
+    writeFileSync(join(victim, "keep.txt"), "keep\n");
+    await runInstaller(fixture, [], { RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed" });
+    const journalPath = join(fixture.home, "Applications", ".Recordings-install-transaction.json");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as Record<string, unknown>;
+    journal.data_dir = victim;
+    writeFileSync(journalPath, `${JSON.stringify(journal)}\n`);
+    rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+
+    const recovered = await runInstaller(fixture);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("unexpected state directory");
+    expect(readFileSync(join(victim, "keep.txt"), "utf8")).toBe("keep\n");
+  });
+
+  test("recovery fails closed before mutation when the state backup digest changes", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const state = join(fixture.home, ".hasna", "recordings", "config.json");
+    createApp(installed, "installed");
+    mkdirSync(dirname(state), { recursive: true });
+    writeFileSync(state, "original\n");
+    await runInstaller(fixture, [], { RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed" });
+    const journalPath = join(fixture.home, "Applications", ".Recordings-install-transaction.json");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { state_backup: string };
+    writeFileSync(join(journal.state_backup, "config.json"), "corrupt\n");
+
+    const recovered = await runInstaller(fixture);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("state backup integrity check failed");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+    expect(existsSync(journalPath)).toBeTrue();
+  });
+
+  test("a crash during stopped-state refresh recovers from the immutable initial backup", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const prior = Bun.spawn(["sleep", "30"]);
+    try {
+      const crashed = await runInstaller(fixture, [], {
+        EXISTING_PID: String(prior.pid),
+        EXISTING_PROCESS_PATH: join(installed, "Contents", "MacOS", "Recordings"),
+        RECORDINGS_TEST_CRASH_AFTER_PHASE: "state-refresh-copied-before-journal",
+      });
+      expect(crashed.exitCode).not.toBe(0);
+      rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+      const recovered = await runInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+      expect(recovered.stderr).toContain("Recovering incomplete");
+      expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+      expect(readFileSync(join(fixture.markers, "open.log"), "utf8")).toContain(installed);
+    } finally {
+      prior.kill();
+      await prior.exited;
+    }
+  });
+
+  test("recovery fails closed before restoring a modified original app backup", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    await runInstaller(fixture, [], { RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed" });
+    const journalPath = join(fixture.home, "Applications", ".Recordings-install-transaction.json");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      originals: Array<{ backup: string }>;
+    };
+    writeFileSync(join(journal.originals[0]!.backup, "Contents", "MacOS", "Recordings"), "tampered");
+    rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+
+    const recovered = await runInstaller(fixture);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("app backup integrity check failed");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+    expect(existsSync(journalPath)).toBeTrue();
+  });
+
+  test("recovery refuses a missing original app backup before removing the candidate", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    await runInstaller(fixture, [], { RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed" });
+    const journalPath = join(fixture.home, "Applications", ".Recordings-install-transaction.json");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      originals: Array<{ backup: string }>;
+    };
+    rmSync(journal.originals[0]!.backup, { recursive: true });
+    rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+
+    const recovered = await runInstaller(fixture);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("app backup is missing");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+  });
+
+  test("recovery refuses a missing noncommitted transaction directory before mutation", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    await runInstaller(fixture, [], { RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed" });
+    const journalPath = join(fixture.home, "Applications", ".Recordings-install-transaction.json");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { transaction_dir: string };
+    rmSync(journal.transaction_dir, { recursive: true });
+    rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+
+    const recovered = await runInstaller(fixture);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("recovery evidence is missing");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+  });
+
+  test("recovery replays after a crash between restoring canonical and duplicate apps", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const duplicate = join(fixture.home, ".hasna", "recordings", "Recordings.app");
+    createApp(installed, "installed");
+    createApp(duplicate, "duplicate");
+    await runInstaller(fixture, [], { RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed" });
+    rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+
+    const interrupted = await runInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_RECOVERY_AFTER_APP_RESTORES: "1",
+    });
+    expect(interrupted.exitCode).not.toBe(0);
+    expect(existsSync(installed)).toBeFalse();
+    expect(readFileSync(join(duplicate, "Contents", "MacOS", "Recordings"), "utf8")).toBe("duplicate");
+
+    const recovered = await runInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(readFileSync(join(duplicate, "Contents", "MacOS", "Recordings"), "utf8")).toBe("duplicate");
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeFalse();
+  });
+
+  test("first-install SIGKILL after candidate move removes the uncommitted app on recovery", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const crashed = await runInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-moved-before-journal",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+
+    const recovered = await runInstaller(fixture, [], {
+      FAIL_ARCHIVE_VERIFY: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(existsSync(installed)).toBeFalse();
+  });
+
+  test("candidate-moving recovery stops an externally launched uncommitted process", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const crashed = await runInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-moved-before-journal",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    const launched = Bun.spawn(
+      ["bash", "-c", 'exec -a "$1" sleep 30', "_", join(installed, "Contents", "MacOS", "Recordings")],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    writeFileSync(join(fixture.markers, "open.log"), "external launch\n");
+    writeFileSync(join(fixture.markers, "launched.pid"), `${launched.pid}\n`);
+    rmSync(join(fixture.home, "Applications", ".Recordings-install-lock"), { recursive: true });
+    try {
+      const recovered = await runInstaller(fixture, [], {
+        SPAWN_LAUNCHED_PROCESS: "1",
+        FAIL_ARCHIVE_VERIFY: "1",
+      });
+      expect(recovered.stderr).toContain("Recovering incomplete");
+      expect(() => process.kill(launched.pid, 0)).toThrow();
+      expect(existsSync(installed)).toBeFalse();
+    } finally {
+      launched.kill();
+      await launched.exited;
+    }
+  });
+
+  test("active installer lock rejects a second writer before artifact mutation", async () => {
+    const fixture = createInstallerFixture();
+    const lock = join(fixture.home, "Applications", ".Recordings-install-lock");
+    mkdirSync(lock, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lock, "owner"), `${process.pid}\n\n`, { mode: 0o600 });
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("owns the active install lock");
+    expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+  });
+
+  test("an actual concurrent installer cannot enter verification while the first owns the lock", async () => {
+    const fixture = createInstallerFixture();
+    const installer = join(fixture.root, "scripts", "install_macos_app.sh");
+    const first = Bun.spawn([
+      "bash", installer,
+      "--artifact", fixture.artifact,
+      "--manifest", fixture.manifest,
+      "--expected-team-id", "EXAMPLE123",
+      "--manifest-sha256", "a".repeat(64),
+      "--expected-source-sha", "b".repeat(40),
+      "--expected-version", "0.2.12",
+    ], {
+      env: {
+        ...Bun.env,
+        HOME: fixture.home,
+        PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
+        CANDIDATE_SOURCE: fixture.candidate,
+        CANONICAL_EXECUTABLE: join(fixture.home, "Applications", "Recordings.app", "Contents", "MacOS", "Recordings"),
+        MARKER_DIRECTORY: fixture.markers,
+        REAL_BUN: bunExecutable,
+        RECORDINGS_TEST_HOLD_AFTER_LOCK_SECONDS: "30",
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const owner = join(fixture.home, "Applications", ".Recordings-install-lock", "owner");
+    try {
+      for (let attempt = 0; attempt < 100 && !existsSync(owner); attempt += 1) {
+        await Bun.sleep(10);
+      }
+      expect(existsSync(owner)).toBeTrue();
+      const second = await runInstaller(fixture);
+      expect(second.exitCode).not.toBe(0);
+      expect(second.stderr).toContain("owns the active install lock");
+      expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+    } finally {
+      first.kill();
+      await first.exited;
+    }
+  });
+
+  test("does not reclaim a recent lock with incomplete owner metadata", async () => {
+    const fixture = createInstallerFixture();
+    const lock = join(fixture.home, "Applications", ".Recordings-install-lock");
+    mkdirSync(lock, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lock, "owner"), "incomplete\n", { mode: 0o600 });
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("incomplete and too recent");
+    expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+  });
+
+  test("rejects a zero incomplete-lock grace", async () => {
+    const fixture = createInstallerFixture();
+    const result = await runInstaller(fixture, [], { RECORDINGS_LOCK_STALE_SECONDS: "0" });
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("at least 5 seconds");
+    expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+  });
+
+  test("rejects a dangling canonical app symlink before transition handling", async () => {
+    const fixture = createInstallerFixture();
+    const app = join(fixture.home, "Applications", "Recordings.app");
+    mkdirSync(dirname(app), { recursive: true });
+    symlinkSync(join(fixture.root, "missing.app"), app);
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("not a secure directory");
+  });
+
+  test("rejects insufficient transaction space before moving an installed app", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runInstaller(fixture, [], { AVAILABLE_KB: "1" });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Insufficient free space");
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+  });
+
+  test("fsyncs state, app backups, and candidate before advancing durable phases", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runInstaller(fixture);
+    expect(result.exitCode).toBe(0);
+    const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(commands.indexOf("fsync-tree")).toBeLessThan(commands.indexOf("journal-write"));
+    const movedFsync = commands.indexOf("fsync-tree", commands.indexOf("originals-moving"));
+    expect(movedFsync).toBeGreaterThan(commands.indexOf("originals-moving"));
+    expect(movedFsync).toBeLessThan(commands.indexOf("originals-moved"));
+    const candidateFsync = commands.lastIndexOf("fsync-tree");
+    expect(candidateFsync).toBeLessThan(commands.indexOf("candidate-installed"));
+  });
+
+  test("rolls back when post-activation packaged helper verification fails", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runInstaller(fixture, [], { FAIL_ACTIVE_VERIFY: "1" });
+    expect(result.exitCode).not.toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(commands.indexOf("verify-active")).toBeGreaterThan(commands.indexOf("verify-app"));
+  });
+
+  test("runtime smoke rejects fast evidence without an observed exact-path process", async () => {
+    const fixture = createInstallerFixture();
+    const app = join(fixture.root, "smoke", "Recordings.app");
+    createApp(app, "app");
+    cpSync(
+      join(repositoryRoot, "scripts", "smoke_macos_app.sh"),
+      join(fixture.root, "scripts", "smoke_macos_app.sh"),
+    );
+    chmodSync(join(fixture.root, "scripts", "smoke_macos_app.sh"), 0o755);
+    writeExecutable(
+      join(fixture.bin, "open"),
+      `#!/usr/bin/env bash
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--runtime-smoke-output" ]; then output="$2"; break; fi
+  shift
+done
+printf '{"processIdentifier":123}\n' > "$output"
+`,
+    );
+    writeExecutable(join(fixture.bin, "ps"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(join(fixture.bin, "bun"), "#!/usr/bin/env bash\nprintf '123\\n'\n");
+    const smoke = Bun.spawn(["bash", join(fixture.root, "scripts", "smoke_macos_app.sh"), app], {
+      env: { ...Bun.env, PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stderr] = await Promise.all([
+      smoke.exited,
+      new Response(smoke.stderr).text(),
+    ]);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("before its exact process path could be observed");
   });
 });
 
@@ -460,8 +962,31 @@ exit 0
       join(bin, "ditto"),
       "#!/usr/bin/env bash\nif [ \"$1\" = -c ]; then printf archive > \"${@: -1}\"; else cp -R \"$1\" \"$2\"; fi\n",
     );
-    writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(
+      join(bin, "xcrun"),
+      `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MARKER_DIRECTORY/xcrun.log"
+if [[ "$*" == *"notarytool submit"* ]]; then
+  if [ "\${NOTARY_SUBMIT_REJECTED:-0}" = 1 ]; then
+    printf '{"id":"11111111-1111-4111-8111-111111111111","status":"Invalid"}\n'
+  else
+    printf '{"id":"11111111-1111-4111-8111-111111111111","status":"Accepted"}\n'
+  fi
+elif [[ "$*" == *"notarytool log"* ]]; then
+  if [ "\${NOTARY_LOG_ISSUES:-0}" = 1 ]; then
+    printf '{"jobId":"11111111-1111-4111-8111-111111111111","status":"Accepted","issues":[{"severity":"warning"}]}\n'
+  else
+    printf '{"jobId":"11111111-1111-4111-8111-111111111111","status":"Accepted","issues":null}\n'
+  fi
+fi
+exit 0
+`,
+    );
     writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(
+      join(bin, "syspolicy_check"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/syspolicy.log\"\nexit 0\n",
+    );
     writeExecutable(join(bin, "plistbuddy"), "#!/usr/bin/env bash\nprintf '0.2.12\\n'\n");
     writeExecutable(
       join(bin, "plutil"),
@@ -644,5 +1169,17 @@ fi
     expect(appSigning).toBeGreaterThan(provenance);
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos.zip"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos.manifest.json"))).toBeTrue();
+    expect(readFileSync(join(fixture.markers, "xcrun.log"), "utf8")).toContain("notarytool log");
+    expect(readFileSync(join(fixture.markers, "syspolicy.log"), "utf8")).toContain("distribution");
+  });
+
+  test("rejects a rejected submission or accepted notary log with issues", async () => {
+    const rejected = await runBuild(createBuildFixture(), { NOTARY_SUBMIT_REJECTED: "1" });
+    expect(rejected.exitCode).not.toBe(0);
+    expect(rejected.stderr).toContain("not accepted");
+
+    const issues = await runBuild(createBuildFixture(), { NOTARY_LOG_ISSUES: "1" });
+    expect(issues.exitCode).not.toBe(0);
+    expect(issues.stderr).toContain("reported issues");
   });
 });

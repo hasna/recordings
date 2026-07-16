@@ -49,14 +49,24 @@ public final class VoiceShortcuts: ObservableObject {
 
     /// Check if transcribed text matches a voice shortcut trigger.
     /// Returns the content to paste if matched, nil otherwise.
+    /// A shortcut fires only when the whole utterance is the trigger phrase (case,
+    /// surrounding punctuation, and whitespace ignored) — an ordinary sentence or question
+    /// that merely contains the trigger words can never hijack routing.
     func match(_ text: String) -> String? {
-        let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        for shortcut in shortcuts {
-            if lower.contains(shortcut.trigger.lowercased()) {
-                return shortcut.content
-            }
-        }
-        return nil
+        shortcuts.first { Self.matches(trigger: $0.trigger, transcript: text) }?.content
+    }
+
+    nonisolated static func matches(trigger: String, transcript: String) -> Bool {
+        let triggerTokens = normalizedTokens(trigger)
+        guard !triggerTokens.isEmpty else { return false }
+        return triggerTokens == normalizedTokens(transcript)
+    }
+
+    nonisolated static func normalizedTokens(_ text: String) -> [String] {
+        text.lowercased()
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
     }
 
     // MARK: - Persistence

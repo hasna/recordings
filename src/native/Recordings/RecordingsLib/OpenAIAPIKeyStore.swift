@@ -5,6 +5,7 @@ struct ProcessingModelSelection: Equatable, Sendable {
     let transcriptionModel: String
     let transcriberModel: String
     let enhancementModel: String
+    let intentModel: String
     let enhanceTriggersJSON: String
     let keywordTransformsJSON: String
 }
@@ -67,6 +68,10 @@ enum OpenAIAPIKeyStore {
             environment["RECORDINGS_MODEL"],
             json["transcription_model"] as? String
         ) ?? "gpt-4o-transcribe"
+        let intentModel = firstNonEmpty(
+            environment["RECORDINGS_INTENT_MODEL"],
+            json["intent_model"] as? String
+        ) ?? "gpt-4o-mini"
         let triggers = (json["enhance_triggers"] as? [String]) ?? [
             "say it better", "rewrite this", "make it sound", "clean this up",
             "fix this", "rephrase", "write it properly", "make it professional",
@@ -85,6 +90,7 @@ enum OpenAIAPIKeyStore {
             transcriptionModel: transcriptionModel,
             transcriberModel: transcriberModel,
             enhancementModel: enhancementModel,
+            intentModel: intentModel,
             enhanceTriggersJSON: triggerJSON,
             keywordTransformsJSON: transformJSON
         )

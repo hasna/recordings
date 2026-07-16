@@ -1,3 +1,4 @@
+import RecordingsLib
 import SwiftUI
 
 /// Design tokens and Liquid Glass helpers for the Recordings app. Mirrors the Hasna Notes
@@ -51,14 +52,19 @@ private struct GlassSurface: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if reduceTransparency {
+        switch ChromeSurface.forReducedTransparency(reduceTransparency) {
+        case .opaque:
+            // Reduce Transparency: opaque system background, never a translucent material.
             content
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .background(
+                    Color(NSColor.windowBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
+                        .strokeBorder(.separator, lineWidth: 1)
                 )
-        } else {
+        case .liquidGlass:
             content.glassEffect(makeGlass(), in: .rect(cornerRadius: cornerRadius))
         }
     }
