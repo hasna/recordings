@@ -557,10 +557,22 @@ struct RealtimeTranscriptionTests {
         await persistenceTask.value
         #expect(probe.persistedResult?.text == "stored text")
         #expect(RecordingEngine.shouldPasteBeforePersistence(
-            postProcessingMode: PostProcessingMode.off.rawValue
+            postProcessingMode: PostProcessingMode.off.rawValue,
+            transcript: "settled realtime text",
+            hasSelection: false,
+            intentDetectionEnabled: true
         ))
         #expect(RecordingEngine.shouldPasteBeforePersistence(
-            postProcessingMode: PostProcessingMode.always.rawValue
+            postProcessingMode: PostProcessingMode.off.rawValue,
+            transcript: "rewrite this to be more formal",
+            hasSelection: true,
+            intentDetectionEnabled: true
+        ) == false)
+        #expect(RecordingEngine.shouldPasteBeforePersistence(
+            postProcessingMode: PostProcessingMode.always.rawValue,
+            transcript: "settled realtime text",
+            hasSelection: false,
+            intentDetectionEnabled: true
         ) == false)
         #expect(RecordingEngine.shouldLabelRewriting(
             postProcessingMode: PostProcessingMode.always.rawValue

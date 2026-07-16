@@ -10,6 +10,7 @@ struct RecordWorkspaceView: View {
     @ObservedObject var store: RecordingsStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Namespace private var glass
 
     private var engine: RecordingEngine { store.engine }
@@ -54,12 +55,23 @@ struct RecordWorkspaceView: View {
 
     // MARK: - Hero (single morphing glass surface)
 
+    @ViewBuilder
     private var hero: some View {
-        VStack(spacing: 14) { heroContent }
+        let content = VStack(spacing: 14) { heroContent }
             .frame(maxWidth: .infinity, minHeight: 208)
             .padding(26)
-            .glassEffect(heroGlass, in: .rect(cornerRadius: Theme.cornerLarge))
-            .glassEffectID("record-hero", in: glass)
+        if reduceTransparency {
+            content
+                .background(.ultraThinMaterial, in: .rect(cornerRadius: Theme.cornerLarge))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
+                        .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
+                )
+        } else {
+            content
+                .glassEffect(heroGlass, in: .rect(cornerRadius: Theme.cornerLarge))
+                .glassEffectID("record-hero", in: glass)
+        }
     }
 
     private var heroGlass: Glass {
@@ -80,9 +92,9 @@ struct RecordWorkspaceView: View {
         case .listening:
             listeningContent
         case .finalizing:
-            busyContent(label: "Finishing up…", detail: "Capturing the last words")
+            busyContent(label: "Finishing up…", detail: "Capturing the last words", showsLiveText: true)
         case .processing(let label):
-            busyContent(label: label, detail: nil)
+            busyContent(label: label, detail: nil, showsLiveText: false)
         case .ready(let summary):
             readyContent(summary: summary)
         case .failed(let message):
@@ -105,6 +117,7 @@ struct RecordWorkspaceView: View {
                 .frame(maxWidth: .infinity).padding(.vertical, 14).contentShape(.rect)
             }
             .buttonStyle(.plain)
+            .keyboardShortcut(.defaultAction)
             .accessibilityLabel("Start recording")
 
             Text("Speak — Recordings types what you say, answers questions, and edits selected text.")
@@ -164,7 +177,7 @@ struct RecordWorkspaceView: View {
 
     // MARK: Finalizing / Processing
 
-    private func busyContent(label: String, detail: String?) -> some View {
+    private func busyContent(label: String, detail: String?, showsLiveText: Bool) -> some View {
         VStack(spacing: 14) {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.large)
@@ -174,7 +187,9 @@ struct RecordWorkspaceView: View {
             if let detail {
                 Text(detail).font(.caption).foregroundStyle(.tertiary)
             }
-            liveText(placeholder: "Finishing up…")
+            if showsLiveText {
+                liveText(placeholder: "Finishing up…")
+            }
         }
     }
 
@@ -196,6 +211,7 @@ struct RecordWorkspaceView: View {
             }
             .buttonStyle(.glass)
             .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
             .accessibilityLabel("Start a new recording")
         }
         .accessibilityElement(children: .contain)
@@ -219,6 +235,7 @@ struct RecordWorkspaceView: View {
             }
             .buttonStyle(.glass)
             .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
             .accessibilityLabel("Try recording again")
         }
         .accessibilityElement(children: .contain)
@@ -331,10 +348,10 @@ struct RecordWorkspaceView: View {
     // MARK: - Recent strip
 
     private var recentStrip: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let items = Array(engine.recentTranscriptions.prefix(3))
+        return VStack(alignment: .leading, spacing: 6) {
             Text("JUST NOW").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            ForEach(engine.recentTranscriptions.prefix(3).indices, id: \.self) { i in
-                let item = engine.recentTranscriptions[i]
+            ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "text.alignleft").font(.caption).foregroundStyle(.tertiary).padding(.top, 2)
                     Text(item.displayText).font(.callout).lineLimit(2)
@@ -346,7 +363,7 @@ struct RecordWorkspaceView: View {
                     .accessibilityLabel("Paste transcript into front app")
                 }
                 .padding(.vertical, 4)
-                if i < min(2, engine.recentTranscriptions.count - 1) { Divider().opacity(0.3) }
+                if i < items.count - 1 { Divider().opacity(0.3) }
             }
         }
         .frame(maxWidth: 560)

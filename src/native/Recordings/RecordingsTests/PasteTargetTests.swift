@@ -7,15 +7,23 @@ struct PasteTargetTests {
     func selectionCapturePolicy() {
         #expect(RecordingEngine.shouldCaptureSelection(
             targetPid: 42,
-            accessibilityTrusted: true
+            accessibilityTrusted: true,
+            intentDetectionEnabled: true
         ))
         #expect(!RecordingEngine.shouldCaptureSelection(
             targetPid: nil,
-            accessibilityTrusted: true
+            accessibilityTrusted: true,
+            intentDetectionEnabled: true
         ))
         #expect(!RecordingEngine.shouldCaptureSelection(
             targetPid: 42,
-            accessibilityTrusted: false
+            accessibilityTrusted: false,
+            intentDetectionEnabled: true
+        ))
+        #expect(!RecordingEngine.shouldCaptureSelection(
+            targetPid: 42,
+            accessibilityTrusted: true,
+            intentDetectionEnabled: false
         ))
     }
 

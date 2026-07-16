@@ -124,8 +124,14 @@ final class AccessibilitySelectionToken: @unchecked Sendable {
         )
     }
 
+    /// Cap for each Accessibility IPC round trip during capture. Capture happens on the
+    /// MainActor in the recording-start path, so a beachballing target app must never be
+    /// able to stall recording behind the multi-second system default.
+    static let captureMessagingTimeout: Float = 0.25
+
     static func capture(for pid: pid_t) -> AccessibilitySelectionToken? {
         let application = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application, captureMessagingTimeout)
         var focusedElementRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             application,
@@ -135,6 +141,7 @@ final class AccessibilitySelectionToken: @unchecked Sendable {
         let focusedElementRef,
         CFGetTypeID(focusedElementRef) == AXUIElementGetTypeID() else { return nil }
         let focusedElement = focusedElementRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(focusedElement, captureMessagingTimeout)
 
         var focusedWindowRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -145,6 +152,7 @@ final class AccessibilitySelectionToken: @unchecked Sendable {
         let focusedWindowRef,
         CFGetTypeID(focusedWindowRef) == AXUIElementGetTypeID() else { return nil }
         let focusedWindow = focusedWindowRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(focusedWindow, captureMessagingTimeout)
 
         let documentIdentifier = stringAttribute(
             kAXDocumentAttribute as CFString,
@@ -817,7 +825,7 @@ public final class RecordingEngine: ObservableObject {
             if isTranscribing {
                 statusMessage = "Finish transcribing before recording again"
             } else if deliveryIsPending {
-                statusMessage = "Finish pasting before recording again"
+                statusMessage = "Still delivering the last recording"
             }
             return
         }
@@ -852,10 +860,12 @@ public final class RecordingEngine: ObservableObject {
         }
         // The selection is frozen for every recording (not only an exposed "command mode"),
         // so a later command decision can only ever act on the exact text and element that
-        // were selected when the user started speaking.
+        // were selected when the user started speaking. Skipped entirely when intent
+        // detection is off — no command route exists to consume it.
         targetSelectionToken = if Self.shouldCaptureSelection(
             targetPid: targetAppPid,
-            accessibilityTrusted: AXIsProcessTrusted()
+            accessibilityTrusted: AXIsProcessTrusted(),
+            intentDetectionEnabled: intentDetectionEnabled
         ), let targetAppPid {
             AccessibilitySelectionToken.capture(for: targetAppPid)
         } else {
@@ -933,9 +943,10 @@ public final class RecordingEngine: ObservableObject {
 
     nonisolated static func shouldCaptureSelection(
         targetPid: pid_t?,
-        accessibilityTrusted: Bool
+        accessibilityTrusted: Bool,
+        intentDetectionEnabled: Bool
     ) -> Bool {
-        targetPid != nil && accessibilityTrusted
+        targetPid != nil && accessibilityTrusted && intentDetectionEnabled
     }
 
     nonisolated static func recordingStatus(
@@ -1253,7 +1264,10 @@ public final class RecordingEngine: ObservableObject {
                 }
 
                 if Self.shouldPasteBeforePersistence(
-                    postProcessingMode: postProcessingMode
+                    postProcessingMode: postProcessingMode,
+                    transcript: realtimeFastPathText,
+                    hasSelection: selectionToken != nil,
+                    intentDetectionEnabled: processingConfiguration.intentDetectionEnabled
                 ) {
                     self.isTranscribing = false
                     _ = Self.deliverRealtimeBeforePersistence(
@@ -1263,6 +1277,7 @@ public final class RecordingEngine: ObservableObject {
                             await withCheckedContinuation { continuation in
                                 self.finishWithText(
                                     text,
+                                    rawTranscript: text,
                                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                                     targetAppPid: targetAppPid,
                                     selectionToken: selectionToken,
@@ -1330,6 +1345,7 @@ public final class RecordingEngine: ObservableObject {
                 self.isTranscribing = false
                 self.finishWithText(
                     savedText,
+                    rawTranscript: realtimeFastPathText,
                     targetAppBundleIdentifier: targetAppBundleIdentifier,
                     targetAppPid: targetAppPid,
                     selectionToken: selectionToken,
@@ -1370,6 +1386,7 @@ public final class RecordingEngine: ObservableObject {
                     self.isTranscribing = false
                     self.finishWithText(
                         text,
+                        rawTranscript: text,
                         targetAppBundleIdentifier: targetAppBundleIdentifier,
                         targetAppPid: targetAppPid,
                         selectionToken: selectionToken,
@@ -1431,10 +1448,20 @@ public final class RecordingEngine: ObservableObject {
         return shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount) ? nil : text
     }
 
+    /// Delivery may only run ahead of persistence for transcripts the local screen already
+    /// decided are plain dictation: the paste is near-instant, so persistence is deferred by
+    /// milliseconds. Command/conversation-shaped transcripts persist first — their delivery
+    /// can block on the classifier, the assistant, or the rewrite CLI, and the recording
+    /// must already be durable by then.
     nonisolated static func shouldPasteBeforePersistence(
-        postProcessingMode: String
+        postProcessingMode: String,
+        transcript: String,
+        hasSelection: Bool,
+        intentDetectionEnabled: Bool
     ) -> Bool {
-        PostProcessingMode(rawValue: postProcessingMode) == .off
+        guard PostProcessingMode(rawValue: postProcessingMode) == .off else { return false }
+        guard intentDetectionEnabled else { return true }
+        return IntentScreen.screen(text: transcript, hasSelection: hasSelection)?.intent == .dictate
     }
 
     nonisolated static func shouldLabelRewriting(
@@ -1678,6 +1705,7 @@ public final class RecordingEngine: ObservableObject {
 
     private func finishWithText(
         _ text: String,
+        rawTranscript: String,
         targetAppBundleIdentifier: String?,
         targetAppPid: pid_t?,
         selectionToken: AccessibilitySelectionToken?,
@@ -1689,15 +1717,23 @@ public final class RecordingEngine: ObservableObject {
         pipelineGeneration: UInt64? = nil,
         deliveryCompleted: (@MainActor @Sendable () -> Void)? = nil
     ) {
-        log("finishWithText chars=\(text.count)")
+        log("finishWithText chars=\(text.count) rawChars=\(rawTranscript.count)")
         if let pipelineGeneration,
            !pipelineDeliveryGate.claimDelivery(for: pipelineGeneration) {
             log("duplicate delivery suppressed pipeline_generation=\(pipelineGeneration)")
             deliveryCompleted?()
             return
         }
+        // A delivery whose recording has been superseded (or that would land mid-recording)
+        // is abandoned outright: the transcript is persisted to the library, and nothing may
+        // paste into whatever the user is doing now.
+        if isRecording || (pipelineGeneration.map { $0 != recordingGeneration } ?? false) {
+            log("delivery abandoned for superseded recording pipeline_generation=\(pipelineGeneration.map(String.init) ?? "nil")")
+            deliveryCompleted?()
+            return
+        }
 
-        let execute: @MainActor @Sendable (RoutedSpeechAction, IntentDecisionOrigin) -> Void = { [weak self] action, origin in
+        let execute: @MainActor @Sendable (RoutedSpeechAction, IntentDecisionOrigin, Bool) -> Void = { [weak self] action, origin, literalTranscript in
             guard let self else {
                 deliveryCompleted?()
                 return
@@ -1706,6 +1742,8 @@ public final class RecordingEngine: ObservableObject {
                 action,
                 origin: origin,
                 text: text,
+                rawTranscript: rawTranscript,
+                literalTranscript: literalTranscript,
                 targetAppBundleIdentifier: targetAppBundleIdentifier,
                 targetAppPid: targetAppPid,
                 selectionToken: selectionToken,
@@ -1719,18 +1757,47 @@ public final class RecordingEngine: ObservableObject {
             )
         }
 
+        // Voice shortcuts are explicit user-configured expansions and take precedence over
+        // intent inference, exactly as they preceded routing before this flow existed.
+        if let shortcutText = voiceShortcuts?.match(rawTranscript) {
+            log("voice shortcut matched — pasting shortcut content")
+            pasteIntoFrontApp(
+                shortcutText,
+                targetAppBundleIdentifier: targetAppBundleIdentifier,
+                targetAppPid: targetAppPid,
+                restoreClipboard: true,
+                deliveryKind: .ordinaryDictation,
+                pipelineTrace: pipelineTrace,
+                pipelineGeneration: pipelineGeneration,
+                deliveryCompleted: deliveryCompleted
+            )
+            insertRecentTranscription(
+                rawText: rawTranscript,
+                processedText: shortcutText,
+                projectId: activeProjectId,
+                projectName: activeProjectName
+            )
+            return
+        }
+
+        // Intent is always decided on the raw transcript — never on post-processed output,
+        // which the enhancement pipeline may have rewritten.
         let routingContext = IntentRoutingContext(
             detectionEnabled: processingConfiguration.intentDetectionEnabled,
             hasSelection: selectionToken != nil,
             accessibilityTrusted: AXIsProcessTrusted()
         )
         if !routingContext.detectionEnabled {
-            execute(IntentRouter.route(decision: nil, context: routingContext), .localScreen)
+            execute(IntentRouter.route(decision: nil, context: routingContext), .localScreen, false)
             return
         }
-        if let localDecision = IntentScreen.screen(text: text) {
+        if let localDecision = IntentScreen.screen(text: rawTranscript, hasSelection: routingContext.hasSelection) {
             log("intent decided locally intent=\(localDecision.intent.rawValue) reason=\(localDecision.reason)")
-            execute(IntentRouter.route(decision: localDecision, context: routingContext), .localScreen)
+            execute(
+                IntentRouter.route(decision: localDecision, context: routingContext),
+                .localScreen,
+                localDecision.literalTranscript
+            )
             return
         }
 
@@ -1738,15 +1805,14 @@ public final class RecordingEngine: ObservableObject {
         // and the generation is re-checked afterwards so a stale decision can never act on a
         // later recording.
         intentDeliveryPending = true
-        statusMessage = "Deciding..."
-        flowPhase = .processing("Deciding...")
+        updateDeliveryStatus("Deciding...", kind: .progress, pipelineGeneration: pipelineGeneration)
         if let pipelineTrace { log(pipelineTrace.message(stage: "intent_classification_started")) }
         let classifier = intentClassifier
         let intentModel = processingConfiguration.intentModel
         let hasSelection = routingContext.hasSelection
         Task { [weak self] in
             let outcome = await classifier.classify(
-                transcript: text,
+                transcript: rawTranscript,
                 hasSelection: hasSelection,
                 model: intentModel
             )
@@ -1778,7 +1844,7 @@ public final class RecordingEngine: ObservableObject {
                     accessibilityTrusted: AXIsProcessTrusted()
                 )
             )
-            execute(action, .classifier)
+            execute(action, .classifier, false)
         }
     }
 
@@ -1786,6 +1852,8 @@ public final class RecordingEngine: ObservableObject {
         _ action: RoutedSpeechAction,
         origin: IntentDecisionOrigin,
         text: String,
+        rawTranscript: String,
+        literalTranscript: Bool,
         targetAppBundleIdentifier: String?,
         targetAppPid: pid_t?,
         selectionToken: AccessibilitySelectionToken?,
@@ -1799,9 +1867,8 @@ public final class RecordingEngine: ObservableObject {
     ) {
         switch action {
         case .paste(let reason):
-            log("intent route=paste origin=\(origin.rawValue) reason=\(reason)")
-            let shortcutText = voiceShortcuts?.match(text)
-            let output = shortcutText ?? text
+            log("intent route=paste origin=\(origin.rawValue) literal=\(literalTranscript) reason=\(reason)")
+            let output = literalTranscript ? rawTranscript : text
             pasteIntoFrontApp(
                 output,
                 targetAppBundleIdentifier: targetAppBundleIdentifier,
@@ -1813,15 +1880,15 @@ public final class RecordingEngine: ObservableObject {
                 deliveryCompleted: deliveryCompleted
             )
             insertRecentTranscription(
-                rawText: text,
-                processedText: shortcutText,
+                rawText: rawTranscript,
+                processedText: output == rawTranscript ? nil : output,
                 projectId: activeProjectId,
                 projectName: activeProjectName
             )
         case .rewriteSelection(let reason):
             log("intent route=rewriteSelection origin=\(origin.rawValue) reason=\(reason)")
             runCommandMode(
-                instruction: text,
+                instruction: rawTranscript,
                 targetAppBundleIdentifier: targetAppBundleIdentifier,
                 targetAppPid: targetAppPid,
                 selectionToken: selectionToken,
@@ -1834,13 +1901,13 @@ public final class RecordingEngine: ObservableObject {
         case .answerConversation(let reason):
             log("intent route=answerConversation origin=\(origin.rawValue) reason=\(reason)")
             insertRecentTranscription(
-                rawText: text,
+                rawText: rawTranscript,
                 processedText: nil,
                 projectId: activeProjectId,
                 projectName: activeProjectName
             )
             runConversationMode(
-                question: text,
+                question: rawTranscript,
                 processingConfiguration: processingConfiguration,
                 pipelineTrace: pipelineTrace,
                 pipelineGeneration: pipelineGeneration,
@@ -2215,6 +2282,7 @@ public final class RecordingEngine: ObservableObject {
             let output = CLIRunner.run(transcribeArgs, home: homePath)
             let cliError = CLIRunner.parseError(output)
             let cliText = cliError == nil ? CLIRunner.parseJSON(output) : nil
+            let cliRawText = cliError == nil ? CLIRunner.parseRawTranscript(output) : nil
 
             await MainActor.run {
                 if let pipelineTrace {
@@ -2243,6 +2311,7 @@ public final class RecordingEngine: ObservableObject {
                     self.isTranscribing = false
                     self.finishWithText(
                         text,
+                        rawTranscript: cliRawText ?? realtimeText ?? text,
                         targetAppBundleIdentifier: targetAppBundleIdentifier,
                         targetAppPid: targetAppPid,
                         selectionToken: selectionToken,
@@ -2474,6 +2543,9 @@ public final class RecordingEngine: ObservableObject {
             }
             self.intentDeliveryPending = false
             if let pipelineTrace { self.log(pipelineTrace.message(stage: "conversation_complete")) }
+            // The conversation route never touches the clipboard: the reply card has an
+            // explicit Copy affordance, and clobbering whatever the user had copied would be
+            // an irreversible side effect of a possibly-misclassified recording.
             switch outcome {
             case .answer(let answer):
                 if Self.shouldApplyConversationReply(
@@ -2482,22 +2554,16 @@ public final class RecordingEngine: ObservableObject {
                     isRecording: self.isRecording
                 ) {
                     self.conversationReply = ConversationReply(question: question, answer: answer)
+                    self.updateDeliveryStatus("Answered", kind: .success, pipelineGeneration: pipelineGeneration)
                 } else {
                     self.log("stale conversation reply dropped pipeline_generation=\(pipelineGeneration.map(String.init) ?? "nil")")
                 }
-                let copied = Self.writeClipboardPreservingOnFailure(answer, to: .general)
-                self.updateDeliveryStatus(
-                    copied ? "Answered — copied to clipboard" : "Answered",
-                    kind: .success,
-                    pipelineGeneration: pipelineGeneration
-                )
             case .unavailable(let message):
                 // The delayed answer failed; never auto-paste this late. Fail closed to the
-                // preview path: the transcript stays in Recent and on the clipboard.
+                // preview path: the transcript is persisted and stays in Recent.
                 self.log("conversation unavailable: \(message)")
-                let copied = Self.writeClipboardPreservingOnFailure(question, to: .general)
                 self.updateDeliveryStatus(
-                    copied ? "Couldn't answer — transcript copied" : "Couldn't answer — transcript in Recent",
+                    "Couldn't answer — transcript saved to Recent",
                     kind: .failure,
                     pipelineGeneration: pipelineGeneration
                 )
@@ -2512,7 +2578,8 @@ public final class RecordingEngine: ObservableObject {
         isRecording: Bool
     ) -> Bool {
         guard !isRecording else { return false }
-        guard let replyGeneration else { return true }
+        // No generation means the reply cannot be proven current — fail closed.
+        guard let replyGeneration else { return false }
         return replyGeneration == currentGeneration
     }
 
@@ -3774,6 +3841,19 @@ enum CLIRunner: Sendable {
             return "Transcription failed"
         }
         return String(message.prefix(120))
+    }
+
+    /// The raw (pre-enhancement) transcript from a CLI JSON envelope. Intent decisions must
+    /// run on this, never on `processed_text`.
+    static func parseRawTranscript(_ output: String) -> String? {
+        guard let s = output.range(of: "{"), let e = output.range(of: "}", options: .backwards),
+              s.lowerBound < e.upperBound else { return nil }
+        let json = String(output[s.lowerBound..<e.upperBound])
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = obj["raw_text"] as? String,
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return raw
     }
 
     static func parseJSON(_ output: String) -> String? {

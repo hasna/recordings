@@ -12,16 +12,20 @@ public enum SpeechIntent: String, CaseIterable, Sendable {
 }
 
 /// One typed classifier outcome. `confidence` is clamped to 0...1; `reason` is a short
-/// human-readable justification surfaced in logs and the Record page.
+/// human-readable justification surfaced in logs and the Record page. When
+/// `literalTranscript` is set the raw transcript must be pasted verbatim, bypassing any
+/// post-processed variant — used for injection-vetoed speech.
 public struct IntentDecision: Equatable, Sendable {
     public let intent: SpeechIntent
     public let confidence: Double
     public let reason: String
+    public let literalTranscript: Bool
 
-    public init(intent: SpeechIntent, confidence: Double, reason: String) {
+    public init(intent: SpeechIntent, confidence: Double, reason: String, literalTranscript: Bool = false) {
         self.intent = intent
         self.confidence = confidence.isFinite ? min(max(confidence, 0), 1) : 0
         self.reason = String(reason.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        self.literalTranscript = literalTranscript
     }
 }
 
@@ -40,7 +44,7 @@ public enum IntentScreen {
     /// Transcripts longer than this are treated as long-form dictation outright.
     public static let longFormWordCount = 60
 
-    public static func screen(text: String) -> IntentDecision? {
+    public static func screen(text: String, hasSelection: Bool) -> IntentDecision? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return IntentDecision(intent: .dictate, confidence: 1, reason: "Empty transcript")
@@ -53,7 +57,8 @@ public enum IntentScreen {
             return IntentDecision(
                 intent: .dictate,
                 confidence: 1,
-                reason: "Suspected instruction injection — dictating literally"
+                reason: "Suspected instruction injection — dictating literally",
+                literalTranscript: true
             )
         }
 
@@ -62,8 +67,15 @@ public enum IntentScreen {
             return IntentDecision(intent: .dictate, confidence: 1, reason: "Long-form dictation")
         }
 
-        if containsCommandMarker(lowered) || containsConversationMarker(lowered) {
+        let commandShaped = containsCommandMarker(lowered)
+        let conversationShaped = containsConversationMarker(lowered)
+        if conversationShaped || (commandShaped && hasSelection) {
             return nil
+        }
+        if commandShaped {
+            // Command-shaped speech with nothing selected can never become a command, so it
+            // pastes immediately instead of waiting on the classifier.
+            return IntentDecision(intent: .dictate, confidence: 1, reason: "No selection for an edit — dictating")
         }
         return IntentDecision(intent: .dictate, confidence: 1, reason: "No command or question markers")
     }
@@ -76,13 +88,18 @@ public enum IntentScreen {
         "ignore your instructions",
         "disregard your instructions",
         "disregard previous instructions",
+        "disregard everything above",
+        "disregard the above",
         "override your instructions",
+        "new instructions:",
         "you are now",
+        "you're now",
         "system prompt",
         "developer message",
         "rm -rf",
-        "sudo ",
+        "sudo",
         "run the command",
+        "run command",
         "execute the command",
         "run a shell",
         "open the terminal and",

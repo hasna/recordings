@@ -21,9 +21,10 @@ public final class SpeechIntentClassifier: Sendable {
 
     static let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
     /// Classification sits between transcript settlement and paste, so it must stay tightly
-    /// bounded; clear dictation never reaches this call at all.
+    /// bounded; clear dictation never reaches this call at all. Conversation blocks new
+    /// recordings while pending, so it is also kept short.
     public static let classificationTimeout: TimeInterval = 2.5
-    public static let conversationTimeout: TimeInterval = 20
+    public static let conversationTimeout: TimeInterval = 10
 
     private let apiKeyProvider: @Sendable () -> String
     private let transport: Transport
