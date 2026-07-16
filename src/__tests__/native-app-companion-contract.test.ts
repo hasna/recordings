@@ -364,6 +364,13 @@ describe("native app companion contract", () => {
     expect(engine).toContain("literalRawTranscript ? rawTranscript : text");
     expect(engine).toContain("commandRewriteTimeout: TimeInterval = 10");
     expect(engine).toContain("runCLI(rewriteArguments, homePath, Self.commandRewriteTimeout)");
+
+    // The 10 s rewrite budget is total wall time, not just the child execution deadline:
+    // the production closure hands it to CLIRunner as a wall-clock budget, and CLIRunner
+    // reserves its cleanup (termination grace, kill grace, pipe drain) inside it.
+    expect(engine).toContain("CLIRunner.run($0, home: $1, timeout: $2, totalWallClockBudget: $2)");
+    expect(engine).toContain("static let wallClockCleanupReserve: TimeInterval = 1");
+    expect(engine).toContain("totalWallClockBudget > wallClockCleanupReserve");
     expect(engine).toContain("public func cancelIntentProcessing()");
     expect(engine).toContain("shouldAbandonDelivery");
 

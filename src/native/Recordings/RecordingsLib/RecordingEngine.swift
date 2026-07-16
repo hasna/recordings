@@ -688,7 +688,9 @@ public final class RecordingEngine: ObservableObject {
         RecordingEngine.focusedWindowTitle(pid: $0)
     }
     var commandCLI: @Sendable (_ args: [String], _ home: String, _ timeout: TimeInterval) -> String = {
-        CLIRunner.run($0, home: $1, timeout: $2)
+        // The caller's timeout is a total wall budget: execution, termination grace, kill
+        // grace, and pipe drain must all land inside it, not just the child deadline.
+        CLIRunner.run($0, home: $1, timeout: $2, totalWallClockBudget: $2)
     }
     /// Resolves and revalidates the frozen rewrite target immediately before a rewrite:
     /// re-finds the recorded target app, activates it, waits for focus to settle, and
@@ -798,10 +800,11 @@ public final class RecordingEngine: ObservableObject {
 
     private nonisolated static let realtimePeriodicCommitIntervalMilliseconds: UInt64 = 900
     private nonisolated static let realtimeFinishTimeoutMilliseconds: UInt64 = 700
-    /// Hard budget for the rewrite helper (CLI spawn + one model call). The user is waiting
-    /// with recording blocked, so this matches the interactive answer ceiling
-    /// (`SpeechIntentClassifier.conversationTimeout`) — never the generic 120 s CLI ceiling;
-    /// cancellation stays available the whole time.
+    /// Hard wall-clock budget for the rewrite helper (CLI spawn + one model call), covering
+    /// execution *and* CLIRunner's termination grace, kill grace, and pipe drain — not just
+    /// the child execution deadline. The user is waiting with recording blocked, so this
+    /// matches the interactive answer ceiling (`SpeechIntentClassifier.conversationTimeout`)
+    /// — never the generic 120 s CLI ceiling; cancellation stays available the whole time.
     nonisolated static let commandRewriteTimeout: TimeInterval = 10
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
@@ -3740,7 +3743,12 @@ enum CLIRunner: Sendable {
         case leaderReaped(Int32)
     }
 
-    static func run(_ args: [String], home: String, timeout: TimeInterval = 120) -> String {
+    static func run(
+        _ args: [String],
+        home: String,
+        timeout: TimeInterval = 120,
+        totalWallClockBudget: TimeInterval? = nil
+    ) -> String {
         let command = resolveCommand(home: home)
         let arguments = command.argumentsPrefix + args
         let environment = ProcessInfo.processInfo.environment.merging([
@@ -3751,7 +3759,8 @@ enum CLIRunner: Sendable {
                 command.executable,
                 arguments: arguments,
                 environment: environment,
-                executionTimeout: timeout
+                executionTimeout: timeout,
+                totalWallClockBudget: totalWallClockBudget
             )
             if output.terminationStatus != 0 {
                 let details = output.stderr.isEmpty ? output.stdout : output.stderr
@@ -3785,6 +3794,11 @@ enum CLIRunner: Sendable {
         return Command(executable: "/usr/bin/env", argumentsPrefix: ["recordings"])
     }
 
+    /// Wall-clock time reserved out of the execution window when `totalWallClockBudget` is
+    /// set, so termination grace, kill grace, and pipe drain land inside the budget with
+    /// scheduling margin to spare.
+    static let wallClockCleanupReserve: TimeInterval = 1
+
     static func runExecutable(
         _ executable: String,
         arguments: [String],
@@ -3793,6 +3807,7 @@ enum CLIRunner: Sendable {
         terminationGracePeriod: TimeInterval = 0.5,
         forceKillGracePeriod: TimeInterval = 1,
         pipeDrainTimeout: TimeInterval = 2,
+        totalWallClockBudget: TimeInterval? = nil,
         beforeExecutionDeadline: (() -> Void)? = nil,
         lifecycleObserver: ((ProcessLifecycleEvent) -> Void)? = nil
     ) throws -> ProcessOutput {
@@ -3800,6 +3815,26 @@ enum CLIRunner: Sendable {
         precondition(terminationGracePeriod.isFinite && terminationGracePeriod >= 0)
         precondition(forceKillGracePeriod.isFinite && forceKillGracePeriod >= 0)
         precondition(pipeDrainTimeout.isFinite && pipeDrainTimeout >= 0)
+        if let totalWallClockBudget {
+            precondition(totalWallClockBudget.isFinite && totalWallClockBudget > wallClockCleanupReserve)
+        }
+
+        // The budget clock starts before the spawn so setup latency cannot extend the
+        // observable wall time. Every wait below is clamped to what is left of it.
+        let wallClockDeadline = totalWallClockBudget.map { monotonicUptimeDeadline(after: $0) }
+        func clampedToWallClockBudget(
+            _ phaseTimeout: TimeInterval,
+            reserving reserve: TimeInterval = 0
+        ) -> TimeInterval {
+            guard let wallClockDeadline else { return phaseTimeout }
+            let now = DispatchTime.now().uptimeNanoseconds
+            let remaining = wallClockDeadline > now
+                ? Double(wallClockDeadline - now) / 1_000_000_000 - reserve
+                : 0
+            return max(0, min(phaseTimeout, remaining))
+        }
+        let contractualExecutionTimeout = totalWallClockBudget
+            .map { min(executionTimeout, $0 - wallClockCleanupReserve) } ?? executionTimeout
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -3837,7 +3872,7 @@ enum CLIRunner: Sendable {
         do {
             leaderExitWasObserved = try waitForUnreapedLeaderExit(
                 processIdentifier,
-                timeout: executionTimeout,
+                timeout: clampedToWallClockBudget(executionTimeout, reserving: wallClockCleanupReserve),
                 lifecycleObserver: lifecycleObserver
             )
             didTimeOut = !leaderExitWasObserved
@@ -3850,7 +3885,7 @@ enum CLIRunner: Sendable {
                 stdoutCapture: stdoutCapture,
                 stderrCapture: stderrCapture,
                 readers: readers,
-                pipeDrainTimeout: pipeDrainTimeout
+                pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
             )
             throw error
         }
@@ -3864,7 +3899,7 @@ enum CLIRunner: Sendable {
             do {
                 confirmedExit = try waitForUnreapedLeaderExit(
                     processIdentifier,
-                    timeout: terminationGracePeriod,
+                    timeout: clampedToWallClockBudget(terminationGracePeriod),
                     lifecycleObserver: lifecycleObserver
                 )
             } catch {
@@ -3876,19 +3911,21 @@ enum CLIRunner: Sendable {
                     stdoutCapture: stdoutCapture,
                     stderrCapture: stderrCapture,
                     readers: readers,
-                    pipeDrainTimeout: pipeDrainTimeout
+                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
                 )
                 throw error
             }
         } else {
-            _ = readers.wait(timeout: monotonicDispatchDeadline(after: terminationGracePeriod))
+            _ = readers.wait(
+                timeout: monotonicDispatchDeadline(after: clampedToWallClockBudget(terminationGracePeriod))
+            )
         }
         signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
         if !confirmedExit {
             do {
                 confirmedExit = try waitForUnreapedLeaderExit(
                     processIdentifier,
-                    timeout: forceKillGracePeriod,
+                    timeout: clampedToWallClockBudget(forceKillGracePeriod),
                     lifecycleObserver: lifecycleObserver
                 )
             } catch {
@@ -3899,7 +3936,7 @@ enum CLIRunner: Sendable {
                     stdoutCapture: stdoutCapture,
                     stderrCapture: stderrCapture,
                     readers: readers,
-                    pipeDrainTimeout: pipeDrainTimeout
+                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
                 )
                 throw error
             }
@@ -3921,11 +3958,11 @@ enum CLIRunner: Sendable {
             stdoutCapture: stdoutCapture,
             stderrCapture: stderrCapture,
             readers: readers,
-            pipeDrainTimeout: pipeDrainTimeout
+            pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
         )
 
         if didTimeOut {
-            throw ExecutionError.timedOut(executable: executable, seconds: executionTimeout)
+            throw ExecutionError.timedOut(executable: executable, seconds: contractualExecutionTimeout)
         }
 
         return ProcessOutput(

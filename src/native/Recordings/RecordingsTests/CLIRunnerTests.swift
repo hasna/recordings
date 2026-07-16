@@ -284,6 +284,95 @@ struct CLIRunnerTests {
         expectProcessIsGone(try #require(Self.readPID(from: childPidFile)))
     }
 
+    @Test("a total wall-clock budget bounds execution, termination grace, kill grace, and pipe drain together")
+    func totalWallClockBudgetBoundsCleanup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-cli-wall-budget-\(UUID().uuidString)")
+        let script = root.appendingPathComponent("ignore-term.sh")
+        let pidFile = root.appendingPathComponent("pid")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            if let pid = Self.readPID(from: pidFile) {
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > "$1"
+        while :; do /bin/sleep 0.05; done
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let startedAt = ContinuousClock.now
+        var lifecycleEvents: [CLIRunner.ProcessLifecycleEvent] = []
+        do {
+            _ = try CLIRunner.runExecutable(
+                script.path,
+                arguments: [pidFile.path],
+                executionTimeout: 60,
+                totalWallClockBudget: 2,
+                lifecycleObserver: { lifecycleEvents.append($0) }
+            )
+            Issue.record("command unexpectedly completed inside its wall budget")
+        } catch let error as CLIRunner.ExecutionError {
+            guard case let .timedOut(_, seconds) = error else {
+                Issue.record("command returned the wrong execution error: \(error)")
+                return
+            }
+            // The execution window is the budget minus the cleanup reserve, never the
+            // caller's larger execution timeout.
+            #expect(seconds == 2 - CLIRunner.wallClockCleanupReserve)
+        }
+        #expect(ContinuousClock.now - startedAt < .seconds(2))
+        #expect(lifecycleEvents.contains(.processGroupSignaled(SIGTERM)))
+        #expect(lifecycleEvents.contains(.processGroupSignaled(SIGKILL)))
+        if let pid = Self.readPID(from: pidFile) {
+            expectProcessIsGone(pid)
+        }
+    }
+
+    @Test("a hung rewrite helper returns within the 10 s interactive budget, cleanup included")
+    @MainActor
+    func hungRewriteHelperReturnsWithinInteractiveBudget() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-rewrite-budget-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        let pidFile = home.appendingPathComponent("pid")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("recordings")
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > '\(pidFile.path)'
+        while :; do /bin/sleep 0.05; done
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        defer {
+            if let pid = Self.readPID(from: pidFile) {
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        // The production seam exactly as runCommandMode uses it: the engine's default
+        // commandCLI closure on a detached task, budgeted by commandRewriteTimeout — the
+        // observable wall time must stay inside the budget even though the helper never
+        // exits on its own and ignores SIGTERM.
+        let runCLI = RecordingEngine().commandCLI
+        let homePath = home.path
+        let startedAt = ContinuousClock.now
+        let output = await Task.detached {
+            runCLI(["rewrite-selection"], homePath, RecordingEngine.commandRewriteTimeout)
+        }.value
+        let elapsed = ContinuousClock.now - startedAt
+
+        #expect(elapsed < .seconds(RecordingEngine.commandRewriteTimeout))
+        #expect(output.hasPrefix("ERROR:"))
+        #expect(output.contains("timed out"))
+    }
+
     @Test("transcribeCLIArgs passes project, cleanup mode, and transcriber prompt")
     func transcribeCLIArgsWithPrompt() {
         let args = RecordingEngine.transcribeCLIArgs(

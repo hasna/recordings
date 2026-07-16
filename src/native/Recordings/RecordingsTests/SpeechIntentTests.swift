@@ -553,6 +553,11 @@ struct IntentFlowStateTests {
         #expect(RecordingEngine.commandRewriteTimeout > 0)
         #expect(RecordingEngine.commandRewriteTimeout <= 10)
         #expect(RecordingEngine.commandRewriteTimeout <= SpeechIntentClassifier.conversationTimeout)
+        // The budget is total wall time: CLIRunner reserves termination grace, kill grace,
+        // and pipe drain out of the execution window, and the reserve must leave a usable
+        // window behind.
+        #expect(CLIRunner.wallClockCleanupReserve > 0)
+        #expect(CLIRunner.wallClockCleanupReserve < RecordingEngine.commandRewriteTimeout)
     }
 
     @Test("busy phases block and terminal phases do not")
