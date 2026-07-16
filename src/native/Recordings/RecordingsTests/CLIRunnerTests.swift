@@ -373,6 +373,124 @@ struct CLIRunnerTests {
         #expect(output.contains("timed out"))
     }
 
+    @Test("an exhausted rewrite deadline with pipes held by an escaped descendant returns under the public ceiling")
+    @MainActor
+    func exhaustedRewriteDeadlineWithHeldPipesReturnsUnderCeiling() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recordings-rewrite-exhaustion-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".bun/bin")
+        let leaderPidFile = home.appendingPathComponent("leader-pid")
+        let holderPidFile = home.appendingPathComponent("holder-pid")
+        let markerFile = home.appendingPathComponent("holder-epipe")
+        let holderSource = home.appendingPathComponent("pipe-holder.c")
+        let holderBinary = home.appendingPathComponent("pipe-holder")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer {
+            if let holderPid = Self.readPID(from: holderPidFile) {
+                _ = Darwin.kill(holderPid, SIGKILL)
+            }
+            if let leaderPid = Self.readPID(from: leaderPidFile) {
+                _ = Darwin.kill(-leaderPid, SIGKILL)
+                _ = Darwin.kill(leaderPid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        // The holder escapes the CLI process group via setsid before any group-directed
+        // signal can reach it, inherits both capture pipes, and keeps their write ends open
+        // until the runner closes its read ends — at which point every write fails with
+        // EPIPE and the marker file records that both descriptor readers were shut down.
+        try """
+        #include <errno.h>
+        #include <signal.h>
+        #include <stdio.h>
+        #include <time.h>
+        #include <unistd.h>
+
+        int main(int argc, char **argv) {
+            if (argc < 3) return 64;
+            if (setsid() == -1) return 65;
+            signal(SIGPIPE, SIG_IGN);
+            FILE *pid = fopen(argv[1], "w");
+            if (!pid) return 66;
+            fprintf(pid, "%d", (int)getpid());
+            fclose(pid);
+            int stdoutBroken = 0;
+            int stderrBroken = 0;
+            while (!stdoutBroken || !stderrBroken) {
+                if (!stdoutBroken && write(STDOUT_FILENO, "x", 1) == -1 && errno == EPIPE) stdoutBroken = 1;
+                if (!stderrBroken && write(STDERR_FILENO, "y", 1) == -1 && errno == EPIPE) stderrBroken = 1;
+                struct timespec delay = {0, 50000000};
+                nanosleep(&delay, 0);
+            }
+            FILE *marker = fopen(argv[2], "w");
+            if (!marker) return 67;
+            fputs("both-epipe", marker);
+            fclose(marker);
+            return 0;
+        }
+        """.write(to: holderSource, atomically: true, encoding: .utf8)
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compile.arguments = ["-o", holderBinary.path, holderSource.path]
+        try compile.run()
+        compile.waitUntilExit()
+        try #require(compile.terminationStatus == 0)
+
+        let executable = bin.appendingPathComponent("recordings")
+        try """
+        #!/bin/sh
+        trap '' TERM
+        printf '%s' "$$" > '\(leaderPidFile.path)'
+        '\(holderBinary.path)' '\(holderPidFile.path)' '\(markerFile.path)' &
+        while [ ! -s '\(holderPidFile.path)' ]; do /bin/sleep 0.01; done
+        while :; do /bin/sleep 0.05; done
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        // The production seam exactly as runCommandMode uses it. The leader ignores SIGTERM
+        // (exhausting the execution window and the termination grace), only dies at the
+        // group SIGKILL, and the escaped holder keeps both pipes open so the drain wait
+        // also runs to exhaustion. The observable wall time must still land under the
+        // public ceiling — the return margin absorbs spawn, poll overshoot, capture
+        // shutdown, and the task hops.
+        let runCLI = RecordingEngine().commandCLI
+        let homePath = home.path
+        let startedAt = ContinuousClock.now
+        let output = await Task.detached {
+            runCLI(["rewrite-selection"], homePath, RecordingEngine.commandRewriteTimeout)
+        }.value
+        let elapsed = ContinuousClock.now - startedAt
+
+        // Upper bound is the public promise, with the ~1 s return margin left as CI
+        // tolerance above the internal deadline; the lower bound proves the deadline chain
+        // really ran to exhaustion instead of the helper exiting early.
+        #expect(elapsed < .seconds(RecordingEngine.commandRewriteTimeout))
+        #expect(elapsed > .seconds(8.4))
+        #expect(output.hasPrefix("ERROR:"))
+        #expect(output.contains("timed out"))
+
+        let leaderPid = try #require(Self.readPID(from: leaderPidFile))
+        expectProcessIsGone(leaderPid)
+        expectProcessGroupIsGone(leaderPid)
+
+        // The runner returned while the holder still owned both write ends; its EPIPE
+        // marker proves the capture read descriptors were closed rather than left behind
+        // with live readers, and the holder exits on its own once both pipes are broken.
+        let holderPid = try #require(Self.readPID(from: holderPidFile))
+        var marker: String?
+        let markerDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < markerDeadline {
+            if let contents = try? String(contentsOf: markerFile, encoding: .utf8), !contents.isEmpty {
+                marker = contents
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(marker == "both-epipe")
+        expectProcessIsGone(holderPid)
+    }
+
     @Test("transcribeCLIArgs passes project, cleanup mode, and transcriber prompt")
     func transcribeCLIArgsWithPrompt() {
         let args = RecordingEngine.transcribeCLIArgs(

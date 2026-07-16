@@ -558,6 +558,15 @@ struct IntentFlowStateTests {
         // window behind.
         #expect(CLIRunner.wallClockCleanupReserve > 0)
         #expect(CLIRunner.wallClockCleanupReserve < RecordingEngine.commandRewriteTimeout)
+        // The public ceiling is on *observable* wall time: the commandCLI seam hands
+        // CLIRunner a total deadline one return margin below the ceiling, so spawn setup,
+        // waitid poll overshoot, capture shutdown, and the task hop back to the caller
+        // cannot push the observable time past it. The internal deadline must still leave
+        // a usable execution window above the cleanup reserve.
+        #expect(RecordingEngine.commandRewriteReturnMargin > 0)
+        let cliDeadline = RecordingEngine.commandRewriteTimeout - RecordingEngine.commandRewriteReturnMargin
+        #expect(cliDeadline <= 9)
+        #expect(cliDeadline > CLIRunner.wallClockCleanupReserve)
     }
 
     @Test("busy phases block and terminal phases do not")

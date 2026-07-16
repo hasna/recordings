@@ -687,10 +687,14 @@ public final class RecordingEngine: ObservableObject {
     var focusedWindowTitleLookup: @Sendable (pid_t) -> String? = {
         RecordingEngine.focusedWindowTitle(pid: $0)
     }
-    var commandCLI: @Sendable (_ args: [String], _ home: String, _ timeout: TimeInterval) -> String = {
-        // The caller's timeout is a total wall budget: execution, termination grace, kill
-        // grace, and pipe drain must all land inside it, not just the child deadline.
-        CLIRunner.run($0, home: $1, timeout: $2, totalWallClockBudget: $2)
+    var commandCLI: @Sendable (_ args: [String], _ home: String, _ timeout: TimeInterval) -> String = { args, home, ceiling in
+        // The caller's timeout is the public ceiling on *observable* wall time. CLIRunner's
+        // total deadline (execution, termination grace, kill grace, pipe drain) sits a full
+        // return margin below it: spawn setup, waitid poll granularity, capture shutdown,
+        // and the hop back to the caller all run outside CLIRunner's clamped waits and must
+        // fit inside the reserved margin.
+        let cliDeadline = ceiling - RecordingEngine.commandRewriteReturnMargin
+        return CLIRunner.run(args, home: home, timeout: cliDeadline, totalWallClockBudget: cliDeadline)
     }
     /// Resolves and revalidates the frozen rewrite target immediately before a rewrite:
     /// re-finds the recorded target app, activates it, waits for focus to settle, and
@@ -805,7 +809,18 @@ public final class RecordingEngine: ObservableObject {
     /// the child execution deadline. The user is waiting with recording blocked, so this
     /// matches the interactive answer ceiling (`SpeechIntentClassifier.conversationTimeout`)
     /// — never the generic 120 s CLI ceiling; cancellation stays available the whole time.
+    /// The `commandCLI` seam hands CLIRunner `commandRewriteTimeout` minus
+    /// `commandRewriteReturnMargin` so the runner's own deadline keeping plus the return
+    /// path stays inside this ceiling.
     nonisolated static let commandRewriteTimeout: TimeInterval = 10
+    /// Wall-clock margin reserved out of `commandRewriteTimeout` before it becomes
+    /// CLIRunner's total deadline. CLIRunner clamps every wait to that deadline but still
+    /// pays small unclamped costs around them — spawn setup, waitid poll granularity (each
+    /// bounded wait can oversleep one 10 ms poll), synchronous capture shutdown, and the
+    /// detached-task hop back to the MainActor. Reserving a full second keeps the
+    /// *observable* rewrite time under the public ceiling even when the execution window,
+    /// termination grace, and pipe drain all run to exhaustion.
+    nonisolated static let commandRewriteReturnMargin: TimeInterval = 1
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -3859,8 +3874,12 @@ enum CLIRunner: Sendable {
         } catch {
             try? stdoutPipe.fileHandleForWriting.close()
             try? stderrPipe.fileHandleForWriting.close()
-            stopCapture(stdoutPipe.fileHandleForReading, capture: stdoutCapture, readers: readers)
-            stopCapture(stderrPipe.fileHandleForReading, capture: stderrCapture, readers: readers)
+            finishCaptures(
+                stdoutPipe: stdoutPipe,
+                stderrPipe: stderrPipe,
+                readers: readers,
+                pipeDrainTimeout: 0
+            )
             throw error
         }
         try? stdoutPipe.fileHandleForWriting.close()
@@ -3882,8 +3901,6 @@ enum CLIRunner: Sendable {
             finishCaptures(
                 stdoutPipe: stdoutPipe,
                 stderrPipe: stderrPipe,
-                stdoutCapture: stdoutCapture,
-                stderrCapture: stderrCapture,
                 readers: readers,
                 pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
             )
@@ -3908,8 +3925,6 @@ enum CLIRunner: Sendable {
                 finishCaptures(
                     stdoutPipe: stdoutPipe,
                     stderrPipe: stderrPipe,
-                    stdoutCapture: stdoutCapture,
-                    stderrCapture: stderrCapture,
                     readers: readers,
                     pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
                 )
@@ -3933,8 +3948,6 @@ enum CLIRunner: Sendable {
                 finishCaptures(
                     stdoutPipe: stdoutPipe,
                     stderrPipe: stderrPipe,
-                    stdoutCapture: stdoutCapture,
-                    stderrCapture: stderrCapture,
                     readers: readers,
                     pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
                 )
@@ -3955,8 +3968,6 @@ enum CLIRunner: Sendable {
         finishCaptures(
             stdoutPipe: stdoutPipe,
             stderrPipe: stderrPipe,
-            stdoutCapture: stdoutCapture,
-            stderrCapture: stderrCapture,
             readers: readers,
             pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
         )
@@ -4211,44 +4222,66 @@ enum CLIRunner: Sendable {
     private static func finishCaptures(
         stdoutPipe: Pipe,
         stderrPipe: Pipe,
-        stdoutCapture: ProcessDataCapture,
-        stderrCapture: ProcessDataCapture,
         readers: DispatchGroup,
         pipeDrainTimeout: TimeInterval
     ) {
         _ = readers.wait(timeout: monotonicDispatchDeadline(after: pipeDrainTimeout))
-        stopCapture(stdoutPipe.fileHandleForReading, capture: stdoutCapture, readers: readers)
-        stopCapture(stderrPipe.fileHandleForReading, capture: stderrCapture, readers: readers)
+        let stdoutReadHandle = stdoutPipe.fileHandleForReading
+        let stderrReadHandle = stderrPipe.fileHandleForReading
+        revokeCaptureDescriptor(stdoutReadHandle)
+        revokeCaptureDescriptor(stderrReadHandle)
+        // The descriptor slots are closed only once both reader threads have provably
+        // exited; closing while a reader could still issue a read would race against slot
+        // reuse. The pending notify block also keeps the handles alive until then, so a
+        // reader blocked on a silent pipe can never dangle onto a freed descriptor.
+        readers.notify(queue: .global(qos: .utility)) {
+            try? stdoutReadHandle.close()
+            try? stderrReadHandle.close()
+        }
     }
 
+    /// Consumes a capture pipe on a dedicated blocking-read thread. The runner must own
+    /// every reference to the read descriptor itself: `FileHandle.readabilityHandler`
+    /// keeps a private duplicate of the descriptor that can survive `close()` while data
+    /// is flowing, which would leave the pipe readable forever — a descendant that
+    /// inherited the write end would never observe EPIPE, and the descriptor would leak
+    /// in this process.
     private static func startCapture(
         _ handle: FileHandle,
         into capture: ProcessDataCapture,
         readers: DispatchGroup
     ) {
+        let descriptor = handle.fileDescriptor
         readers.enter()
-        handle.readabilityHandler = { readableHandle in
-            let data = readableHandle.availableData
-            if data.isEmpty {
-                if capture.finish() {
-                    readers.leave()
+        Thread.detachNewThread {
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while true {
+                let count = buffer.withUnsafeMutableBytes {
+                    Darwin.read(descriptor, $0.baseAddress, $0.count)
                 }
-            } else {
-                capture.append(data)
+                if count > 0 {
+                    capture.append(Data(bytes: buffer, count: count))
+                    continue
+                }
+                if count == -1 && errno == EINTR { continue }
+                break
+            }
+            if capture.finish() {
+                readers.leave()
             }
         }
     }
 
-    private static func stopCapture(
-        _ handle: FileHandle,
-        capture: ProcessDataCapture,
-        readers: DispatchGroup
-    ) {
-        handle.readabilityHandler = nil
-        try? handle.close()
-        if capture.finish() {
-            readers.leave()
-        }
+    /// Atomically swaps /dev/null over the capture read descriptor's slot. This drops the
+    /// process's pipe reference here and now — a descendant still holding the write end
+    /// observes EPIPE on its next write — and runs the reader thread off the pipe onto an
+    /// instant EOF, while keeping the slot occupied so the still-running reader can never
+    /// touch a reused descriptor number.
+    private static func revokeCaptureDescriptor(_ handle: FileHandle) {
+        let devnull = Darwin.open("/dev/null", O_RDONLY)
+        guard devnull != -1 else { return }
+        _ = Darwin.dup2(devnull, handle.fileDescriptor)
+        _ = Darwin.close(devnull)
     }
 
     static func parseError(_ output: String) -> String? {
