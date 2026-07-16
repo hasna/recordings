@@ -3,6 +3,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,6 +11,7 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -30,7 +32,7 @@ const targetTailscaleIdentitySha256 = Bun.CryptoHasher.hash(
 );
 const builderIdentitySha256 = Bun.CryptoHasher.hash("sha256", builderTailscaleNodeId, "hex");
 const temporaryPaths: string[] = [];
-setDefaultTimeout(15_000);
+setDefaultTimeout(30_000);
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -71,6 +73,23 @@ function createApp(path: string, marker: string): void {
   for (const directory of [path, join(path, "Contents"), join(path, "Contents", "MacOS"), join(path, "Contents", "Helpers")]) {
     chmodSync(directory, 0o755);
   }
+}
+
+function mode(path: string): number {
+  return statSync(path).mode & 0o777;
+}
+
+function createLegacyState(fixture: ReturnType<typeof createInstallerFixture>): string {
+  const state = join(fixture.home, ".hasna", "recordings");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "recordings.db"), "healthy-db\n");
+  writeFileSync(join(state, "settings.json"), "{\"healthy\":true}\n");
+  writeFileSync(join(state, "transcription-cache.json"), "[]\n");
+  for (const name of ["recordings.db", "settings.json", "transcription-cache.json"]) {
+    chmodSync(join(state, name), 0o600);
+  }
+  chmodSync(state, 0o755);
+  return state;
 }
 
 function createInstallerFixture() {
@@ -125,9 +144,41 @@ fi
   writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
   writeExecutable(
     join(bin, "stat"),
-    "#!/usr/bin/env bash\ncase \"${2:-}\" in '%u') id -u ;; '%m') date +%s ;; '%Lp') case \"${3:-}\" in */owner|*/.Recordings-install-transaction.json) printf '600\\n' ;; *) printf '700\\n' ;; esac ;; *) printf '700\\n' ;; esac\n",
+    `#!/usr/bin/env bash
+path="\${3:-}"
+case "\${2:-}" in
+  '%u')
+    if [ "$path" = "$HOME/.hasna/recordings" ] && [ -n "\${FIXTURE_STATE_UID:-}" ]; then
+      printf '%s\\n' "$FIXTURE_STATE_UID"
+    else
+      "$REAL_BUN" -e 'import { statSync } from "node:fs"; console.log(statSync(process.argv.at(-1)).uid)' "$path"
+    fi
+    ;;
+  '%m') "$REAL_BUN" -e 'import { statSync } from "node:fs"; console.log(Math.floor(statSync(process.argv.at(-1)).mtimeMs / 1000))' "$path" ;;
+  '%Lp')
+    case "$path" in
+      "$HOME/.hasna/recordings") "$REAL_BUN" -e 'import { statSync } from "node:fs"; console.log((statSync(process.argv.at(-1)).mode & 0o777).toString(8))' "$path" ;;
+      "$HOME") printf '%s\\n' "\${FIXTURE_HOME_MODE:-700}" ;;
+      */owner|*/.Recordings-install-transaction.json) printf '600\\n' ;;
+      *) printf '700\\n' ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`,
   );
-  writeExecutable(join(bin, "ls"), "#!/usr/bin/env bash\nprintf 'drwx------ fixture\\n'\n");
+  writeExecutable(
+    join(bin, "ls"),
+    `#!/usr/bin/env bash
+printf 'drwx------ fixture\\n'
+if [ "\${@: -1}" = "$HOME/.hasna/recordings" ] && [ "\${FIXTURE_STATE_ACL:-0}" = 1 ]; then
+  printf ' 0: user:fixture allow read\\n'
+fi
+if [ "\${@: -1}" = "$HOME" ] && [ "\${FIXTURE_HOME_ACL:-0}" = 1 ]; then
+  printf ' 0: group:everyone deny delete\\n'
+fi
+`,
+  );
   writeExecutable(
     join(bin, "bun"),
     `#!/usr/bin/env bash
@@ -138,7 +189,7 @@ case "$*" in
     [ "\${FAIL_COMMITTED_JOURNAL:-0}" = 1 ] && exit 1
     exec "$REAL_BUN" "$@"
     ;;
-  *" journal-write "*|*" journal-get "*|*" journal-recover "*|*" tree-digest "*)
+  *" journal-write "*|*" journal-get "*|*" journal-recover "*|*" state-mode-harden "*|*" tree-digest "*)
     exec "$REAL_BUN" "$@"
     ;;
   *" tailscale-node-id-sha256 "*) exec "$REAL_BUN" "$@" ;;
@@ -157,7 +208,8 @@ case "$*" in
     fi
     exit 0
     ;;
-  *" assert-transition "*|*" verify-filesystem-tree "*|*" fsync-tree "*|*" fsync-directory "*) exit 0 ;;
+  *" verify-filesystem-tree "*) exec "$REAL_BUN" "$@" ;;
+  *" assert-transition "*|*" fsync-tree "*|*" fsync-directory "*) exit 0 ;;
   *" verify-active "*) [ "\${FAIL_ACTIVE_VERIFY:-0}" = 0 ]; exit $? ;;
   *" verify-archive "*)
     [ "\${FAIL_ARCHIVE_VERIFY:-0}" = 1 ] && exit 1
@@ -262,6 +314,18 @@ async function runInstaller(
   environment: Record<string, string> = {},
 ) {
   const app = join(fixture.home, "Applications", "Recordings.app");
+  const state = join(fixture.home, ".hasna", "recordings");
+  if (existsSync(state) && mode(state) === 0o775) chmodSync(state, 0o755);
+  const normalizeFixtureDescendants = (path: string): void => {
+    for (const entry of readdirSync(path)) {
+      const child = join(path, entry);
+      const details = lstatSync(child);
+      if (details.isSymbolicLink()) continue;
+      chmodSync(child, (details.mode & 0o777) & ~0o022);
+      if (details.isDirectory()) normalizeFixtureDescendants(child);
+    }
+  };
+  if (existsSync(state) && !lstatSync(state).isSymbolicLink()) normalizeFixtureDescendants(state);
   const localPolicy = args.includes("local-only") || args.includes("local_only");
   const process = Bun.spawn(
     [
@@ -575,6 +639,184 @@ describe("macOS finalized artifact installer", () => {
     expect(result.exitCode).not.toBe(0);
     expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
     expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+  });
+
+  test("hardens a healthy three-file legacy state root and preserves its data", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const expected = ["recordings.db", "settings.json", "transcription-cache.json"].map((name) => [
+      name,
+      readFileSync(join(state, name), "utf8"),
+    ]);
+
+    const result = await runTailscaleLocalInstaller(fixture);
+
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(mode(state)).toBe(0o700);
+    for (const [name, contents] of expected) {
+      expect(readFileSync(join(state, name), "utf8")).toBe(contents);
+    }
+    expect(existsSync(join(state, "audio"))).toBeTrue();
+    expect(existsSync(join(state, "rollbacks"))).toBeTrue();
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeFalse();
+  });
+
+  test.each([
+    ["immediately after hardening", { RECORDINGS_TEST_FAIL_AFTER_STATE_MODE_HARDEN: "1" }],
+    ["after candidate activation", { FAIL_ACTIVE_VERIFY: "1" }],
+    ["while committing", { FAIL_COMMITTED_JOURNAL: "1" }],
+  ])("restores legacy mode and exact data on failure %s", async (_label, environment) => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const before = ["recordings.db", "settings.json", "transcription-cache.json"].map((name) =>
+      readFileSync(join(state, name), "utf8")
+    );
+
+    const result = await runTailscaleLocalInstaller(fixture, [], environment);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(mode(state)).toBe(0o755);
+    expect(["recordings.db", "settings.json", "transcription-cache.json"].map((name) =>
+      readFileSync(join(state, name), "utf8")
+    )).toEqual(before);
+    expect(existsSync(join(state, "audio"))).toBeFalse();
+    expect(existsSync(join(state, "rollbacks"))).toBeFalse();
+  });
+
+  test("recovers a crash immediately after fd-based hardening back to legacy mode", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const crashed = await runTailscaleLocalInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "state-mode-hardened",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(mode(state)).toBe(0o700);
+
+    const recovered = await runTailscaleLocalInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(mode(state)).toBe(0o755);
+    expect(readFileSync(join(state, "recordings.db"), "utf8")).toBe("healthy-db\n");
+  });
+
+  test("recovers app and state before restoring legacy mode after candidate activation", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const crashed = await runTailscaleLocalInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "candidate-installed",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(mode(state)).toBe(0o700);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+
+    const recovered = await runTailscaleLocalInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(readFileSync(join(state, "recordings.db"), "utf8")).toBe("healthy-db\n");
+    expect(mode(state)).toBe(0o755);
+  });
+
+  test("a committed crash retains hardened state mode", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const crashed = await runTailscaleLocalInstaller(fixture, [], {
+      RECORDINGS_TEST_CRASH_AFTER_PHASE: "committed",
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(mode(state)).toBe(0o700);
+
+    const recovered = await runTailscaleLocalInstaller(fixture, [], { FAIL_ARCHIVE_VERIFY: "1" });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(recovered.stderr).toContain("Recovering incomplete");
+    expect(mode(state)).toBe(0o700);
+    expect(existsSync(join(fixture.home, "Applications", ".Recordings-install-transaction.json"))).toBeFalse();
+  });
+
+  test.each([0o777, 0o750])("rejects unsupported existing state mode %o without mutation", async (stateMode) => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    chmodSync(state, stateMode);
+    const result = await runTailscaleLocalInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(mode(state)).toBe(stateMode);
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+    expect(existsSync(join(state, "audio"))).toBeFalse();
+  });
+
+  test.each([
+    ["foreign owner", { FIXTURE_STATE_UID: "99999" }, "unexpected owner"],
+    ["ACL", { FIXTURE_STATE_ACL: "1" }, "unexpected ACL"],
+  ])("rejects a legacy state root with %s without mutation", async (_label, environment, message) => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const result = await runTailscaleLocalInstaller(fixture, [], environment);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(message);
+    expect(mode(state)).toBe(0o755);
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+  });
+
+  test("rejects state-root and child symlinks before creating install paths", async () => {
+    const rootSymlink = createInstallerFixture();
+    const outside = join(rootSymlink.root, "outside");
+    mkdirSync(join(rootSymlink.home, ".hasna"), { recursive: true });
+    mkdirSync(outside);
+    symlinkSync(outside, join(rootSymlink.home, ".hasna", "recordings"));
+    const rejectedRoot = await runTailscaleLocalInstaller(rootSymlink);
+    expect(rejectedRoot.exitCode).not.toBe(0);
+    expect(existsSync(join(rootSymlink.home, "Applications"))).toBeFalse();
+
+    const childSymlink = createInstallerFixture();
+    const state = createLegacyState(childSymlink);
+    symlinkSync(join(childSymlink.root, "outside-file"), join(state, "linked"));
+    const rejectedChild = await runTailscaleLocalInstaller(childSymlink);
+    expect(rejectedChild.exitCode).not.toBe(0);
+    expect(rejectedChild.stderr).toContain("filesystem tree contains a symlink");
+    expect(mode(state)).toBe(0o755);
+    expect(existsSync(join(childSymlink.home, "Applications"))).toBeFalse();
+  });
+
+  test("wrong live target identity leaves legacy mode and children untouched", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const result = await runTailscaleLocalInstaller(fixture, [], {
+      TAILSCALE_STATUS_JSON: '{"Self":{"Online":true,"HostName":"station06","ID":"wrong-node"}}',
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(mode(state)).toBe(0o755);
+    expect(readdirSync(state).sort()).toEqual([
+      "recordings.db",
+      "settings.json",
+      "transcription-cache.json",
+    ]);
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+  });
+
+  test("normal private and absent state roots finish private", async () => {
+    const privateFixture = createInstallerFixture();
+    const privateState = createLegacyState(privateFixture);
+    chmodSync(privateState, 0o700);
+    const privateResult = await runTailscaleLocalInstaller(privateFixture);
+    expect(privateResult.exitCode, privateResult.stderr).toBe(0);
+    expect(mode(privateState)).toBe(0o700);
+
+    const absentFixture = createInstallerFixture();
+    const absentResult = await runTailscaleLocalInstaller(absentFixture);
+    expect(absentResult.exitCode, absentResult.stderr).toBe(0);
+    expect(mode(join(absentFixture.home, ".hasna", "recordings"))).toBe(0o700);
+  });
+
+  test("allows a restrictive platform Home ACL while keeping state ACL checks strict", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    const result = await runTailscaleLocalInstaller(fixture, [], {
+      FIXTURE_HOME_ACL: "1",
+      FIXTURE_HOME_MODE: "750",
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(mode(state)).toBe(0o700);
   });
 
   test("installs an explicit local-only artifact transactionally without release-trust claims", async () => {
@@ -1103,6 +1345,62 @@ fi
       expect(second.exitCode).not.toBe(0);
       expect(second.stderr).toContain("owns the active install lock");
       expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+    } finally {
+      first.kill();
+      await first.exited;
+    }
+  });
+
+  test("the shared app-parent lock blocks an older pre-lock-mutating installer from replacement", async () => {
+    const fixture = createInstallerFixture();
+    const state = createLegacyState(fixture);
+    chmodSync(state, 0o700);
+    const installer = join(fixture.root, "scripts", "install_macos_app.sh");
+    const first = Bun.spawn([
+      "bash", installer,
+      "--artifact", fixture.artifact,
+      "--manifest", fixture.manifest,
+      "--expected-team-id", "EXAMPLE123",
+      "--manifest-sha256", "a".repeat(64),
+      "--expected-source-sha", "b".repeat(40),
+      "--expected-version", "0.2.12",
+    ], {
+      env: {
+        ...Bun.env,
+        HOME: fixture.home,
+        PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
+        CANDIDATE_SOURCE: fixture.candidate,
+        CANONICAL_EXECUTABLE: join(fixture.home, "Applications", "Recordings.app", "Contents", "MacOS", "Recordings"),
+        MARKER_DIRECTORY: fixture.markers,
+        REAL_BUN: bunExecutable,
+        RECORDINGS_TEST_HOLD_AFTER_LOCK_SECONDS: "5",
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const owner = join(fixture.home, "Applications", ".Recordings-install-lock", "owner");
+    const legacy = join(fixture.root, "legacy-installer.sh");
+    writeExecutable(
+      legacy,
+      `#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$HOME/.hasna/recordings/audio" "$HOME/.hasna/recordings/rollbacks" "$HOME/Applications"
+if mkdir "$HOME/Applications/.Recordings-install-lock" 2>/dev/null; then
+  mkdir -p "$HOME/Applications/Recordings.app"
+  exit 0
+fi
+exit 73
+`,
+    );
+    try {
+      for (let attempt = 0; attempt < 200 && !existsSync(owner); attempt += 1) await Bun.sleep(10);
+      expect(existsSync(owner)).toBeTrue();
+      const oldAttempt = Bun.spawnSync(["bash", legacy], { env: { ...Bun.env, HOME: fixture.home } });
+      expect(oldAttempt.exitCode).toBe(73);
+      expect(existsSync(join(fixture.home, "Applications", "Recordings.app"))).toBeFalse();
+      // Old binaries may create their historical child paths before the shared lock.
+      expect(existsSync(join(state, "audio"))).toBeTrue();
+      expect(existsSync(join(state, "rollbacks"))).toBeTrue();
     } finally {
       first.kill();
       await first.exited;
