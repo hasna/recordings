@@ -118,6 +118,7 @@ fi
 PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_TOOL="${PACKAGE_ROOT}/scripts/macos_artifact.ts"
 RUNTIME_SMOKE="${PACKAGE_ROOT}/scripts/smoke_macos_app.sh"
+TAILSCALE_RESOLVER="${PACKAGE_ROOT}/scripts/resolve_tailscale_cli.sh"
 if [ "$ARTIFACT_POLICY" = "release" ]; then
   if [ -z "$EXPECTED_TEAM_ID" ]; then
     echo "Release install requires --expected-team-id or RECORDINGS_EXPECTED_TEAM_IDENTIFIER." >&2
@@ -166,7 +167,13 @@ else
     exit 1
   fi
   if [ "$APPROVED_TARGET_IDENTITY_KIND" = "tailscale_node_id_sha256" ]; then
-    if ! command -v tailscale >/dev/null 2>&1; then
+    if [ ! -r "$TAILSCALE_RESOLVER" ]; then
+      echo "Packaged Tailscale CLI resolver is missing." >&2
+      exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$TAILSCALE_RESOLVER"
+    if ! TAILSCALE_CLI="$(recordings_resolve_tailscale_cli)"; then
       echo "Tailscale is required to verify this local-only target identity." >&2
       exit 1
     fi
@@ -174,7 +181,7 @@ else
       echo "Bun is required to verify this local-only target identity." >&2
       exit 1
     fi
-    if ! ACTUAL_TARGET_IDENTITY_SHA256="$(tailscale status --json | bun "$ARTIFACT_TOOL" tailscale-node-id-sha256 --expected-hostname "$APPROVED_TARGET")"; then
+    if ! ACTUAL_TARGET_IDENTITY_SHA256="$("$TAILSCALE_CLI" status --json | bun "$ARTIFACT_TOOL" tailscale-node-id-sha256 --expected-hostname "$APPROVED_TARGET")"; then
       echo "Could not verify the live Tailscale identity for this local-only target." >&2
       exit 1
     fi
