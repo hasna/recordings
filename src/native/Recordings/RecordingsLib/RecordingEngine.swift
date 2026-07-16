@@ -3851,14 +3851,16 @@ enum CLIRunner: Sendable {
         let contractualExecutionTimeout = totalWallClockBudget
             .map { min(executionTimeout, $0 - wallClockCleanupReserve) } ?? executionTimeout
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-
-        let stdoutCapture = ProcessDataCapture()
-        let stderrCapture = ProcessDataCapture()
-        let readers = DispatchGroup()
-        startCapture(stdoutPipe.fileHandleForReading, into: stdoutCapture, readers: readers)
-        startCapture(stderrPipe.fileHandleForReading, into: stderrCapture, readers: readers)
+        let stdoutReader = try PipeCaptureReader()
+        let stderrReader: PipeCaptureReader
+        do {
+            stderrReader = try PipeCaptureReader()
+        } catch {
+            stdoutReader.closeWriteDescriptor()
+            finishCaptures([stdoutReader], pipeDrainTimeout: 0)
+            throw error
+        }
+        let captureReaders = [stdoutReader, stderrReader]
 
         let processIdentifier: pid_t
         do {
@@ -3866,24 +3868,19 @@ enum CLIRunner: Sendable {
                 executable,
                 arguments: arguments,
                 environment: environment,
-                stdoutDescriptor: stdoutPipe.fileHandleForWriting.fileDescriptor,
-                stderrDescriptor: stderrPipe.fileHandleForWriting.fileDescriptor,
-                stdoutReadDescriptor: stdoutPipe.fileHandleForReading.fileDescriptor,
-                stderrReadDescriptor: stderrPipe.fileHandleForReading.fileDescriptor
+                stdoutDescriptor: stdoutReader.writeDescriptor,
+                stderrDescriptor: stderrReader.writeDescriptor,
+                stdoutReadDescriptor: stdoutReader.readDescriptor,
+                stderrReadDescriptor: stderrReader.readDescriptor
             )
         } catch {
-            try? stdoutPipe.fileHandleForWriting.close()
-            try? stderrPipe.fileHandleForWriting.close()
-            finishCaptures(
-                stdoutPipe: stdoutPipe,
-                stderrPipe: stderrPipe,
-                readers: readers,
-                pipeDrainTimeout: 0
-            )
+            stdoutReader.closeWriteDescriptor()
+            stderrReader.closeWriteDescriptor()
+            finishCaptures(captureReaders, pipeDrainTimeout: 0)
             throw error
         }
-        try? stdoutPipe.fileHandleForWriting.close()
-        try? stderrPipe.fileHandleForWriting.close()
+        stdoutReader.closeWriteDescriptor()
+        stderrReader.closeWriteDescriptor()
 
         beforeExecutionDeadline?()
         let leaderExitWasObserved: Bool
@@ -3898,12 +3895,7 @@ enum CLIRunner: Sendable {
         } catch {
             signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
             reapLeaderInBackground(processIdentifier)
-            finishCaptures(
-                stdoutPipe: stdoutPipe,
-                stderrPipe: stderrPipe,
-                readers: readers,
-                pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
-            )
+            finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
             throw error
         }
 
@@ -3922,18 +3914,16 @@ enum CLIRunner: Sendable {
             } catch {
                 signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
                 reapLeaderInBackground(processIdentifier)
-                finishCaptures(
-                    stdoutPipe: stdoutPipe,
-                    stderrPipe: stderrPipe,
-                    readers: readers,
-                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
-                )
+                finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
                 throw error
             }
         } else {
-            _ = readers.wait(
-                timeout: monotonicDispatchDeadline(after: clampedToWallClockBudget(terminationGracePeriod))
+            let drainDeadline = monotonicDispatchDeadline(
+                after: clampedToWallClockBudget(terminationGracePeriod)
             )
+            for reader in captureReaders {
+                reader.waitUntilExited(deadline: drainDeadline)
+            }
         }
         signalProcessGroup(processIdentifier, signal: SIGKILL, lifecycleObserver: lifecycleObserver)
         if !confirmedExit {
@@ -3945,12 +3935,7 @@ enum CLIRunner: Sendable {
                 )
             } catch {
                 reapLeaderInBackground(processIdentifier)
-                finishCaptures(
-                    stdoutPipe: stdoutPipe,
-                    stderrPipe: stderrPipe,
-                    readers: readers,
-                    pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
-                )
+                finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
                 throw error
             }
         }
@@ -3965,20 +3950,17 @@ enum CLIRunner: Sendable {
             terminationStatus = nil
         }
 
-        finishCaptures(
-            stdoutPipe: stdoutPipe,
-            stderrPipe: stderrPipe,
-            readers: readers,
-            pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout)
-        )
+        finishCaptures(captureReaders, pipeDrainTimeout: clampedToWallClockBudget(pipeDrainTimeout))
 
         if didTimeOut {
             throw ExecutionError.timedOut(executable: executable, seconds: contractualExecutionTimeout)
         }
 
+        // Both readers are joined by now, so these snapshots can never observe a
+        // truncated mid-append state.
         return ProcessOutput(
-            stdout: String(decoding: stdoutCapture.data, as: UTF8.self),
-            stderr: String(decoding: stderrCapture.data, as: UTF8.self),
+            stdout: String(decoding: stdoutReader.data, as: UTF8.self),
+            stderr: String(decoding: stderrReader.data, as: UTF8.self),
             terminationStatus: terminationStatus ?? 1
         )
     }
@@ -4219,69 +4201,207 @@ enum CLIRunner: Sendable {
         return now + nanoseconds
     }
 
+    /// Shuts capture down deterministically. Waits up to `pipeDrainTimeout` for the
+    /// readers to observe end-of-file on their own — the complete-output path — then
+    /// cancels and joins whatever is still running. Both reader threads have provably
+    /// exited and both pipe read ends are closed before this returns: a silent escaped
+    /// descendant still holding a write end observes a widowed pipe at that point, and no
+    /// snapshot of captured output can race a reader mid-append.
     private static func finishCaptures(
-        stdoutPipe: Pipe,
-        stderrPipe: Pipe,
-        readers: DispatchGroup,
+        _ readers: [PipeCaptureReader],
         pipeDrainTimeout: TimeInterval
     ) {
-        _ = readers.wait(timeout: monotonicDispatchDeadline(after: pipeDrainTimeout))
-        let stdoutReadHandle = stdoutPipe.fileHandleForReading
-        let stderrReadHandle = stderrPipe.fileHandleForReading
-        revokeCaptureDescriptor(stdoutReadHandle)
-        revokeCaptureDescriptor(stderrReadHandle)
-        // The descriptor slots are closed only once both reader threads have provably
-        // exited; closing while a reader could still issue a read would race against slot
-        // reuse. The pending notify block also keeps the handles alive until then, so a
-        // reader blocked on a silent pipe can never dangle onto a freed descriptor.
-        readers.notify(queue: .global(qos: .utility)) {
-            try? stdoutReadHandle.close()
-            try? stderrReadHandle.close()
+        let deadline = monotonicDispatchDeadline(after: pipeDrainTimeout)
+        for reader in readers {
+            reader.waitUntilExited(deadline: deadline)
+        }
+        for reader in readers {
+            reader.cancel()
+        }
+        for reader in readers {
+            reader.join()
         }
     }
 
-    /// Consumes a capture pipe on a dedicated blocking-read thread. The runner must own
-    /// every reference to the read descriptor itself: `FileHandle.readabilityHandler`
-    /// keeps a private duplicate of the descriptor that can survive `close()` while data
-    /// is flowing, which would leave the pipe readable forever — a descendant that
-    /// inherited the write end would never observe EPIPE, and the descriptor would leak
-    /// in this process.
-    private static func startCapture(
-        _ handle: FileHandle,
-        into capture: ProcessDataCapture,
-        readers: DispatchGroup
-    ) {
-        let descriptor = handle.fileDescriptor
-        readers.enter()
-        Thread.detachNewThread {
+    /// Owns one capture pipe end to end: it creates the pipe, lends the write end to the
+    /// spawn, and consumes the read end on a dedicated thread that multiplexes the
+    /// nonblocking pipe with a private wakeup pipe through poll(2). `cancel()` writes one
+    /// wakeup byte, so the thread deterministically leaves poll even when a silent
+    /// escaped descendant keeps the write end open forever without writing a byte — POSIX
+    /// does not promise that replacing or closing a descriptor interrupts a read(2)
+    /// already blocked on it, so the blocking-read + dup2 revocation this replaces could
+    /// leave the reader thread and the process's pipe reference alive indefinitely.
+    ///
+    /// The runner must keep owning every reference to the read descriptor itself:
+    /// `FileHandle.readabilityHandler` keeps a private duplicate of the descriptor that
+    /// can survive `close()` while data is flowing, which would leave the pipe readable
+    /// forever — a descendant that inherited the write end would never observe EPIPE, and
+    /// the descriptor would leak in this process. Never reintroduce it here.
+    final class PipeCaptureReader: @unchecked Sendable {
+        /// Write end lent to the spawned child; the runner closes it through
+        /// `closeWriteDescriptor()` once the child holds its own copies.
+        let writeDescriptor: Int32
+        /// Read end consumed — and eventually closed — exclusively by the reader thread.
+        let readDescriptor: Int32
+
+        private let wakeupReadDescriptor: Int32
+        private let wakeupWriteDescriptor: Int32
+        private let capture = ProcessDataCapture()
+        private let exited = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var cancelRequested = false
+        private var writeDescriptorClosed = false
+        private var wakeupDescriptorsClosed = false
+
+        /// Reads per drain burst between polls, so a flooding writer cannot starve the
+        /// wakeup descriptor check.
+        private static let drainReadLimit = 64
+        /// Reads allowed after cancellation — comfortably above the kernel's largest pipe
+        /// buffer, so an already-buffered tail is never dropped, yet `join()` stays
+        /// prompt against a descendant that keeps writing.
+        private static let cancelledDrainReadLimit = 16
+
+        init() throws {
+            let dataPipe = try Self.makePipe(operation: "create capture pipe")
+            let wakeupPipe: (read: Int32, write: Int32)
+            do {
+                wakeupPipe = try Self.makePipe(operation: "create capture wakeup pipe")
+            } catch {
+                Darwin.close(dataPipe.read)
+                Darwin.close(dataPipe.write)
+                throw error
+            }
+            readDescriptor = dataPipe.read
+            writeDescriptor = dataPipe.write
+            wakeupReadDescriptor = wakeupPipe.read
+            wakeupWriteDescriptor = wakeupPipe.write
+            for descriptor in [readDescriptor, writeDescriptor, wakeupReadDescriptor, wakeupWriteDescriptor] {
+                _ = Darwin.fcntl(descriptor, F_SETFD, FD_CLOEXEC)
+            }
+            let readFlags = Darwin.fcntl(readDescriptor, F_GETFL)
+            _ = Darwin.fcntl(readDescriptor, F_SETFL, readFlags | O_NONBLOCK)
+            Thread.detachNewThread { [self] in consumePipe() }
+        }
+
+        deinit {
+            // The reader thread retains the object and closes the read end before it
+            // exits, so nothing here can race it; this is a safety net for callers that
+            // drop the object without walking the full shutdown sequence.
+            if !writeDescriptorClosed { Darwin.close(writeDescriptor) }
+            if !wakeupDescriptorsClosed {
+                Darwin.close(wakeupReadDescriptor)
+                Darwin.close(wakeupWriteDescriptor)
+            }
+        }
+
+        /// Everything captured so far; stable and complete once `join()` has returned.
+        var data: Data { capture.data }
+
+        func closeWriteDescriptor() {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !writeDescriptorClosed else { return }
+            writeDescriptorClosed = true
+            Darwin.close(writeDescriptor)
+        }
+
+        /// Waits until `deadline` for the reader thread to exit on its own — that is,
+        /// for end-of-file once every write end is closed. Returns whether it has.
+        @discardableResult
+        func waitUntilExited(deadline: DispatchTime) -> Bool {
+            guard exited.wait(timeout: deadline) == .success else { return false }
+            exited.signal()
+            return true
+        }
+
+        /// Wakes the reader thread out of poll(2) even when the capture pipe never
+        /// becomes readable again. Idempotent; never blocks.
+        func cancel() {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !cancelRequested, !wakeupDescriptorsClosed else { return }
+            cancelRequested = true
+            var wakeupByte: UInt8 = 1
+            var result: Int
+            repeat {
+                result = Darwin.write(wakeupWriteDescriptor, &wakeupByte, 1)
+            } while result == -1 && errno == EINTR
+        }
+
+        /// Blocks until the reader thread has provably exited and closed the pipe read
+        /// end, then releases the wakeup pipe. Callers must `cancel()` first whenever the
+        /// pipe may never reach end-of-file; the wakeup then bounds this wait to thread
+        /// scheduling plus one final drain burst. Idempotent.
+        func join() {
+            exited.wait()
+            exited.signal()
+            lock.lock()
+            defer { lock.unlock() }
+            guard !wakeupDescriptorsClosed else { return }
+            wakeupDescriptorsClosed = true
+            Darwin.close(wakeupReadDescriptor)
+            Darwin.close(wakeupWriteDescriptor)
+        }
+
+        private func consumePipe() {
+            Thread.current.name = "CLIRunner.PipeCaptureReader"
             var buffer = [UInt8](repeating: 0, count: 65_536)
-            while true {
-                let count = buffer.withUnsafeMutableBytes {
-                    Darwin.read(descriptor, $0.baseAddress, $0.count)
+            var cancelled = false
+            readLoop: while true {
+                var reads = 0
+                var sawEndOfFile = false
+                var sawFailure = false
+                let readLimit = cancelled ? Self.cancelledDrainReadLimit : Self.drainReadLimit
+                while reads < readLimit {
+                    let count = buffer.withUnsafeMutableBytes {
+                        Darwin.read(readDescriptor, $0.baseAddress, $0.count)
+                    }
+                    if count > 0 {
+                        capture.append(Data(bytes: buffer, count: count))
+                        reads += 1
+                        continue
+                    }
+                    if count == 0 {
+                        sawEndOfFile = true
+                    } else if errno == EINTR {
+                        continue
+                    } else if errno != EAGAIN {
+                        sawFailure = true
+                    }
+                    break
                 }
-                if count > 0 {
-                    capture.append(Data(bytes: buffer, count: count))
-                    continue
+                if sawEndOfFile || sawFailure || cancelled { break readLoop }
+                var descriptors = [
+                    pollfd(fd: readDescriptor, events: Int16(POLLIN), revents: 0),
+                    pollfd(fd: wakeupReadDescriptor, events: Int16(POLLIN), revents: 0),
+                ]
+                let events = Darwin.poll(&descriptors, 2, -1)
+                if events == -1 {
+                    if errno == EINTR { continue readLoop }
+                    break readLoop
                 }
-                if count == -1 && errno == EINTR { continue }
-                break
+                if descriptors[1].revents != 0
+                    || descriptors[0].revents & Int16(POLLERR | POLLNVAL) != 0 {
+                    // One final bounded drain of already-buffered data, then exit.
+                    cancelled = true
+                }
             }
-            if capture.finish() {
-                readers.leave()
-            }
+            _ = capture.finish()
+            Darwin.close(readDescriptor)
+            exited.signal()
         }
-    }
 
-    /// Atomically swaps /dev/null over the capture read descriptor's slot. This drops the
-    /// process's pipe reference here and now — a descendant still holding the write end
-    /// observes EPIPE on its next write — and runs the reader thread off the pipe onto an
-    /// instant EOF, while keeping the slot occupied so the still-running reader can never
-    /// touch a reused descriptor number.
-    private static func revokeCaptureDescriptor(_ handle: FileHandle) {
-        let devnull = Darwin.open("/dev/null", O_RDONLY)
-        guard devnull != -1 else { return }
-        _ = Darwin.dup2(devnull, handle.fileDescriptor)
-        _ = Darwin.close(devnull)
+        private static func makePipe(operation: String) throws -> (read: Int32, write: Int32) {
+            var ends: [Int32] = [0, 0]
+            guard Darwin.pipe(&ends) == 0 else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(errno),
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to \(operation): \(String(cString: strerror(errno)))"]
+                )
+            }
+            return (ends[0], ends[1])
+        }
     }
 
     static func parseError(_ output: String) -> String? {
