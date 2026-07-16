@@ -163,6 +163,22 @@ describe("macOS artifact manifest", () => {
     }
   });
 
+  test("rejects malformed notary submission identifiers", () => {
+    const { archivePath, manifestPath, manifest } = fixture();
+    manifest.notarization.submission_id = "------------------------------------";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "EXAMPLE123",
+        fileDigest(manifestPath),
+        manifest.git_sha,
+        manifest.bundle_version,
+      ),
+    ).toThrow("submission ID is invalid");
+  });
+
   test("rejects archive tampering and checksum mismatch", () => {
     const { archivePath, manifestPath } = fixture();
     writeFileSync(archivePath, `${readFileSync(archivePath, "utf8")}tampered`);

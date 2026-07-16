@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   closeSync,
   constants,
@@ -427,7 +427,7 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
   ] as const) {
     if (!isHex(value, 64)) throw new Error(`manifest ${label} must be SHA-256`);
   }
-  if (!/^[0-9a-fA-F-]{36}$/.test(manifest.notarization.submission_id)) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(manifest.notarization.submission_id)) {
     throw new Error("manifest notary submission ID is invalid");
   }
   if (
@@ -808,9 +808,11 @@ function assertFilesystemTree(root: string, expectedUid: number): void {
     if ((details.mode & 0o022) !== 0) {
       throw new Error(`filesystem tree is group/world writable: ${path}`);
     }
-    const aclLines = run("/bin/ls", ["-lde", path]).split(/\r?\n/).slice(1);
-    if (aclLines.some((line) => line.trim())) {
-      throw new Error(`filesystem tree has an unexpected ACL: ${path}`);
+    if (process.platform === "darwin") {
+      const aclLines = run("/bin/ls", ["-lde", path]).split(/\r?\n/).slice(1);
+      if (aclLines.some((line) => line.trim())) {
+        throw new Error(`filesystem tree has an unexpected ACL: ${path}`);
+      }
     }
     if (details.isDirectory()) {
       for (const entry of readdirSync(path)) visit(join(path, entry));
@@ -876,14 +878,15 @@ function verifyActiveApp(appPath: string, manifestPath: string, expectedTeamId: 
 }
 
 export type InstallJournal = {
-  schema_version: 1;
+  schema_version: 2;
   phase: string;
   transaction_dir: string;
   app_parent: string;
   app_destination: string;
   data_dir: string;
   state_backup: string;
-  originals: Array<{ path: string; backup: string }>;
+  state_backup_sha256: string;
+  originals: Array<{ path: string; backup: string; sha256: string }>;
   was_running: boolean;
   expected_manifest_sha256: string;
   expected_source_sha: string;
@@ -917,13 +920,14 @@ function writeDurableJournal(path: string, journal: InstallJournal): void {
 
 function journalArgument(): InstallJournal {
   const value: InstallJournal = {
-    schema_version: 1,
+    schema_version: 2,
     phase: argument("--phase"),
     transaction_dir: argument("--transaction-dir"),
     app_parent: argument("--app-parent"),
     app_destination: argument("--app-destination"),
     data_dir: argument("--data-dir"),
     state_backup: argument("--state-backup"),
+    state_backup_sha256: argument("--state-backup-sha256"),
     originals: [],
     was_running: Bun.argv.includes("--was-running"),
     expected_manifest_sha256: argument("--expected-manifest-sha256"),
@@ -936,8 +940,9 @@ function journalArgument(): InstallJournal {
     if (Bun.argv[index] === "--original") {
       const path = Bun.argv[index + 1];
       const backup = Bun.argv[index + 2];
-      if (!path || !backup) throw new Error("--original requires path and backup");
-      value.originals.push({ path, backup });
+      const digest = Bun.argv[index + 3];
+      if (!path || !backup || !digest) throw new Error("--original requires path, backup, and digest");
+      value.originals.push({ path, backup, sha256: digest });
     }
   }
   return value;
@@ -945,7 +950,7 @@ function journalArgument(): InstallJournal {
 
 function readJournal(path: string): InstallJournal {
   const journal = readJson<InstallJournal>(path);
-  if (journal.schema_version !== 1 || !journal.transaction_dir || !journal.phase) {
+  if (journal.schema_version !== 2 || !journal.transaction_dir || !journal.phase) {
     throw new Error("invalid install transaction journal");
   }
   const allowedPhases = new Set([
@@ -964,6 +969,7 @@ function readJournal(path: string): InstallJournal {
   if (
     !isHex(journal.expected_manifest_sha256, 64) ||
     !isHex(journal.expected_source_sha, 40) ||
+    !isHex(journal.state_backup_sha256, 64) ||
     !isHex(journal.candidate_identity_sha256, 64) ||
     (journal.previous_identity_sha256 !== "none" &&
       !isHex(journal.previous_identity_sha256, 64))
@@ -981,8 +987,15 @@ function readJournal(path: string): InstallJournal {
   if (resolve(journal.app_destination) !== resolve(join(expectedParent, "Recordings.app"))) {
     throw new Error("install transaction journal has an unexpected app destination");
   }
+  const expectedDataDir = resolve(join(dirname(expectedParent), ".hasna", "recordings"));
+  if (resolve(journal.data_dir) !== expectedDataDir) {
+    throw new Error("install transaction journal has an unexpected state directory");
+  }
   if (!journal.originals.every((entry) => resolve(entry.backup).startsWith(`${transaction}/apps/`))) {
     throw new Error("install transaction journal has an unsafe app backup path");
+  }
+  if (!journal.originals.every((entry) => isHex(entry.sha256, 64))) {
+    throw new Error("install transaction journal has an invalid app backup digest");
   }
   const allowedOriginal = (path: string): boolean => {
     const resolved = resolve(path);
@@ -995,7 +1008,11 @@ function readJournal(path: string): InstallJournal {
   if (!journal.originals.every((entry) => allowedOriginal(entry.path))) {
     throw new Error("install transaction journal has an unsafe original app path");
   }
-  if (resolve(journal.state_backup) !== resolve(join(transaction, "state"))) {
+  const allowedStateBackups = new Set([
+    resolve(join(transaction, "state.initial")),
+    resolve(join(transaction, "state.stopped")),
+  ]);
+  if (!allowedStateBackups.has(resolve(journal.state_backup))) {
     throw new Error("install transaction journal has an unsafe state backup path");
   }
   return journal;
@@ -1026,12 +1043,62 @@ function fsyncTree(root: string): void {
   }
 }
 
+function treeRecords(root: string): string[] {
+  const records: string[] = [];
+  const visit = (path: string): void => {
+    const details = lstatSync(path);
+    if (details.isSymbolicLink()) throw new Error(`tree digest refuses symlink: ${path}`);
+    const name = relative(root, path) || ".";
+    const mode = (details.mode & 0o777).toString(8);
+    if (details.isDirectory()) {
+      records.push(`d\0${name}\0${mode}`);
+      for (const entry of readdirSync(path).sort()) visit(join(path, entry));
+    } else if (details.isFile()) {
+      records.push(`f\0${name}\0${mode}\0${details.size}\0${sha256File(path)}`);
+    } else {
+      throw new Error(`tree digest refuses special file: ${path}`);
+    }
+  };
+  visit(root);
+  return records;
+}
+
+function treeDigest(root: string): string {
+  return sha256(treeRecords(root).join("\n"));
+}
+
 function recoverJournal(path: string): void {
   const journal = readJournal(path);
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new Error("could not determine recovery owner identity");
+  if (journal.phase !== "committed") {
+    if (!existsSync(journal.transaction_dir)) {
+      throw new Error("install transaction recovery evidence is missing");
+    }
+    assertFilesystemTree(journal.transaction_dir, uid);
+    if (!existsSync(journal.state_backup) || treeDigest(journal.state_backup) !== journal.state_backup_sha256) {
+      throw new Error("install transaction state backup integrity check failed");
+    }
+    for (const entry of journal.originals) {
+      const backupExists = existsSync(entry.backup);
+      const evidencePath = backupExists ? entry.backup : entry.path;
+      if (!existsSync(evidencePath)) {
+        throw new Error("install transaction app backup is missing");
+      }
+      if (treeDigest(evidencePath) !== entry.sha256) {
+        throw new Error(
+          backupExists
+            ? "install transaction app backup integrity check failed"
+            : "install transaction app backup is missing",
+        );
+      }
+    }
+  }
   if (journal.phase === "committed") {
     rmSync(path, { force: true });
-    rmSync(journal.transaction_dir, { recursive: true, force: true });
     fsyncDirectory(dirname(path));
+    rmSync(journal.transaction_dir, { recursive: true, force: true });
+    fsyncDirectory(journal.app_parent);
     return;
   }
 
@@ -1044,9 +1111,20 @@ function recoverJournal(path: string): void {
     "launching",
   ]);
   if (mutationPhases.has(journal.phase)) {
-    if (["candidate-moving", "candidate-installed", "activated", "launching"].includes(journal.phase)) {
+    const canonicalOriginal = journal.originals.find(
+      (entry) => resolve(entry.path) === resolve(journal.app_destination),
+    );
+    const canonicalAlreadyRestored = canonicalOriginal !== undefined &&
+      !existsSync(canonicalOriginal.backup) &&
+      existsSync(canonicalOriginal.path) &&
+      treeDigest(canonicalOriginal.path) === canonicalOriginal.sha256;
+    if (
+      ["candidate-moving", "candidate-installed", "activated", "launching"].includes(journal.phase) &&
+      !canonicalAlreadyRestored
+    ) {
       rmSync(journal.app_destination, { recursive: true, force: true });
     }
+    let restoredCount = 0;
     for (const entry of [...journal.originals].reverse()) {
       if (!existsSync(entry.backup)) continue;
       mkdirSync(dirname(entry.path), { recursive: true, mode: 0o700 });
@@ -1054,6 +1132,10 @@ function recoverJournal(path: string): void {
       renameSync(entry.backup, entry.path);
       fsyncTree(entry.path);
       fsyncDirectory(dirname(entry.path));
+      restoredCount += 1;
+      if (process.env.RECORDINGS_TEST_CRASH_RECOVERY_AFTER_APP_RESTORES === String(restoredCount)) {
+        process.kill(process.pid, "SIGKILL");
+      }
     }
   }
   if (mutationPhases.has(journal.phase) && existsSync(journal.state_backup)) {
@@ -1063,9 +1145,9 @@ function recoverJournal(path: string): void {
     fsyncDirectory(dirname(journal.data_dir));
   }
   rmSync(path, { force: true });
+  fsyncDirectory(dirname(path));
   rmSync(journal.transaction_dir, { recursive: true, force: true });
   fsyncDirectory(journal.app_parent);
-  fsyncDirectory(dirname(path));
 }
 
 function journalGet(path: string, field: string): void {
@@ -1145,6 +1227,8 @@ function main(): void {
     fsyncTree(argument("--path"));
   } else if (command === "fsync-directory") {
     fsyncDirectory(argument("--path"));
+  } else if (command === "tree-digest") {
+    console.log(treeDigest(argument("--path")));
   } else if (command === "journal-write") {
     writeDurableJournal(argument("--journal"), journalArgument());
   } else if (command === "journal-get") {

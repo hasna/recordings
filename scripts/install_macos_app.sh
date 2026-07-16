@@ -124,6 +124,7 @@ OLD_PIDS=""
 RUNNING_EXECUTABLES=()
 MOVED_ORIGINALS=()
 MOVED_PATHS=()
+MOVED_DIGESTS=()
 MOVED_ORIGINAL_COUNT=0
 
 verify_secure_parent() {
@@ -160,10 +161,16 @@ verify_secure_parent "$APP_PARENT"
 verify_secure_parent "$DATA_DIR" 1
 verify_secure_parent "$ROLLBACK_DIR" 1
 if [ -e "$JOURNAL_PATH" ] || [ -L "$JOURNAL_PATH" ]; then
-  [ -f "$JOURNAL_PATH" ] && [ ! -L "$JOURNAL_PATH" ] || {
-    echo "Install transaction journal is not a secure regular file." >&2
+  [ -f "$JOURNAL_PATH" ] && [ ! -L "$JOURNAL_PATH" ] && \
+    [ "$(stat -f '%u' "$JOURNAL_PATH")" = "$(id -u)" ] && \
+    [ "$(stat -f '%Lp' "$JOURNAL_PATH")" = 600 ] || {
+    echo "Install transaction journal has an unsafe type, owner, or mode." >&2
     exit 1
   }
+  if ls -lde "$JOURNAL_PATH" | tail -n +2 | grep -q '[^[:space:]]'; then
+    echo "Install transaction journal has an unexpected ACL." >&2
+    exit 1
+  fi
 fi
 
 release_install_lock() {
@@ -187,6 +194,10 @@ acquire_install_lock() {
   esac
   if [ "$stale_seconds" -gt 3600 ]; then
     echo "Install lock stale threshold must not exceed 3600 seconds." >&2
+    exit 2
+  fi
+  if [ "$stale_seconds" -lt 5 ]; then
+    echo "Install lock stale threshold must be at least 5 seconds." >&2
     exit 2
   fi
   if ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; then
@@ -293,7 +304,7 @@ stop_uncommitted_candidate() {
   sleep 0.1
   [ -z "$(pids_for_exact_executable "$expected")" ] || {
     echo "Uncommitted Recordings.app process could not be stopped before recovery." >&2
-    exit 1
+    return 1
   }
 }
 
@@ -301,9 +312,10 @@ if [ -f "$JOURNAL_PATH" ]; then
   echo "Recovering incomplete Recordings.app installation transaction." >&2
   RECOVER_WAS_RUNNING="$(bun "$ARTIFACT_TOOL" journal-get --journal "$JOURNAL_PATH" --field was_running)"
   RECOVER_PHASE="$(bun "$ARTIFACT_TOOL" journal-get --journal "$JOURNAL_PATH" --field phase)"
-  case "$RECOVER_PHASE" in candidate-installed|activated|launching) stop_uncommitted_candidate ;; esac
+  case "$RECOVER_PHASE" in candidate-moving|candidate-installed|activated|launching) stop_uncommitted_candidate ;; esac
   bun "$ARTIFACT_TOOL" journal-recover --journal "$JOURNAL_PATH"
-  if [ "$RECOVER_WAS_RUNNING" = 1 ] && [ -d "$APP_DEST" ]; then
+  if [ "$RECOVER_WAS_RUNNING" = 1 ] && [ -d "$APP_DEST" ] && \
+     [ -z "$(pids_for_exact_executable "$APP_DEST/Contents/MacOS/Recordings")" ]; then
     open -n "$APP_DEST" >/dev/null 2>&1 || true
   fi
 fi
@@ -434,7 +446,9 @@ restart_previous_app() {
   [ "$STOPPED_RUNNING_APP" -eq 1 ] || return 0
   for app_path in ${DISCOVERED_APPS[@]+"${DISCOVERED_APPS[@]}"}; do
     if [ -d "$app_path" ]; then
-      open -n "$app_path" >/dev/null 2>&1 || true
+      if [ -z "$(pids_for_exact_executable "$app_path/Contents/MacOS/Recordings")" ]; then
+        open -n "$app_path" >/dev/null 2>&1 || true
+      fi
       return 0
     fi
   done
@@ -444,11 +458,22 @@ cleanup() {
   local status=$?
   trap - EXIT
   if [ "$TRANSACTION_COMMITTED" -ne 1 ] && [ -f "$JOURNAL_PATH" ]; then
+    cleanup_phase="$(bun "$ARTIFACT_TOOL" journal-get --journal "$JOURNAL_PATH" --field phase 2>/dev/null || true)"
+    case "$cleanup_phase" in
+      candidate-moving|candidate-installed|activated|launching)
+        if ! stop_uncommitted_candidate; then
+          echo "Automatic rollback could not stop the uncommitted candidate." >&2
+          release_install_lock
+          exit 1
+        fi
+        ;;
+    esac
     if ! bun "$ARTIFACT_TOOL" journal-recover --journal "$JOURNAL_PATH"; then
       echo "Automatic rollback failed; preserved transaction evidence at ${JOURNAL_PATH}." >&2
       status=1
+    else
+      restart_previous_app
     fi
-    restart_previous_app
   fi
   rm -rf "$STAGING_DIR" "$WORK_DIR"
   if [ "$TRANSACTION_COMMITTED" -eq 1 ]; then
@@ -479,6 +504,7 @@ write_journal() {
     --app-destination "$APP_DEST"
     --data-dir "$DATA_DIR"
     --state-backup "$STATE_BACKUP"
+    --state-backup-sha256 "$STATE_BACKUP_SHA256"
     --expected-manifest-sha256 "$EXPECTED_MANIFEST_SHA256"
     --expected-source-sha "$EXPECTED_SOURCE_SHA"
     --expected-version "$EXPECTED_VERSION"
@@ -488,7 +514,7 @@ write_journal() {
   [ "$was_running" -eq 0 ] || arguments+=(--was-running)
   local index
   for ((index = 0; index < MOVED_ORIGINAL_COUNT; index++)); do
-    arguments+=(--original "${MOVED_ORIGINALS[$index]}" "${MOVED_PATHS[$index]}")
+    arguments+=(--original "${MOVED_ORIGINALS[$index]}" "${MOVED_PATHS[$index]}" "${MOVED_DIGESTS[$index]}")
   done
   bun "$ARTIFACT_TOOL" "${arguments[@]}"
   maybe_crash_after_phase "$phase"
@@ -623,7 +649,7 @@ fi
 chmod 700 "$TRANSACTION_DIR"
 mkdir -m 700 "$TRANSACTION_DIR/apps"
 verify_secure_parent "$TRANSACTION_DIR"
-STATE_BACKUP="$TRANSACTION_DIR/state"
+STATE_BACKUP="$TRANSACTION_DIR/state.initial"
 ditto "$DATA_DIR" "$STATE_BACKUP"
 if ! diff -qr "$DATA_DIR" "$STATE_BACKUP" >/dev/null; then
   echo "Recordings state backup verification failed before replacement." >&2
@@ -633,15 +659,18 @@ chmod -R go-rwx "$STATE_BACKUP"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STATE_BACKUP" --uid "$(id -u)"
 bun "$ARTIFACT_TOOL" fsync-tree --path "$STATE_BACKUP"
 bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR"
+STATE_BACKUP_SHA256="$(bun "$ARTIFACT_TOOL" tree-digest --path "$STATE_BACKUP")"
 
 MOVED_ORIGINALS=()
 MOVED_PATHS=()
+MOVED_DIGESTS=()
 MOVED_ORIGINAL_COUNT=0
 move_index=0
 for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
   move_index=$((move_index + 1))
   MOVED_ORIGINALS+=("$existing_app")
   MOVED_PATHS+=("$TRANSACTION_DIR/apps/original-${move_index}")
+  MOVED_DIGESTS+=("$(bun "$ARTIFACT_TOOL" tree-digest --path "$existing_app")")
   MOVED_ORIGINAL_COUNT=$move_index
 done
 write_journal prepared
@@ -668,22 +697,30 @@ for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
   RUNNING_EXECUTABLES+=("$existing_app/Contents/MacOS/Recordings")
 done
 stop_old_processes
-rm -rf "$STATE_BACKUP"
-ditto "$DATA_DIR" "$STATE_BACKUP"
-if ! diff -qr "$DATA_DIR" "$STATE_BACKUP" >/dev/null; then
+NEXT_STATE_BACKUP="$TRANSACTION_DIR/state.stopped"
+ditto "$DATA_DIR" "$NEXT_STATE_BACKUP"
+if ! diff -qr "$DATA_DIR" "$NEXT_STATE_BACKUP" >/dev/null; then
   echo "Stopped-state backup verification failed before replacement." >&2
   exit 1
 fi
-chmod -R go-rwx "$STATE_BACKUP"
-bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STATE_BACKUP" --uid "$(id -u)"
-bun "$ARTIFACT_TOOL" fsync-tree --path "$STATE_BACKUP"
+chmod -R go-rwx "$NEXT_STATE_BACKUP"
+bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$NEXT_STATE_BACKUP" --uid "$(id -u)"
+bun "$ARTIFACT_TOOL" fsync-tree --path "$NEXT_STATE_BACKUP"
 bun "$ARTIFACT_TOOL" fsync-directory --path "$TRANSACTION_DIR"
+NEXT_STATE_BACKUP_SHA256="$(bun "$ARTIFACT_TOOL" tree-digest --path "$NEXT_STATE_BACKUP")"
+maybe_crash_after_phase state-refresh-copied-before-journal
+STATE_BACKUP="$NEXT_STATE_BACKUP"
+STATE_BACKUP_SHA256="$NEXT_STATE_BACKUP_SHA256"
 write_journal processes-stopped
 
 write_journal originals-moving
 for ((move_index = 0; move_index < MOVED_ORIGINAL_COUNT; move_index++)); do
   existing_app="${MOVED_ORIGINALS[$move_index]}"
   moved_path="${MOVED_PATHS[$move_index]}"
+  [ "$(bun "$ARTIFACT_TOOL" tree-digest --path "$existing_app")" = "${MOVED_DIGESTS[$move_index]}" ] || {
+    echo "Installed Recordings.app changed after transactional backup planning." >&2
+    exit 1
+  }
   mv "$existing_app" "$moved_path"
   chmod -R go-w "$moved_path"
   bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$moved_path" --uid "$(id -u)"
@@ -746,13 +783,12 @@ if [ "$LAUNCH_APP" -eq 1 ] || [ "$was_running" -eq 1 ]; then
     exit 1
   fi
   maybe_crash_after_phase candidate-launched-before-commit
-  STOPPED_RUNNING_APP=0
 fi
 
 write_journal committed
+bun "$ARTIFACT_TOOL" journal-recover --journal "$JOURNAL_PATH"
 TRANSACTION_COMMITTED=1
-rm -f "$JOURNAL_PATH"
-rm -rf "$TRANSACTION_DIR"
+STOPPED_RUNNING_APP=0
 
 if [ "$identity_migration" -eq 1 ]; then
   echo "Installed a new signing identity; macOS will require one-time permission approval for this migration."
