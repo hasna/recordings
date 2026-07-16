@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build, sign, notarize, and finalize a Recordings.app artifact.
-# Usage: ./build.sh [debug|release]
+# Usage: ./build.sh [debug|local|release]
 
 set -euo pipefail
 
@@ -10,9 +10,9 @@ PACKAGE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$SCRIPT_DIR"
 
 case "$MODE" in
-    debug|release) ;;
+    debug|local|release) ;;
     *)
-        echo "Mode must be debug or release" >&2
+        echo "Mode must be debug, local, or release" >&2
         exit 2
         ;;
 esac
@@ -20,10 +20,17 @@ esac
 CODESIGN_IDENTITY="${RECORDINGS_CODESIGN_IDENTITY:-}"
 EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
 NOTARY_PROFILE="${RECORDINGS_NOTARY_KEYCHAIN_PROFILE:-}"
+LOCAL_APPROVED_TARGET="${RECORDINGS_LOCAL_APPROVED_TARGET:-}"
+LOCAL_APPROVED_TARGET_IDENTITY_SHA256="${RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256:-}"
 PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 PLUTIL="${PLUTIL:-/usr/bin/plutil}"
 BUN_EXECUTABLE="${BUN_EXECUTABLE:-$(command -v bun)}"
 
+BUILD_CONFIGURATION="release"
+ARTIFACT_POLICY="release"
+APPROVED_TARGET="fleet"
+APPROVED_TARGET_IDENTITY_SHA256="none"
+BUILDER_IDENTITY_SHA256="none"
 if [ "$MODE" = "release" ]; then
     if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
         echo "Release builds require RECORDINGS_CODESIGN_IDENTITY for a Developer ID Application identity." >&2
@@ -37,16 +44,51 @@ if [ "$MODE" = "release" ]; then
         echo "Release builds require RECORDINGS_NOTARY_KEYCHAIN_PROFILE for notarization." >&2
         exit 1
     fi
-else
+elif [ "$MODE" = "local" ]; then
+    if [ "$LOCAL_APPROVED_TARGET" != "station06" ]; then
+        echo "Local-only builds currently require RECORDINGS_LOCAL_APPROVED_TARGET=station06." >&2
+        exit 1
+    fi
+    if ! [[ "$LOCAL_APPROVED_TARGET_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "Local-only builds require RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256 from the approved machine registry." >&2
+        exit 1
+    fi
+    BUILD_HOST="$(hostname -s)"
+    if [ "$BUILD_HOST" = "$LOCAL_APPROVED_TARGET" ]; then
+        echo "Local-only artifacts must be built on a non-target Mac." >&2
+        exit 1
+    fi
+    BUILDER_PLATFORM_ID="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ {print $(NF-1); exit}' | tr '[:upper:]' '[:lower:]')"
+    if [ -z "$BUILDER_PLATFORM_ID" ]; then
+        echo "Could not read the build Mac platform identity." >&2
+        exit 1
+    fi
+    BUILDER_IDENTITY_SHA256="$(printf '%s' "$BUILDER_PLATFORM_ID" | shasum -a 256 | awk '{print $1}')"
+    unset BUILDER_PLATFORM_ID
+    if [ "$BUILDER_IDENTITY_SHA256" = "$LOCAL_APPROVED_TARGET_IDENTITY_SHA256" ]; then
+        echo "Local-only artifacts must be built on a non-target Mac identity." >&2
+        exit 1
+    fi
     CODESIGN_IDENTITY="-"
     EXPECTED_TEAM_ID="ADHOC"
+    ARTIFACT_POLICY="local_only"
+    APPROVED_TARGET="$LOCAL_APPROVED_TARGET"
+    APPROVED_TARGET_IDENTITY_SHA256="$LOCAL_APPROVED_TARGET_IDENTITY_SHA256"
+    echo "WARNING: local-only artifacts are ad-hoc signed, non-notarized, and restricted to ${APPROVED_TARGET}." >&2
+    echo "WARNING: installing can change code identity and require Microphone or Accessibility reauthorization." >&2
+else
+    BUILD_CONFIGURATION="debug"
+    CODESIGN_IDENTITY="-"
+    EXPECTED_TEAM_ID="ADHOC"
+    ARTIFACT_POLICY="local_only"
+    APPROVED_TARGET="debug-only"
     echo "WARNING: debug builds are ad-hoc signed and non-distributable; never install or upload this output." >&2
 fi
 
 echo "Building Recordings.app ($MODE)..."
-swift build -c "$MODE" --product App
+swift build -c "$BUILD_CONFIGURATION" --product App
 
-BUILD_DIR=".build/$MODE"
+BUILD_DIR=".build/$BUILD_CONFIGURATION"
 APP_DIR="$BUILD_DIR/Recordings.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -60,7 +102,7 @@ cp "$BUILD_DIR/App" "$MACOS/Recordings"
 cp RecordingsLib/Info.plist "$CONTENTS/Info.plist"
 VERSION="$("$PLIST_BUDDY" -c 'Print :CFBundleShortVersionString' "$CONTENTS/Info.plist")"
 
-for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.resources .build/*/"$MODE"/*.bundle; do
+for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$BUILD_CONFIGURATION"/*.resources .build/*/"$BUILD_CONFIGURATION"/*.bundle; do
     [ -e "$bundle" ] || continue
     rm -rf "$RESOURCES/$(basename "$bundle")"
     ditto "$bundle" "$RESOURCES/$(basename "$bundle")"
@@ -68,8 +110,11 @@ done
 
 APP_SIGN_ARGUMENTS=(--force --sign "$CODESIGN_IDENTITY")
 HELPER_SIGN_ARGUMENTS=(--force --sign "$CODESIGN_IDENTITY" --options runtime)
+if [ "$MODE" != "debug" ]; then
+    APP_SIGN_ARGUMENTS+=(--options runtime)
+fi
 if [ "$MODE" = "release" ]; then
-    APP_SIGN_ARGUMENTS+=(--options runtime --timestamp)
+    APP_SIGN_ARGUMENTS+=(--timestamp)
     HELPER_SIGN_ARGUMENTS+=(--timestamp)
 fi
 codesign "${HELPER_SIGN_ARGUMENTS[@]}" \
@@ -176,10 +221,16 @@ run_signed_helper_contract() {
 
 verify_hardened_helper
 run_signed_helper_contract
-bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" provenance \
-    --app "$APP_DIR" \
-    --team-id "$EXPECTED_TEAM_ID" \
-    --package-root "$PACKAGE_ROOT"
+if [ "$MODE" != "debug" ]; then
+    bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" provenance \
+        --app "$APP_DIR" \
+        --team-id "$EXPECTED_TEAM_ID" \
+        --package-root "$PACKAGE_ROOT" \
+        --artifact-policy "$ARTIFACT_POLICY" \
+        --approved-target "$APPROVED_TARGET" \
+        --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256" \
+        --builder-identity-sha256 "$BUILDER_IDENTITY_SHA256"
+fi
 codesign "${APP_SIGN_ARGUMENTS[@]}" \
     --entitlements RecordingsLib/Recordings.entitlements \
     "$APP_DIR"
@@ -221,6 +272,25 @@ codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 if [ "$MODE" = "debug" ]; then
     echo "Built non-distributable debug app: $APP_DIR"
+    exit 0
+fi
+
+if [ "$MODE" = "local" ]; then
+    ARTIFACT_BASENAME="Recordings-${VERSION}-macos-${APPROVED_TARGET}-local-only"
+    FINAL_ARCHIVE="$BUILD_DIR/${ARTIFACT_BASENAME}.zip"
+    FINAL_MANIFEST="$BUILD_DIR/${ARTIFACT_BASENAME}.manifest.json"
+    rm -f "$FINAL_ARCHIVE" "$FINAL_MANIFEST"
+    codesign --verify --deep --strict --all-architectures --verbose=2 "$APP_DIR"
+    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$FINAL_ARCHIVE"
+    bun "$PACKAGE_ROOT/scripts/macos_artifact.ts" finalize-local \
+        --app "$APP_DIR" \
+        --archive "$FINAL_ARCHIVE" \
+        --manifest "$FINAL_MANIFEST" \
+        --approved-target "$APPROVED_TARGET" \
+        --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
+    echo "Built immutable local-only app artifact: $FINAL_ARCHIVE"
+    echo "Built local-only artifact manifest: $FINAL_MANIFEST"
+    echo "This artifact is not notarized and is approved only for ${APPROVED_TARGET}."
     exit 0
 fi
 

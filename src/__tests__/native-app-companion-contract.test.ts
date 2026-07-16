@@ -451,16 +451,24 @@ describe("native app companion contract", () => {
     expect(app.match(/self\.openRecordings\(\)/g)?.length).toBeGreaterThanOrEqual(2);
 
     const smoke = readFileSync("scripts/smoke_macos_app.sh", "utf8");
-    expect(smoke).toContain('open -n -g -W "$APP_PATH"');
+    expect(smoke).toContain('open -n -W "$APP_PATH"');
+    expect(smoke).not.toContain("open -n -g");
     expect(smoke).toContain("applicationActivationPolicy !== 0");
     expect(smoke).toContain("mainWindowCanBecomeKey");
     expect(smoke).toContain("!result.applicationIsActive || !result.mainWindowIsKey");
     expect(smoke).toContain('result.accessibilityObservationStatus !== "absent"');
     expect(smoke).not.toContain("accessibilityMenuBarItemCount > 0");
-    expect(smoke).toContain('SMOKE_APP_PID="$(find_smoke_app_pid "$output")"');
-    expect(smoke).toContain('SMOKE_APP_PID" != "$result_pid"');
+    expect(smoke).toContain('APP_PARENT="$(cd -P "$(dirname "$1")" && pwd)"');
+    expect(smoke).toContain('lsof -a -p "$result_pid" -d txt -Fn');
+    expect(smoke).not.toContain("ps -axo");
     expect(smoke).toContain('if [ -z "$SMOKE_APP_PID" ]');
-    expect(smoke).toContain("before its exact process path could be observed");
+    expect(smoke).toContain('kill -KILL "$SMOKE_APP_PID"');
+    expect(smoke).toContain('SMOKE_FOCUS_EVIDENCE="strict"');
+    expect(smoke).toContain('SMOKE_FOCUS_EVIDENCE="ssh-unavailable"');
+    expect(smoke).toContain('process.env.SMOKE_FOCUS_EVIDENCE !== "ssh-unavailable"');
+    expect(smoke).toContain('event: "recordings_runtime_smoke_evidence"');
+    expect(app).toContain("DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15)");
+    expect(app).toContain("Darwin._exit(124)");
   });
 
   test("AX smoke distinguishes authoritative absence from unavailable children", () => {

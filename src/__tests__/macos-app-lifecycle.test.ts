@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -16,6 +17,10 @@ import { dirname, join, resolve } from "node:path";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const bunExecutable = process.execPath;
+const targetPlatformIdentity = "11111111-1111-4111-8111-111111111111";
+const builderPlatformIdentity = "22222222-2222-4222-8222-222222222222";
+const targetIdentitySha256 = Bun.CryptoHasher.hash("sha256", targetPlatformIdentity, "hex");
+const builderIdentitySha256 = Bun.CryptoHasher.hash("sha256", builderPlatformIdentity, "hex");
 const temporaryPaths: string[] = [];
 setDefaultTimeout(15_000);
 
@@ -72,6 +77,13 @@ function createInstallerFixture() {
   );
 
   writeExecutable(join(bin, "uname"), "#!/usr/bin/env bash\nif [ \"${1:-}\" = -m ]; then printf 'arm64\\n'; else printf 'Darwin\\n'; fi\n");
+  writeExecutable(join(bin, "hostname"), "#!/usr/bin/env bash\nprintf '%s\\n' \"${FIXTURE_HOSTNAME:-station06}\"\n");
+  writeExecutable(
+    join(bin, "ioreg"),
+    `#!/usr/bin/env bash
+printf '    "IOPlatformUUID" = "%s"\n' "\${FIXTURE_PLATFORM_IDENTITY:-${targetPlatformIdentity}}"
+`,
+  );
   writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
   writeExecutable(
     join(bin, "stat"),
@@ -95,6 +107,9 @@ case "$*" in
   *" manifest-get "*"--field architectures"*) printf 'arm64\n'; exit 0 ;;
   *" manifest-get "*"--field identity"*) printf '%064d\n' 0 | tr '0' c; exit 0 ;;
   *" requirement-digest "*)
+    if [ "\${NO_DESIGNATED_REQUIREMENT:-0}" = 1 ]; then
+      [[ "$*" == *"--artifact-policy local_only"* ]] || exit 1
+    fi
     if [[ "$*" == *"/unpacked/"* ]] || [[ "$*" == *"/.Recordings-install-"* ]]; then
       printf '%064d\n' 0 | tr '0' c
     else
@@ -107,6 +122,9 @@ case "$*" in
   *" verify-archive "*)
     [ "\${FAIL_ARCHIVE_VERIFY:-0}" = 1 ] && exit 1
     [[ "$*" == *"--team-id \${REQUIRED_TEAM_ID:-EXAMPLE123}"* ]] || exit 1
+    [ -z "\${REQUIRED_ARTIFACT_POLICY:-}" ] || [[ "$*" == *"--artifact-policy $REQUIRED_ARTIFACT_POLICY"* ]] || exit 1
+    [ -z "\${REQUIRED_APPROVED_TARGET:-}" ] || [[ "$*" == *"--approved-target $REQUIRED_APPROVED_TARGET"* ]] || exit 1
+    [ -z "\${REQUIRED_APPROVED_TARGET_IDENTITY:-}" ] || [[ "$*" == *"--approved-target-identity-sha256 $REQUIRED_APPROVED_TARGET_IDENTITY"* ]] || exit 1
     ;;
   *" verify-app "*)
     [ "\${FAIL_APP_VERIFY:-0}" = 1 ] && exit 1
@@ -138,6 +156,7 @@ fi
 set -euo pipefail
 printf '%s\n' "$*" >> "$MARKER_DIRECTORY/codesign.log"
 if [[ "$*" == *"-d -r-"* ]]; then
+  [ "\${NO_DESIGNATED_REQUIREMENT:-0}" = 1 ] && exit 0
   label=OLD
   [[ "$*" == *"/unpacked/"* ]] && label=NEW
   [[ "$*" == *"/.Recordings-install-"* ]] && label=NEW
@@ -152,8 +171,8 @@ fi
 exit 0
 `,
   );
-  writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nexit 0\n");
-  writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(join(bin, "xcrun"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/xcrun.log\"\nexit 0\n");
+  writeExecutable(join(bin, "spctl"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/spctl.log\"\nexit 0\n");
   writeExecutable(join(bin, "syspolicy_check"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$MARKER_DIRECTORY/syspolicy.log\"\nexit 0\n");
   writeExecutable(
     join(bin, "df"),
@@ -202,6 +221,7 @@ async function runInstaller(
   environment: Record<string, string> = {},
 ) {
   const app = join(fixture.home, "Applications", "Recordings.app");
+  const localPolicy = args.includes("local-only") || args.includes("local_only");
   const process = Bun.spawn(
     [
       "bash",
@@ -210,14 +230,13 @@ async function runInstaller(
       fixture.artifact,
       "--manifest",
       fixture.manifest,
-      "--expected-team-id",
-      "EXAMPLE123",
       "--manifest-sha256",
       "a".repeat(64),
       "--expected-source-sha",
       "b".repeat(40),
       "--expected-version",
       "0.2.12",
+      ...(localPolicy ? [] : ["--expected-team-id", "EXAMPLE123"]),
       ...args,
     ],
     {
@@ -241,6 +260,33 @@ async function runInstaller(
     new Response(process.stderr).text(),
   ]);
   return { exitCode, stdout, stderr };
+}
+
+async function runLocalInstaller(
+  fixture: ReturnType<typeof createInstallerFixture>,
+  args: string[] = [],
+  environment: Record<string, string> = {},
+) {
+  return runInstaller(
+    fixture,
+    [
+      "--artifact-policy",
+      "local-only",
+      "--approved-target",
+      "station06",
+      "--approved-target-identity-sha256",
+      targetIdentitySha256,
+      "--acknowledge-local-signing-and-permissions",
+      ...args,
+    ],
+    {
+      REQUIRED_TEAM_ID: "ADHOC",
+      REQUIRED_ARTIFACT_POLICY: "local_only",
+      REQUIRED_APPROVED_TARGET: "station06",
+      REQUIRED_APPROVED_TARGET_IDENTITY: targetIdentitySha256,
+      ...environment,
+    },
+  );
 }
 
 describe("macOS finalized artifact installer", () => {
@@ -277,6 +323,128 @@ describe("macOS finalized artifact installer", () => {
     );
     expect(await process.exited).toBe(2);
     expect(await new Response(process.stderr).text()).toContain("Unknown argument");
+  });
+
+  test("local-only install has no silent fallback from the release policy", async () => {
+    const fixture = createInstallerFixture();
+    const result = await runInstaller(fixture, [], {
+      REQUIRED_TEAM_ID: "ADHOC",
+      REQUIRED_ARTIFACT_POLICY: "local_only",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(join(fixture.home, "Applications", "Recordings.app"))).toBeFalse();
+  });
+
+  test("local-only install requires permission acknowledgment and the exact live target", async () => {
+    const missingAcknowledgment = createInstallerFixture();
+    const noAck = await runInstaller(
+      missingAcknowledgment,
+      [
+        "--artifact-policy",
+        "local-only",
+        "--approved-target",
+        "station06",
+        "--approved-target-identity-sha256",
+        targetIdentitySha256,
+      ],
+      { REQUIRED_TEAM_ID: "ADHOC" },
+    );
+    expect(noAck.exitCode).toBe(2);
+    expect(noAck.stderr).toContain("acknowledge-local-signing-and-permissions");
+    expect(existsSync(join(missingAcknowledgment.markers, "bun.log"))).toBeFalse();
+
+    const wrongTarget = createInstallerFixture();
+    const mismatch = await runLocalInstaller(wrongTarget, [], { FIXTURE_HOSTNAME: "station05" });
+    expect(mismatch.exitCode).not.toBe(0);
+    expect(mismatch.stderr).toContain("does not match this Mac");
+    expect(existsSync(join(wrongTarget.markers, "bun.log"))).toBeFalse();
+
+    const renamedTarget = createInstallerFixture();
+    const wrongIdentity = await runLocalInstaller(renamedTarget, [], {
+      FIXTURE_PLATFORM_IDENTITY: builderPlatformIdentity,
+    });
+    expect(wrongIdentity.exitCode).not.toBe(0);
+    expect(wrongIdentity.stderr).toContain("approved machine identity");
+    expect(existsSync(join(renamedTarget.markers, "bun.log"))).toBeFalse();
+
+    const releaseFlags = createInstallerFixture();
+    const invalidMigration = await runLocalInstaller(releaseFlags, [
+      "--allow-signing-identity-migration",
+      "--expected-old-identity-sha256",
+      "a".repeat(64),
+      "--expected-new-identity-sha256",
+      "b".repeat(64),
+    ]);
+    expect(invalidMigration.exitCode).toBe(2);
+    expect(invalidMigration.stderr).toContain("not valid for local-only artifacts");
+    expect(existsSync(join(releaseFlags.markers, "bun.log"))).toBeFalse();
+
+    const standaloneDigest = createInstallerFixture();
+    const droppedFlag = await runLocalInstaller(standaloneDigest, [
+      "--expected-old-identity-sha256",
+      "a".repeat(64),
+    ]);
+    expect(droppedFlag.exitCode).toBe(2);
+    expect(droppedFlag.stderr).toContain("not valid for local-only artifacts");
+
+    const wrongTeam = createInstallerFixture();
+    const teamMismatch = await runLocalInstaller(wrongTeam, ["--expected-team-id", "EXAMPLE123"]);
+    expect(teamMismatch.exitCode).toBe(2);
+    expect(teamMismatch.stderr).toContain("do not accept --expected-team-id");
+  });
+
+  test("installs an explicit local-only artifact transactionally without release-trust claims", async () => {
+    const fixture = createInstallerFixture();
+    const stateDir = join(fixture.home, ".hasna", "recordings");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "recordings.db"), "preserve-me");
+    const result = await runLocalInstaller(fixture);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Installed local-only Recordings.app for station06");
+    expect(result.stdout).toContain("may require manual reauthorization");
+    expect(readFileSync(join(stateDir, "recordings.db"), "utf8")).toBe("preserve-me");
+    expect(existsSync(join(fixture.home, "Applications", "Recordings.app"))).toBeTrue();
+    expect(existsSync(join(fixture.markers, "xcrun.log"))).toBeFalse();
+    expect(existsSync(join(fixture.markers, "spctl.log"))).toBeFalse();
+    expect(existsSync(join(fixture.markers, "syspolicy.log"))).toBeFalse();
+    const installer = readFileSync(join(repositoryRoot, "scripts", "install_macos_app.sh"), "utf8");
+    expect(installer).not.toContain("tccutil");
+    expect(installer).not.toContain("quarantine");
+  });
+
+  test("accepts verified ad-hoc local apps without a textual designated requirement", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    createApp(installed, "installed");
+    const result = await runLocalInstaller(fixture, [], { NO_DESIGNATED_REQUIREMENT: "1" });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+    const bunLog = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(bunLog).toContain("requirement-digest");
+    expect(bunLog).toContain("--artifact-policy local_only");
+    const codesignLog = readFileSync(join(fixture.markers, "codesign.log"), "utf8");
+    expect(codesignLog).not.toContain(" -R ");
+  });
+
+  test("rejects release apps without a textual designated requirement", async () => {
+    const fixture = createInstallerFixture();
+    const result = await runInstaller(fixture, [], { NO_DESIGNATED_REQUIREMENT: "1" });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Candidate app has no designated requirement");
+    expect(existsSync(join(fixture.home, "Applications", "Recordings.app"))).toBeFalse();
+  });
+
+  test("rolls back app and state when local-only postactivation verification fails", async () => {
+    const fixture = createInstallerFixture();
+    const installed = join(fixture.home, "Applications", "Recordings.app");
+    const stateDir = join(fixture.home, ".hasna", "recordings");
+    createApp(installed, "installed");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "recordings.db"), "original-state");
+    const result = await runLocalInstaller(fixture, [], { FAIL_ACTIVE_VERIFY: "1" });
+    expect(result.exitCode).not.toBe(0);
+    expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
+    expect(readFileSync(join(stateDir, "recordings.db"), "utf8")).toBe("original-state");
   });
 
   test("rejects archive or manifest tampering before mutating an installed app", async () => {
@@ -822,7 +990,7 @@ fi
     expect(commands.indexOf("verify-active")).toBeGreaterThan(commands.indexOf("verify-app"));
   });
 
-  test("runtime smoke rejects fast evidence without an observed exact-path process", async () => {
+  test("runtime smoke rejects evidence from a process that already exited", async () => {
     const fixture = createInstallerFixture();
     const app = join(fixture.root, "smoke", "Recordings.app");
     createApp(app, "app");
@@ -842,7 +1010,6 @@ done
 printf '{"processIdentifier":123}\n' > "$output"
 `,
     );
-    writeExecutable(join(fixture.bin, "ps"), "#!/usr/bin/env bash\nexit 0\n");
     writeExecutable(join(fixture.bin, "bun"), "#!/usr/bin/env bash\nprintf '123\\n'\n");
     const smoke = Bun.spawn(["bash", join(fixture.root, "scripts", "smoke_macos_app.sh"), app], {
       env: { ...Bun.env, PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}` },
@@ -854,7 +1021,155 @@ printf '{"processIdentifier":123}\n' > "$output"
       new Response(smoke.stderr).text(),
     ]);
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("before its exact process path could be observed");
+    expect(stderr).toContain("reported a process that is not running");
+  });
+
+  test("runtime smoke timeout does not wait forever on a live open process", async () => {
+    const fixture = createInstallerFixture();
+    const app = join(fixture.root, "smoke-timeout", "Recordings.app");
+    createApp(app, "app");
+    cpSync(
+      join(repositoryRoot, "scripts", "smoke_macos_app.sh"),
+      join(fixture.root, "scripts", "smoke_macos_app.sh"),
+    );
+    const smokeScript = join(fixture.root, "scripts", "smoke_macos_app.sh");
+    writeFileSync(
+      smokeScript,
+      readFileSync(smokeScript, "utf8").replace("SMOKE_MAX_ATTEMPTS=100", "SMOKE_MAX_ATTEMPTS=3"),
+    );
+    chmodSync(join(fixture.root, "scripts", "smoke_macos_app.sh"), 0o755);
+    writeExecutable(
+      join(fixture.bin, "open"),
+      "#!/usr/bin/env bash\nexec /bin/sleep 30\n",
+    );
+    writeExecutable(join(fixture.bin, "lsof"), "#!/usr/bin/env bash\nexit 1\n");
+    writeExecutable(join(fixture.bin, "bun"), "#!/usr/bin/env bash\nexit 1\n");
+    const smoke = Bun.spawn(["bash", join(fixture.root, "scripts", "smoke_macos_app.sh"), app], {
+      env: { ...Bun.env, PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const timeout = Bun.sleep(2_000).then(() => "timeout" as const);
+    const outcome = await Promise.race([smoke.exited.then((exitCode) => ({ exitCode })), timeout]);
+    if (outcome === "timeout") {
+      smoke.kill();
+      await smoke.exited;
+      throw new Error("runtime smoke waited indefinitely for the live open process");
+    }
+    expect(outcome.exitCode).not.toBe(0);
+    expect(await new Response(smoke.stderr).text()).toContain("timed out");
+  });
+
+  test("runtime smoke binds evidence to a canonical process path despite symlink drift", async () => {
+    const fixture = createInstallerFixture();
+    const physicalRelease = join(fixture.root, "physical", "release");
+    const driftRelease = join(fixture.root, "drift", "release");
+    const releaseLink = join(fixture.root, "linked-release");
+    const physicalApp = join(physicalRelease, "Recordings.app");
+    createApp(physicalApp, "physical-app");
+    createApp(join(driftRelease, "Recordings.app"), "drift-app");
+    symlinkSync(physicalRelease, releaseLink, "dir");
+    cpSync(
+      join(repositoryRoot, "scripts", "smoke_macos_app.sh"),
+      join(fixture.root, "scripts", "smoke_macos_app.sh"),
+    );
+    const smokeScript = join(fixture.root, "scripts", "smoke_macos_app.sh");
+    writeFileSync(
+      smokeScript,
+      readFileSync(smokeScript, "utf8").replace(
+        "SMOKE_TERMINATION_ATTEMPTS=50",
+        "SMOKE_TERMINATION_ATTEMPTS=3",
+      ),
+    );
+    chmodSync(join(fixture.root, "scripts", "smoke_macos_app.sh"), 0o755);
+    const appLog = join(fixture.markers, "opened-apps.log");
+    const lsofState = join(fixture.markers, "lsof-state");
+    writeExecutable(
+      join(fixture.bin, "open"),
+      `#!/usr/bin/env bash
+app=""
+output=""
+mode=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -W ]; then app="$2"; shift 2; continue; fi
+  if [ "$1" = --runtime-smoke ]; then mode="$2"; shift 2; continue; fi
+  if [ "$1" = --runtime-smoke-output ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+printf '%s\\n' "$app" >> "$APP_LOG"
+/bin/sleep 30 &
+app_pid="$!"
+printf '%s\\n%s\\n' "$app_pid" "$app/Contents/MacOS/Recordings" > "$LSOF_STATE"
+ln -sfn "$DRIFT_TARGET" "$DRIFT_LINK"
+if [ "$mode" = normal ]; then
+  printf '{"mode":"normal","processIdentifier":%s,"menuBarSurfaceCount":1,"renderedStatusLabels":["Recordings","Recordings, recording","Recordings, transcribing"],"accessibilityObservationStatus":"available","accessibilityMenuBarItemCount":1,"accessibilityMenuBarLabels":["Recordings, transcribing"],"globalHandlersInstalled":false,"permissionRequestsStarted":0,"windowCreationCount":1,"windowActivationCount":2,"retainedWindowReused":true,"applicationActivationPolicy":0,"applicationIsActive":false,"mainWindowIsVisible":true,"mainWindowCanBecomeKey":true,"mainWindowIsKey":false,"resolvedCompanionPath":null,"companionCapabilitiesPassed":false}\\n' "$app_pid" > "$output"
+elif [ "$mode" = resolver ]; then
+  printf '{"mode":"resolver","processIdentifier":%s,"menuBarSurfaceCount":0,"renderedStatusLabels":[],"accessibilityObservationStatus":"absent","accessibilityMenuBarItemCount":0,"accessibilityMenuBarLabels":[],"globalHandlersInstalled":false,"permissionRequestsStarted":0,"windowCreationCount":0,"windowActivationCount":0,"retainedWindowReused":false,"applicationActivationPolicy":1,"applicationIsActive":false,"mainWindowIsVisible":false,"mainWindowCanBecomeKey":false,"mainWindowIsKey":false,"resolvedCompanionPath":"%s/Contents/Helpers/recordings","companionCapabilitiesPassed":true}\\n' "$app_pid" "$app" > "$output"
+else
+  printf '{"mode":"permission-helper","processIdentifier":%s,"menuBarSurfaceCount":0,"renderedStatusLabels":[],"accessibilityObservationStatus":"absent","accessibilityMenuBarItemCount":0,"accessibilityMenuBarLabels":[],"globalHandlersInstalled":false,"permissionRequestsStarted":0,"windowCreationCount":0,"windowActivationCount":0,"retainedWindowReused":false,"applicationActivationPolicy":1,"applicationIsActive":false,"mainWindowIsVisible":false,"mainWindowCanBecomeKey":false,"mainWindowIsKey":false,"resolvedCompanionPath":null,"companionCapabilitiesPassed":false}\\n' "$app_pid" > "$output"
+fi
+wait "$app_pid" 2>/dev/null || true
+exec /bin/sleep 30
+`,
+    );
+    writeExecutable(
+      join(fixture.bin, "lsof"),
+      `#!/usr/bin/env bash
+pid=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -p ]; then pid="$2"; break; fi
+  shift
+done
+state_pid="$(sed -n '1p' "$LSOF_STATE")"
+executable="$(sed -n '2p' "$LSOF_STATE")"
+if [ "$pid" = "$state_pid" ]; then printf 'p%s\\nn%s\\n' "$pid" "$executable"; fi
+`,
+    );
+    writeExecutable(
+      join(fixture.bin, "bun"),
+      "#!/usr/bin/env bash\nexec \"$REAL_BUN\" \"$@\"\n",
+    );
+    const baseEnvironment = {
+      ...Bun.env,
+      PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
+      REAL_BUN: bunExecutable,
+      APP_LOG: appLog,
+      LSOF_STATE: lsofState,
+      DRIFT_LINK: releaseLink,
+      DRIFT_TARGET: driftRelease,
+    };
+    delete baseEnvironment.SSH_CONNECTION;
+    const spawnSmoke = (env: Record<string, string | undefined>) =>
+      Bun.spawn(
+        ["bash", join(fixture.root, "scripts", "smoke_macos_app.sh"), join(releaseLink, "Recordings.app")],
+        { env, stdout: "pipe", stderr: "pipe" },
+      );
+    const strictSmoke = spawnSmoke(baseEnvironment);
+    const [strictExitCode, strictStderr] = await Promise.all([
+      strictSmoke.exited,
+      new Response(strictSmoke.stderr).text(),
+    ]);
+    expect(strictExitCode).not.toBe(0);
+    expect(strictStderr).toContain("did not make the retained window active and key");
+    rmSync(releaseLink);
+    symlinkSync(physicalRelease, releaseLink, "dir");
+    writeFileSync(appLog, "");
+    const smoke = spawnSmoke({ ...baseEnvironment, SSH_CONNECTION: "fixture-authenticated-ssh" });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      smoke.exited,
+      new Response(smoke.stdout).text(),
+      new Response(smoke.stderr).text(),
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain('"focusEvidenceStatus":"ssh-unavailable"');
+    expect(stdout).toContain('"focusEvidenceStatus":"not-applicable"');
+    expect(readFileSync(appLog, "utf8").trim().split("\n")).toEqual([
+      physicalApp,
+      physicalApp,
+      physicalApp,
+    ]);
+    expect(readlinkSync(releaseLink)).toBe(driftRelease);
   });
 });
 
@@ -927,7 +1242,7 @@ chmod +x "$1"
 const args = Bun.argv.slice(2);
 appendFileSync(Bun.env.MARKER_DIRECTORY + "/bun.log", args.join(" ") + "\\n");
 if (args[0] === "provenance") process.exit(0);
-if (args[0] === "finalize") {
+if (args[0] === "finalize" || args[0] === "finalize-local") {
   const manifestIndex = args.indexOf("--manifest");
   if (manifestIndex < 0 || !args[manifestIndex + 1]) process.exit(64);
   writeFileSync(args[manifestIndex + 1], "{}\\n");
@@ -939,6 +1254,13 @@ process.exit(64);
     writeExecutable(
       join(bin, "swift"),
       "#!/usr/bin/env bash\nmkdir -p .build/$3\nprintf app > .build/$3/App\nchmod +x .build/$3/App\n",
+    );
+    writeExecutable(join(bin, "hostname"), "#!/usr/bin/env bash\nprintf '%s\\n' \"${BUILD_FIXTURE_HOSTNAME:-station05}\"\n");
+    writeExecutable(
+      join(bin, "ioreg"),
+      `#!/usr/bin/env bash
+printf '    "IOPlatformUUID" = "%s"\n' "\${BUILD_PLATFORM_IDENTITY:-${builderPlatformIdentity}}"
+`,
     );
     writeExecutable(
       join(bin, "codesign"),
@@ -1059,6 +1381,36 @@ fi
     return { exitCode, stdout, stderr };
   }
 
+  async function runLocalBuild(fixture: ReturnType<typeof createBuildFixture>, environment = {}) {
+    const process = Bun.spawn(["bash", join(fixture.native, "build.sh"), "local"], {
+      cwd: fixture.native,
+      env: {
+        ...Bun.env,
+        PATH: `${fixture.bin}:${Bun.env.PATH ?? ""}`,
+        MARKER_DIRECTORY: fixture.markers,
+        PLIST_BUDDY: join(fixture.bin, "plistbuddy"),
+        PLUTIL: join(fixture.bin, "plutil"),
+        BUN_EXECUTABLE: bunExecutable,
+        EXPECTED_HELPER_ENTITLEMENTS: join(fixture.native, "RecordingsLib", "RecordingsCLI.entitlements"),
+        RECORDINGS_CODESIGN_IDENTITY: "",
+        RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
+        RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "",
+        RECORDINGS_LOCAL_APPROVED_TARGET: "station06",
+        RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: targetIdentitySha256,
+        SIGNING_FLAGS: "0x10002(adhoc,runtime)",
+        ...environment,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
+  }
+
   test("debug builds ad-hoc locally without release credentials", async () => {
     const fixture = createBuildFixture();
     const result = await runDebugBuild(fixture, {
@@ -1076,6 +1428,43 @@ fi
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings.app", "Contents", "Helpers", "recordings"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "debug", "Recordings-0.2.12-macos.zip"))).toBeFalse();
+  });
+
+  test("local-only build is explicit, target-bound, ad-hoc, and non-notarized", async () => {
+    const fixture = createBuildFixture();
+    const result = await runLocalBuild(fixture);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stderr).toContain("ad-hoc signed, non-notarized, and restricted to station06");
+    expect(result.stdout).toContain("Built immutable local-only app artifact");
+    expect(result.stdout).toContain("not notarized and is approved only for station06");
+    const codesignLog = readFileSync(join(fixture.markers, "codesign.log"), "utf8");
+    expect(codesignLog).toContain("--force --sign -");
+    expect(codesignLog).not.toContain("--timestamp");
+    const bunLog = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(bunLog).toContain("provenance");
+    expect(bunLog).toContain("--artifact-policy local_only");
+    expect(bunLog).toContain("--approved-target station06");
+    expect(bunLog).toContain(`--approved-target-identity-sha256 ${targetIdentitySha256}`);
+    expect(bunLog).toContain(`--builder-identity-sha256 ${builderIdentitySha256}`);
+    expect(bunLog).toContain("finalize-local");
+    expect(existsSync(join(fixture.markers, "xcrun.log"))).toBeFalse();
+    expect(existsSync(join(fixture.markers, "syspolicy.log"))).toBeFalse();
+    expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station06-local-only.zip"))).toBeTrue();
+    expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station06-local-only.manifest.json"))).toBeTrue();
+  });
+
+  test("local-only build rejects missing or same-host target scope", async () => {
+    const missing = createBuildFixture();
+    const missingResult = await runLocalBuild(missing, { RECORDINGS_LOCAL_APPROVED_TARGET: "" });
+    expect(missingResult.exitCode).not.toBe(0);
+    expect(missingResult.stderr).toContain("RECORDINGS_LOCAL_APPROVED_TARGET=station06");
+
+    const sameHost = createBuildFixture();
+    const sameHostResult = await runLocalBuild(sameHost, {
+      RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: builderIdentitySha256,
+    });
+    expect(sameHostResult.exitCode).not.toBe(0);
+    expect(sameHostResult.stderr).toContain("non-target Mac identity");
   });
 
   test("release builds reject missing signer and notary configuration", async () => {
