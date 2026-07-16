@@ -21,6 +21,7 @@ CODESIGN_IDENTITY="${RECORDINGS_CODESIGN_IDENTITY:-}"
 EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
 NOTARY_PROFILE="${RECORDINGS_NOTARY_KEYCHAIN_PROFILE:-}"
 LOCAL_APPROVED_TARGET="${RECORDINGS_LOCAL_APPROVED_TARGET:-}"
+LOCAL_APPROVED_TARGET_IDENTITY_KIND="${RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND:-}"
 LOCAL_APPROVED_TARGET_IDENTITY_SHA256="${RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256:-}"
 PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 PLUTIL="${PLUTIL:-/usr/bin/plutil}"
@@ -29,6 +30,7 @@ BUN_EXECUTABLE="${BUN_EXECUTABLE:-$(command -v bun)}"
 BUILD_CONFIGURATION="release"
 ARTIFACT_POLICY="release"
 APPROVED_TARGET="fleet"
+APPROVED_TARGET_IDENTITY_KIND="none"
 APPROVED_TARGET_IDENTITY_SHA256="none"
 BUILDER_IDENTITY_SHA256="none"
 if [ "$MODE" = "release" ]; then
@@ -50,7 +52,11 @@ elif [ "$MODE" = "local" ]; then
         exit 1
     fi
     if ! [[ "$LOCAL_APPROVED_TARGET_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
-        echo "Local-only builds require RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256 from the approved machine registry." >&2
+        echo "Local-only builds require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256." >&2
+        exit 1
+    fi
+    if [ "$LOCAL_APPROVED_TARGET_IDENTITY_KIND" != "tailscale_stable_id_sha256" ]; then
+        echo "New local-only builds require RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND=tailscale_stable_id_sha256." >&2
         exit 1
     fi
     BUILD_HOST="$(hostname -s)"
@@ -73,6 +79,7 @@ elif [ "$MODE" = "local" ]; then
     EXPECTED_TEAM_ID="ADHOC"
     ARTIFACT_POLICY="local_only"
     APPROVED_TARGET="$LOCAL_APPROVED_TARGET"
+    APPROVED_TARGET_IDENTITY_KIND="$LOCAL_APPROVED_TARGET_IDENTITY_KIND"
     APPROVED_TARGET_IDENTITY_SHA256="$LOCAL_APPROVED_TARGET_IDENTITY_SHA256"
     echo "WARNING: local-only artifacts are ad-hoc signed, non-notarized, and restricted to ${APPROVED_TARGET}." >&2
     echo "WARNING: installing can change code identity and require Microphone or Accessibility reauthorization." >&2
@@ -228,6 +235,7 @@ if [ "$MODE" != "debug" ]; then
         --package-root "$PACKAGE_ROOT" \
         --artifact-policy "$ARTIFACT_POLICY" \
         --approved-target "$APPROVED_TARGET" \
+        --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
         --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256" \
         --builder-identity-sha256 "$BUILDER_IDENTITY_SHA256"
 fi
@@ -287,6 +295,7 @@ if [ "$MODE" = "local" ]; then
         --archive "$FINAL_ARCHIVE" \
         --manifest "$FINAL_MANIFEST" \
         --approved-target "$APPROVED_TARGET" \
+        --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
         --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
     echo "Built immutable local-only app artifact: $FINAL_ARCHIVE"
     echo "Built local-only artifact manifest: $FINAL_MANIFEST"

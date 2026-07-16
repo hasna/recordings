@@ -19,7 +19,13 @@ const repositoryRoot = resolve(import.meta.dir, "../..");
 const bunExecutable = process.execPath;
 const targetPlatformIdentity = "11111111-1111-4111-8111-111111111111";
 const builderPlatformIdentity = "22222222-2222-4222-8222-222222222222";
+const targetTailscaleStableId = "nodeid:station06-stable";
 const targetIdentitySha256 = Bun.CryptoHasher.hash("sha256", targetPlatformIdentity, "hex");
+const targetTailscaleIdentitySha256 = Bun.CryptoHasher.hash(
+  "sha256",
+  targetTailscaleStableId,
+  "hex",
+);
 const builderIdentitySha256 = Bun.CryptoHasher.hash("sha256", builderPlatformIdentity, "hex");
 const temporaryPaths: string[] = [];
 setDefaultTimeout(15_000);
@@ -84,6 +90,18 @@ function createInstallerFixture() {
 printf '    "IOPlatformUUID" = "%s"\n' "\${FIXTURE_PLATFORM_IDENTITY:-${targetPlatformIdentity}}"
 `,
   );
+  writeExecutable(
+    join(bin, "tailscale"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+[ "\${FAIL_TAILSCALE_STATUS:-0}" = 0 ] || exit 1
+if [ -n "\${TAILSCALE_STATUS_JSON:-}" ]; then
+  printf '%s\n' "$TAILSCALE_STATUS_JSON"
+else
+  printf '%s\n' '{"Self":{"Online":true,"HostName":"station06","StableID":"${targetTailscaleStableId}"}}'
+fi
+`,
+  );
   writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
   writeExecutable(
     join(bin, "stat"),
@@ -103,6 +121,7 @@ case "$*" in
   *" journal-write "*|*" journal-get "*|*" journal-recover "*|*" tree-digest "*)
     exec "$REAL_BUN" "$@"
     ;;
+  *" tailscale-identity-sha256 "*) exec "$REAL_BUN" "$@" ;;
   *" manifest-get "*"--field minimum_macos"*) printf '26.0\n'; exit 0 ;;
   *" manifest-get "*"--field architectures"*) printf 'arm64\n'; exit 0 ;;
   *" manifest-get "*"--field identity"*) printf '%064d\n' 0 | tr '0' c; exit 0 ;;
@@ -124,6 +143,7 @@ case "$*" in
     [[ "$*" == *"--team-id \${REQUIRED_TEAM_ID:-EXAMPLE123}"* ]] || exit 1
     [ -z "\${REQUIRED_ARTIFACT_POLICY:-}" ] || [[ "$*" == *"--artifact-policy $REQUIRED_ARTIFACT_POLICY"* ]] || exit 1
     [ -z "\${REQUIRED_APPROVED_TARGET:-}" ] || [[ "$*" == *"--approved-target $REQUIRED_APPROVED_TARGET"* ]] || exit 1
+    [ -z "\${REQUIRED_APPROVED_TARGET_IDENTITY_KIND:-}" ] || [[ "$*" == *"--approved-target-identity-kind $REQUIRED_APPROVED_TARGET_IDENTITY_KIND"* ]] || exit 1
     [ -z "\${REQUIRED_APPROVED_TARGET_IDENTITY:-}" ] || [[ "$*" == *"--approved-target-identity-sha256 $REQUIRED_APPROVED_TARGET_IDENTITY"* ]] || exit 1
     ;;
   *" verify-app "*)
@@ -289,6 +309,36 @@ async function runLocalInstaller(
   );
 }
 
+async function runTailscaleLocalInstaller(
+  fixture: ReturnType<typeof createInstallerFixture>,
+  args: string[] = [],
+  environment: Record<string, string> = {},
+) {
+  return runInstaller(
+    fixture,
+    [
+      "--artifact-policy",
+      "local-only",
+      "--approved-target",
+      "station06",
+      "--approved-target-identity-kind",
+      "tailscale_stable_id_sha256",
+      "--approved-target-identity-sha256",
+      targetTailscaleIdentitySha256,
+      "--acknowledge-local-signing-and-permissions",
+      ...args,
+    ],
+    {
+      REQUIRED_TEAM_ID: "ADHOC",
+      REQUIRED_ARTIFACT_POLICY: "local_only",
+      REQUIRED_APPROVED_TARGET: "station06",
+      REQUIRED_APPROVED_TARGET_IDENTITY_KIND: "tailscale_stable_id_sha256",
+      REQUIRED_APPROVED_TARGET_IDENTITY: targetTailscaleIdentitySha256,
+      ...environment,
+    },
+  );
+}
+
 describe("macOS finalized artifact installer", () => {
   test("rejects non-macOS invocation before inspecting artifact paths", async () => {
     const fixture = createInstallerFixture();
@@ -333,6 +383,18 @@ describe("macOS finalized artifact installer", () => {
     });
     expect(result.exitCode).not.toBe(0);
     expect(existsSync(join(fixture.home, "Applications", "Recordings.app"))).toBeFalse();
+  });
+
+  test("release install rejects a local target identity kind before verification or mutation", async () => {
+    const fixture = createInstallerFixture();
+    const result = await runInstaller(fixture, [
+      "--approved-target-identity-kind",
+      "tailscale_stable_id_sha256",
+    ]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("do not accept a local-only target identity kind");
+    expect(existsSync(join(fixture.markers, "bun.log"))).toBeFalse();
+    expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
   });
 
   test("local-only install requires permission acknowledgment and the exact live target", async () => {
@@ -391,6 +453,44 @@ describe("macOS finalized artifact installer", () => {
     const teamMismatch = await runLocalInstaller(wrongTeam, ["--expected-team-id", "EXAMPLE123"]);
     expect(teamMismatch.exitCode).toBe(2);
     expect(teamMismatch.stderr).toContain("do not accept --expected-team-id");
+  });
+
+  test("Tailscale-bound local install verifies live Self before creating install state", async () => {
+    const fixture = createInstallerFixture();
+    const result = await runTailscaleLocalInstaller(fixture);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(readFileSync(join(fixture.markers, "bun.log"), "utf8")).toContain(
+      "tailscale-identity-sha256 --expected-hostname station06",
+    );
+  });
+
+  test("Tailscale-bound local install fails closed when Tailscale is missing", async () => {
+    const fixture = createInstallerFixture();
+    rmSync(join(fixture.bin, "tailscale"));
+    const result = await runTailscaleLocalInstaller(fixture);
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
+  });
+
+  test.each([
+    ["failed status", "", { FAIL_TAILSCALE_STATUS: "1" }],
+    ["malformed status", "{", {}],
+    ["missing Self", "{}", {}],
+    ["malformed Self", '{"Self":[]}', {}],
+    ["stale Self", '{"Self":{"Online":false,"HostName":"station06","StableID":"nodeid:station06-stable"}}', {}],
+    ["wrong Self", '{"Self":{"Online":true,"HostName":"station05","StableID":"nodeid:station06-stable"}}', {}],
+    ["missing StableID", '{"Self":{"Online":true,"HostName":"station06"}}', {}],
+    ["hash mismatch", '{"Self":{"Online":true,"HostName":"station06","StableID":"nodeid:other"}}', {}],
+  ])("Tailscale-bound local install fails closed for %s", async (_label, statusJson, environment) => {
+    const fixture = createInstallerFixture();
+    const result = await runTailscaleLocalInstaller(fixture, [], {
+      ...(statusJson ? { TAILSCALE_STATUS_JSON: statusJson } : {}),
+      ...environment,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(join(fixture.home, ".hasna"))).toBeFalse();
+    expect(existsSync(join(fixture.home, "Applications"))).toBeFalse();
   });
 
   test("installs an explicit local-only artifact transactionally without release-trust claims", async () => {
@@ -1396,6 +1496,7 @@ fi
         RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
         RECORDINGS_NOTARY_KEYCHAIN_PROFILE: "",
         RECORDINGS_LOCAL_APPROVED_TARGET: "station06",
+        RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND: "tailscale_stable_id_sha256",
         RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: targetIdentitySha256,
         SIGNING_FLAGS: "0x10002(adhoc,runtime)",
         ...environment,
@@ -1444,6 +1545,7 @@ fi
     expect(bunLog).toContain("provenance");
     expect(bunLog).toContain("--artifact-policy local_only");
     expect(bunLog).toContain("--approved-target station06");
+    expect(bunLog).toContain("--approved-target-identity-kind tailscale_stable_id_sha256");
     expect(bunLog).toContain(`--approved-target-identity-sha256 ${targetIdentitySha256}`);
     expect(bunLog).toContain(`--builder-identity-sha256 ${builderIdentitySha256}`);
     expect(bunLog).toContain("finalize-local");
@@ -1460,11 +1562,23 @@ fi
     expect(missingResult.stderr).toContain("RECORDINGS_LOCAL_APPROVED_TARGET=station06");
 
     const sameHost = createBuildFixture();
-    const sameHostResult = await runLocalBuild(sameHost, {
-      RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256: builderIdentitySha256,
-    });
+    const sameHostResult = await runLocalBuild(sameHost, { BUILD_FIXTURE_HOSTNAME: "station06" });
     expect(sameHostResult.exitCode).not.toBe(0);
-    expect(sameHostResult.stderr).toContain("non-target Mac identity");
+    expect(sameHostResult.stderr).toContain("non-target Mac");
+
+    const legacyHardwareKind = createBuildFixture();
+    const legacyHardwareKindResult = await runLocalBuild(legacyHardwareKind, {
+      RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND: "hardware_uuid_sha256",
+    });
+    expect(legacyHardwareKindResult.exitCode).not.toBe(0);
+    expect(legacyHardwareKindResult.stderr).toContain("tailscale_stable_id_sha256");
+
+    const missingKind = createBuildFixture();
+    const missingKindResult = await runLocalBuild(missingKind, {
+      RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND: "",
+    });
+    expect(missingKindResult.exitCode).not.toBe(0);
+    expect(missingKindResult.stderr).toContain("RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND");
   });
 
   test("release builds reject missing signer and notary configuration", async () => {

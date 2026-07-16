@@ -740,8 +740,12 @@ appCommand
   .option("--artifact-policy <policy>", "Artifact policy: release or local-only", "release")
   .option("--approved-target <station>", "Exact approved target; fleet for release artifacts", "fleet")
   .option(
+    "--approved-target-identity-kind <kind>",
+    "Target identity kind: hardware_uuid_sha256 or tailscale_stable_id_sha256",
+  )
+  .option(
     "--approved-target-identity-sha256 <sha256>",
-    "SHA-256 of the approved target platform identity; none for release artifacts",
+    "Authenticated SHA-256 of the approved target identity; none for release artifacts",
     "none",
   )
   .option(
@@ -765,6 +769,7 @@ appCommand
     expectedVersion: string;
     artifactPolicy: string;
     approvedTarget: string;
+    approvedTargetIdentityKind?: string;
     approvedTargetIdentitySha256: string;
     acknowledgeLocalSigningAndPermissions?: boolean;
     expectedOldIdentitySha256?: string;
@@ -799,11 +804,16 @@ appCommand
       opts.artifactPolicy,
       "--approved-target",
       opts.approvedTarget,
-      "--approved-target-identity-sha256",
-      opts.approvedTargetIdentitySha256,
       "--launch-timeout",
       opts.launchTimeout,
     ];
+    if (opts.approvedTargetIdentityKind) {
+      installerArgs.push("--approved-target-identity-kind", opts.approvedTargetIdentityKind);
+    }
+    installerArgs.push(
+      "--approved-target-identity-sha256",
+      opts.approvedTargetIdentitySha256,
+    );
     if (opts.expectedTeamId) {
       installerArgs.push("--expected-team-id", opts.expectedTeamId);
     }

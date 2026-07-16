@@ -12,6 +12,7 @@ import {
   verifyArchiveManifest,
   compareVersions,
   sha256File as fileDigest,
+  tailscaleStableIdSha256,
 } from "../../scripts/macos_artifact";
 
 const temporaryDirectories: string[] = [];
@@ -113,12 +114,16 @@ function fixture(): {
   return { archivePath, manifestPath, manifest };
 }
 
-function localFixture(approvedTarget = "station06") {
+function localFixture(
+  approvedTarget = "station06",
+  identityKind?: "hardware_uuid_sha256" | "tailscale_stable_id_sha256",
+) {
   const result = fixture();
   const { manifest } = result;
   manifest.schema_version = 3;
   manifest.artifact_policy = "local_only";
   manifest.approved_target = approvedTarget;
+  manifest.approved_target_identity_kind = identityKind;
   manifest.approved_target_identity_sha256 = targetIdentitySha256;
   manifest.builder_identity_sha256 = builderIdentitySha256;
   manifest.non_notarized = true;
@@ -322,10 +327,42 @@ describe("macOS artifact manifest", () => {
     expect(manifest.schema_version).toBe(2);
     expect(manifest.artifact_policy).toBeUndefined();
     expect(manifest.approved_target).toBeUndefined();
+    expect(manifest.approved_target_identity_kind).toBeUndefined();
     expect(manifest.approved_target_identity_sha256).toBeUndefined();
     expect(manifest.builder_identity_sha256).toBeUndefined();
     expect(manifest.non_notarized).toBeUndefined();
     expect(manifest.signing.mode).toBeUndefined();
+  });
+
+  test("release schema v2 rejects every local target identity field", () => {
+    const { archivePath, manifestPath, manifest } = fixture();
+    manifest.approved_target_identity_kind = "tailscale_stable_id_sha256";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "EXAMPLE123",
+        fileDigest(manifestPath),
+        manifest.git_sha,
+        manifest.bundle_version,
+      ),
+    ).toThrow("release schema v2");
+  });
+
+  test("manifest-get reports no target identity kind for release schema v2", () => {
+    const { manifestPath } = fixture();
+    const result = Bun.spawnSync([
+      process.execPath,
+      join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
+      "manifest-get",
+      "--manifest",
+      manifestPath,
+      "--field",
+      "approved_target_identity_kind",
+    ]);
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.stdout.toString().trim()).toBe("none");
   });
 
   test("accepts local-only artifacts only with an explicit policy and exact target", () => {
@@ -366,6 +403,98 @@ describe("macOS artifact manifest", () => {
     );
     expect(manifest.non_notarized).toBeTrue();
     expect(manifest.signing.mode).toBe("ad_hoc");
+  });
+
+  test("keeps old schema-v3 manifests compatible as hardware UUID hashes", () => {
+    const { archivePath, manifestPath } = localFixture();
+    const manifest = verifyArchiveManifest(
+      archivePath,
+      manifestPath,
+      "ADHOC",
+      fileDigest(manifestPath),
+      "a".repeat(40),
+      "0.2.12",
+      "local_only",
+      "station06",
+      targetIdentitySha256,
+      "hardware_uuid_sha256",
+    );
+    expect(manifest.approved_target_identity_kind).toBeUndefined();
+  });
+
+  test("requires an exact explicit identity kind for Tailscale-bound artifacts", () => {
+    const { archivePath, manifestPath } = localFixture("station06", "tailscale_stable_id_sha256");
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "ADHOC",
+        fileDigest(manifestPath),
+        "a".repeat(40),
+        "0.2.12",
+        "local_only",
+        "station06",
+        targetIdentitySha256,
+      ),
+    ).toThrow("identity kind");
+    expect(
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "ADHOC",
+        fileDigest(manifestPath),
+        "a".repeat(40),
+        "0.2.12",
+        "local_only",
+        "station06",
+        targetIdentitySha256,
+        "tailscale_stable_id_sha256",
+      ).approved_target_identity_kind,
+    ).toBe("tailscale_stable_id_sha256");
+  });
+
+  test("rejects explicit hardware identity kinds on newly written schema-v3 manifests", () => {
+    const { archivePath, manifestPath, manifest } = localFixture(
+      "station06",
+      "hardware_uuid_sha256",
+    );
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "ADHOC",
+        fileDigest(manifestPath),
+        manifest.git_sha,
+        manifest.bundle_version,
+        "local_only",
+        "station06",
+        targetIdentitySha256,
+        "hardware_uuid_sha256",
+      ),
+    ).toThrow("exact station06 name and machine identity");
+  });
+
+  test("hashes exactly one online Tailscale Self StableID for the approved hostname", () => {
+    const stableId = "nodeid:station06-stable";
+    expect(
+      tailscaleStableIdSha256(
+        JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: stableId } }),
+        "station06",
+      ),
+    ).toBe(Bun.CryptoHasher.hash("sha256", stableId, "hex"));
+  });
+
+  test.each([
+    ["malformed JSON", "{"],
+    ["missing Self", JSON.stringify({})],
+    ["malformed Self", JSON.stringify({ Self: [] })],
+    ["stale offline Self", JSON.stringify({ Self: { Online: false, HostName: "station06", StableID: "nodeid:stable" } })],
+    ["wrong Self hostname", JSON.stringify({ Self: { Online: true, HostName: "station05", StableID: "nodeid:stable" } })],
+    ["missing StableID", JSON.stringify({ Self: { Online: true, HostName: "station06" } })],
+    ["empty StableID", JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: "" } })],
+    ["whitespace StableID", JSON.stringify({ Self: { Online: true, HostName: "station06", StableID: " nodeid:stable " } })],
+  ])("rejects %s", (_label, statusJson) => {
+    expect(() => tailscaleStableIdSha256(statusJson, "station06")).toThrow();
   });
 
   test("rejects local-only manifests that imply release trust", () => {
@@ -558,5 +687,52 @@ describe("macOS install journal compatibility", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString().trim()).toBe("committed");
     expect(result.stderr.toString()).toBe("");
+  });
+
+  test("reads an old schema-v3 local journal without an identity kind as hardware UUID", () => {
+    const root = mkdtempSync(join(tmpdir(), "recordings-legacy-local-journal-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const appParent = join(home, "Applications");
+    const transaction = join(appParent, ".Recordings-transaction.legacy-local");
+    const journalPath = join(appParent, ".Recordings-install-transaction.json");
+    mkdirSync(appParent, { recursive: true });
+    writeFileSync(
+      journalPath,
+      `${JSON.stringify({
+        schema_version: 3,
+        phase: "committed",
+        transaction_dir: transaction,
+        app_parent: appParent,
+        app_destination: join(appParent, "Recordings.app"),
+        data_dir: join(home, ".hasna", "recordings"),
+        state_backup: join(transaction, "state.initial"),
+        state_backup_sha256: "1".repeat(64),
+        originals: [],
+        was_running: false,
+        expected_manifest_sha256: "2".repeat(64),
+        expected_source_sha: "3".repeat(40),
+        expected_version: "0.2.13",
+        artifact_policy: "local_only",
+        approved_target: "station06",
+        approved_target_identity_sha256: targetIdentitySha256,
+        candidate_identity_sha256: "4".repeat(64),
+        previous_identity_sha256: "none",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const result = Bun.spawnSync([
+      process.execPath,
+      join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
+      "journal-get",
+      "--journal",
+      journalPath,
+      "--field",
+      "json",
+    ]);
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(result.stdout.toString()).approved_target_identity_kind).toBe(
+      "hardware_uuid_sha256",
+    );
   });
 });

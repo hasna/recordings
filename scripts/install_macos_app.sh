@@ -12,6 +12,7 @@ EXPECTED_OLD_IDENTITY_SHA256=""
 EXPECTED_NEW_IDENTITY_SHA256=""
 ARTIFACT_POLICY="release"
 APPROVED_TARGET="fleet"
+APPROVED_TARGET_IDENTITY_KIND=""
 APPROVED_TARGET_IDENTITY_SHA256="none"
 ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS=0
 ALLOW_IDENTITY_MIGRATION=0
@@ -60,6 +61,10 @@ while [ "$#" -gt 0 ]; do
       APPROVED_TARGET_IDENTITY_SHA256="${2:-}"
       shift 2
       ;;
+    --approved-target-identity-kind)
+      APPROVED_TARGET_IDENTITY_KIND="${2:-}"
+      shift 2
+      ;;
     --acknowledge-local-signing-and-permissions)
       ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS=1
       shift
@@ -102,6 +107,17 @@ if [ -z "$ARTIFACT_PATH" ] || [ -z "$MANIFEST_PATH" ] || \
   echo "Install requires artifact, manifest, authenticated manifest SHA-256, exact source SHA, and exact version." >&2
   exit 2
 fi
+if [ -z "$APPROVED_TARGET_IDENTITY_KIND" ]; then
+  if [ "$ARTIFACT_POLICY" = "release" ]; then
+    APPROVED_TARGET_IDENTITY_KIND="none"
+  else
+    # Schema-v3 artifacts created before the discriminator used the platform UUID hash.
+    APPROVED_TARGET_IDENTITY_KIND="hardware_uuid_sha256"
+  fi
+fi
+PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARTIFACT_TOOL="${PACKAGE_ROOT}/scripts/macos_artifact.ts"
+RUNTIME_SMOKE="${PACKAGE_ROOT}/scripts/smoke_macos_app.sh"
 if [ "$ARTIFACT_POLICY" = "release" ]; then
   if [ -z "$EXPECTED_TEAM_ID" ]; then
     echo "Release install requires --expected-team-id or RECORDINGS_EXPECTED_TEAM_IDENTIFIER." >&2
@@ -113,6 +129,10 @@ if [ "$ARTIFACT_POLICY" = "release" ]; then
   fi
   if [ "$APPROVED_TARGET_IDENTITY_SHA256" != "none" ]; then
     echo "Release artifacts do not accept a local-only target identity." >&2
+    exit 2
+  fi
+  if [ "$APPROVED_TARGET_IDENTITY_KIND" != "none" ]; then
+    echo "Release artifacts do not accept a local-only target identity kind." >&2
     exit 2
   fi
   if [ "$ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS" -eq 1 ]; then
@@ -132,6 +152,10 @@ else
     echo "Local-only install requires --approved-target-identity-sha256 from the approved machine registry." >&2
     exit 2
   fi
+  case "$APPROVED_TARGET_IDENTITY_KIND" in
+    hardware_uuid_sha256|tailscale_stable_id_sha256) ;;
+    *) echo "Local-only install requires a supported --approved-target-identity-kind." >&2; exit 2 ;;
+  esac
   if [ "$ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS" -ne 1 ]; then
     echo "Local-only install requires --acknowledge-local-signing-and-permissions because code identity can change and macOS may require Microphone or Accessibility reauthorization." >&2
     exit 2
@@ -141,13 +165,28 @@ else
     echo "Local-only artifact target ${APPROVED_TARGET} does not match this Mac (${ACTUAL_TARGET})." >&2
     exit 1
   fi
-  ACTUAL_PLATFORM_ID="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ {print $(NF-1); exit}' | tr '[:upper:]' '[:lower:]')"
-  if [ -z "$ACTUAL_PLATFORM_ID" ]; then
-    echo "Could not read this Mac platform identity." >&2
-    exit 1
+  if [ "$APPROVED_TARGET_IDENTITY_KIND" = "tailscale_stable_id_sha256" ]; then
+    if ! command -v tailscale >/dev/null 2>&1; then
+      echo "Tailscale is required to verify this local-only target identity." >&2
+      exit 1
+    fi
+    if ! command -v bun >/dev/null 2>&1; then
+      echo "Bun is required to verify this local-only target identity." >&2
+      exit 1
+    fi
+    if ! ACTUAL_TARGET_IDENTITY_SHA256="$(tailscale status --json | bun "$ARTIFACT_TOOL" tailscale-identity-sha256 --expected-hostname "$APPROVED_TARGET")"; then
+      echo "Could not verify the live Tailscale identity for this local-only target." >&2
+      exit 1
+    fi
+  else
+    ACTUAL_PLATFORM_ID="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ {print $(NF-1); exit}' | tr '[:upper:]' '[:lower:]')"
+    if [ -z "$ACTUAL_PLATFORM_ID" ]; then
+      echo "Could not read this Mac platform identity." >&2
+      exit 1
+    fi
+    ACTUAL_TARGET_IDENTITY_SHA256="$(printf '%s' "$ACTUAL_PLATFORM_ID" | shasum -a 256 | awk '{print $1}')"
+    unset ACTUAL_PLATFORM_ID
   fi
-  ACTUAL_TARGET_IDENTITY_SHA256="$(printf '%s' "$ACTUAL_PLATFORM_ID" | shasum -a 256 | awk '{print $1}')"
-  unset ACTUAL_PLATFORM_ID
   if [ "$ACTUAL_TARGET_IDENTITY_SHA256" != "$APPROVED_TARGET_IDENTITY_SHA256" ]; then
     echo "Local-only artifact does not match this Mac's approved machine identity." >&2
     exit 1
@@ -189,9 +228,6 @@ if ! command -v bun >/dev/null 2>&1; then
   exit 1
 fi
 
-PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARTIFACT_TOOL="${PACKAGE_ROOT}/scripts/macos_artifact.ts"
-RUNTIME_SMOKE="${PACKAGE_ROOT}/scripts/smoke_macos_app.sh"
 [ -x "$RUNTIME_SMOKE" ] || { echo "Packaged runtime smoke verifier is missing." >&2; exit 1; }
 DATA_DIR="${HOME}/.hasna/recordings"
 APP_DEST="${HOME}/Applications/Recordings.app"
@@ -412,6 +448,7 @@ bun "$ARTIFACT_TOOL" verify-archive \
   --version "$EXPECTED_VERSION" \
   --artifact-policy "$ARTIFACT_POLICY" \
   --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 
 CURRENT_MACOS="$(sw_vers -productVersion)"
@@ -457,6 +494,7 @@ bun "$ARTIFACT_TOOL" verify-archive \
   --version "$EXPECTED_VERSION" \
   --artifact-policy "$ARTIFACT_POLICY" \
   --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 
 add_unique_app() {
@@ -599,6 +637,7 @@ write_journal() {
     --expected-version "$EXPECTED_VERSION"
     --artifact-policy "$ARTIFACT_POLICY"
     --approved-target "$APPROVED_TARGET"
+    --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND"
     --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
     --candidate-identity-sha256 "$candidate_identity_sha256"
     --previous-identity-sha256 "$previous_identity_sha256"
@@ -634,6 +673,7 @@ bun "$ARTIFACT_TOOL" verify-app \
   --team-id "$EXPECTED_TEAM_ID" \
   --artifact-policy "$ARTIFACT_POLICY" \
   --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 if [ "$ARTIFACT_POLICY" = "release" ]; then
   xcrun stapler validate "$CANDIDATE_APP"
@@ -794,6 +834,7 @@ bun "$ARTIFACT_TOOL" verify-app \
   --team-id "$EXPECTED_TEAM_ID" \
   --artifact-policy "$ARTIFACT_POLICY" \
   --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STAGED_APP" --uid "$(id -u)"
 
@@ -846,6 +887,7 @@ bun "$ARTIFACT_TOOL" verify-app \
   --team-id "$EXPECTED_TEAM_ID" \
   --artifact-policy "$ARTIFACT_POLICY" \
   --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 if [ "$ARTIFACT_POLICY" = "release" ]; then
   xcrun stapler validate "$APP_DEST"
@@ -859,6 +901,7 @@ bun "$ARTIFACT_TOOL" verify-active \
   --team-id "$EXPECTED_TEAM_ID" \
   --artifact-policy "$ARTIFACT_POLICY" \
   --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
   --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 "$RUNTIME_SMOKE" "$APP_DEST"
 write_journal activated
