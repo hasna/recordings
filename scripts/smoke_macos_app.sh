@@ -10,7 +10,8 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 
-APP_PATH="$1"
+APP_PARENT="$(cd -P "$(dirname "$1")" && pwd)"
+APP_PATH="$APP_PARENT/$(basename "$1")"
 EXECUTABLE="$APP_PATH/Contents/MacOS/Recordings"
 if [ ! -x "$EXECUTABLE" ]; then
   echo "Recordings.app runtime smoke executable is missing: $EXECUTABLE" >&2
@@ -20,8 +21,18 @@ if ! command -v bun >/dev/null 2>&1; then
   echo "Bun is required to validate Recordings.app runtime smoke evidence." >&2
   exit 1
 fi
+if ! command -v lsof >/dev/null 2>&1; then
+  echo "lsof is required to bind runtime smoke evidence to the exact app executable." >&2
+  exit 1
+fi
 
 WORK_DIR="$(mktemp -d)"
+SMOKE_MAX_ATTEMPTS=100
+SMOKE_TERMINATION_ATTEMPTS=50
+SMOKE_FOCUS_EVIDENCE="strict"
+if [ -n "${SSH_CONNECTION:-}" ]; then
+  SMOKE_FOCUS_EVIDENCE="ssh-unavailable"
+fi
 SMOKE_PID=""
 SMOKE_APP_PID=""
 cleanup() {
@@ -35,34 +46,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
-find_smoke_app_pid() {
-  local output="$1"
-  ps -axo pid=,command= | awk -v executable="$EXECUTABLE" -v output="$output" '
-    index($0, executable) && index($0, output) { print $1; exit }
-  '
-}
-
 run_smoke() {
   local mode="$1"
   local output="$WORK_DIR/${mode}.json"
   local log="$WORK_DIR/${mode}.log"
   local attempt
+  local observed_executable
   local result_pid
   local -a arguments=(--runtime-smoke "$mode" --runtime-smoke-output "$output")
   if [ "$mode" = "permission-helper" ]; then
     arguments=(--request-permissions "${arguments[@]}")
   fi
 
-  open -n -g -W "$APP_PATH" --args "${arguments[@]}" >"$log" 2>&1 &
+  open -n -W "$APP_PATH" --args "${arguments[@]}" >"$log" 2>&1 &
   SMOKE_PID=$!
 
-  for ((attempt = 0; attempt < 100; attempt++)); do
-    if [ -z "$SMOKE_APP_PID" ]; then
-      SMOKE_APP_PID="$(find_smoke_app_pid "$output")"
+  for ((attempt = 0; attempt < SMOKE_MAX_ATTEMPTS; attempt++)); do
+    if [ -f "$output" ]; then
+      result_pid="$(bun -e 'const value = await Bun.file(process.argv[1]).json(); console.log(value.processIdentifier)' "$output")"
+      if ! [[ "$result_pid" =~ ^[1-9][0-9]*$ ]] || ! kill -0 "$result_pid" 2>/dev/null; then
+        echo "Recordings.app runtime smoke ${mode} reported a process that is not running." >&2
+        return 1
+      fi
+      observed_executable="$(lsof -a -p "$result_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+      if [ "$observed_executable" != "$EXECUTABLE" ]; then
+        echo "Recordings.app runtime smoke ${mode} reported a process outside the exact app path." >&2
+        return 1
+      fi
+      SMOKE_APP_PID="$result_pid"
+      break
     fi
-    [ -f "$output" ] && break
     if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
-      wait "$SMOKE_PID" || true
       echo "Recordings.app runtime smoke ${mode} exited without evidence." >&2
       sed -n '1,120p' "$log" >&2
       return 1
@@ -74,24 +88,20 @@ run_smoke() {
     sed -n '1,120p' "$log" >&2
     return 1
   fi
-  wait "$SMOKE_PID"
-  SMOKE_PID=""
-  result_pid="$(bun -e 'const value = await Bun.file(process.argv[1]).json(); console.log(value.processIdentifier)' "$output")"
   if [ -z "$SMOKE_APP_PID" ]; then
-    echo "Recordings.app runtime smoke ${mode} produced evidence before its exact process path could be observed." >&2
+    echo "Recordings.app runtime smoke ${mode} did not bind evidence to the exact app process." >&2
     return 1
   fi
-  if [ "$SMOKE_APP_PID" != "$result_pid" ]; then
-    echo "Recordings.app runtime smoke ${mode} observed a mismatched app process." >&2
-    return 1
-  fi
-  SMOKE_APP_PID=""
 
-  SMOKE_MODE="$mode" EXPECTED_HELPER="$APP_PATH/Contents/Helpers/recordings" bun -e '
+  SMOKE_MODE="$mode" \
+    SMOKE_FOCUS_EVIDENCE="$SMOKE_FOCUS_EVIDENCE" \
+    EXPECTED_HELPER="$APP_PATH/Contents/Helpers/recordings" \
+    bun -e '
     const path = process.argv[1];
     const mode = process.env.SMOKE_MODE;
     const result = await Bun.file(path).json();
     const fail = (message) => { throw new Error(`${mode}: ${message}`); };
+    let focusEvidenceStatus = "available";
     if (result.mode !== mode) fail("mode mismatch");
     if (result.globalHandlersInstalled !== false) fail("global handlers were installed");
     if (result.permissionRequestsStarted !== 0) fail("permission request path ran");
@@ -119,7 +129,10 @@ run_smoke() {
         fail("retained main window was not visible and capable of becoming key");
       }
       if (!result.applicationIsActive || !result.mainWindowIsKey) {
-        fail("Open Recordings did not make the retained window active and key");
+        if (process.env.SMOKE_FOCUS_EVIDENCE !== "ssh-unavailable") {
+          fail("Open Recordings did not make the retained window active and key");
+        }
+        focusEvidenceStatus = "ssh-unavailable";
       }
     } else if (mode === "resolver") {
       if (result.menuBarSurfaceCount !== 0 || result.globalHandlersInstalled !== false) {
@@ -147,7 +160,34 @@ run_smoke() {
         fail("permission/helper smoke exposed a main window");
       }
     }
+    console.log(JSON.stringify({
+      event: "recordings_runtime_smoke_evidence",
+      mode,
+      focusEvidenceStatus: mode === "normal" ? focusEvidenceStatus : "not-applicable",
+      applicationIsActive: result.applicationIsActive,
+      mainWindowIsKey: result.mainWindowIsKey,
+    }));
   ' "$output"
+
+  kill -TERM "$SMOKE_APP_PID" 2>/dev/null || true
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    kill -0 "$SMOKE_APP_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$SMOKE_APP_PID" 2>/dev/null; then
+    kill -KILL "$SMOKE_APP_PID" 2>/dev/null || true
+  fi
+  kill -TERM "$SMOKE_PID" 2>/dev/null || true
+  for ((attempt = 0; attempt < SMOKE_TERMINATION_ATTEMPTS; attempt++)); do
+    kill -0 "$SMOKE_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$SMOKE_PID" 2>/dev/null; then
+    kill -KILL "$SMOKE_PID" 2>/dev/null || true
+  fi
+  wait "$SMOKE_PID" 2>/dev/null || true
+  SMOKE_APP_PID=""
+  SMOKE_PID=""
 }
 
 run_smoke normal

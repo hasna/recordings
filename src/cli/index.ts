@@ -730,13 +730,24 @@ const appCommand = program
 
 appCommand
   .command("install")
-  .description("Install a finalized, verified Recordings.app ZIP and provenance manifest")
+  .description("Install a release or explicitly approved local-only Recordings.app artifact")
   .requiredOption("--artifact <path>", "Finalized Recordings.app ZIP artifact")
   .requiredOption("--manifest <path>", "Artifact provenance manifest")
-  .requiredOption("--expected-team-id <team>", "Required Developer ID TeamIdentifier")
+  .option("--expected-team-id <team>", "Required Developer ID TeamIdentifier for release artifacts")
   .requiredOption("--manifest-sha256 <sha256>", "Authenticated release-manifest SHA-256")
   .requiredOption("--expected-source-sha <sha>", "Exact approved 40-character source commit")
   .requiredOption("--expected-version <version>", "Exact approved release version")
+  .option("--artifact-policy <policy>", "Artifact policy: release or local-only", "release")
+  .option("--approved-target <station>", "Exact approved target; fleet for release artifacts", "fleet")
+  .option(
+    "--approved-target-identity-sha256 <sha256>",
+    "SHA-256 of the approved target platform identity; none for release artifacts",
+    "none",
+  )
+  .option(
+    "--acknowledge-local-signing-and-permissions",
+    "Acknowledge local-only ad-hoc identity and possible permission reauthorization",
+  )
   .option("--expected-old-identity-sha256 <sha256>", "Exact installed identity approved for migration")
   .option("--expected-new-identity-sha256 <sha256>", "Exact candidate identity approved for migration")
   .option(
@@ -748,10 +759,14 @@ appCommand
   .action((opts: {
     artifact: string;
     manifest: string;
-    expectedTeamId: string;
+    expectedTeamId?: string;
     manifestSha256: string;
     expectedSourceSha: string;
     expectedVersion: string;
+    artifactPolicy: string;
+    approvedTarget: string;
+    approvedTargetIdentitySha256: string;
+    acknowledgeLocalSigningAndPermissions?: boolean;
     expectedOldIdentitySha256?: string;
     expectedNewIdentitySha256?: string;
     allowSigningIdentityMigration?: boolean;
@@ -774,25 +789,35 @@ appCommand
       opts.artifact,
       "--manifest",
       opts.manifest,
-      "--expected-team-id",
-      opts.expectedTeamId,
       "--manifest-sha256",
       opts.manifestSha256,
       "--expected-source-sha",
       opts.expectedSourceSha,
       "--expected-version",
       opts.expectedVersion,
+      "--artifact-policy",
+      opts.artifactPolicy,
+      "--approved-target",
+      opts.approvedTarget,
+      "--approved-target-identity-sha256",
+      opts.approvedTargetIdentitySha256,
       "--launch-timeout",
       opts.launchTimeout,
     ];
+    if (opts.expectedTeamId) {
+      installerArgs.push("--expected-team-id", opts.expectedTeamId);
+    }
+    if (opts.acknowledgeLocalSigningAndPermissions) {
+      installerArgs.push("--acknowledge-local-signing-and-permissions");
+    }
     if (opts.allowSigningIdentityMigration) {
       installerArgs.push("--allow-signing-identity-migration");
-      if (opts.expectedOldIdentitySha256) {
-        installerArgs.push("--expected-old-identity-sha256", opts.expectedOldIdentitySha256);
-      }
-      if (opts.expectedNewIdentitySha256) {
-        installerArgs.push("--expected-new-identity-sha256", opts.expectedNewIdentitySha256);
-      }
+    }
+    if (opts.expectedOldIdentitySha256) {
+      installerArgs.push("--expected-old-identity-sha256", opts.expectedOldIdentitySha256);
+    }
+    if (opts.expectedNewIdentitySha256) {
+      installerArgs.push("--expected-new-identity-sha256", opts.expectedNewIdentitySha256);
     }
     if (opts.launch) installerArgs.push("--launch");
 

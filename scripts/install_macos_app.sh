@@ -10,6 +10,10 @@ EXPECTED_SOURCE_SHA=""
 EXPECTED_VERSION=""
 EXPECTED_OLD_IDENTITY_SHA256=""
 EXPECTED_NEW_IDENTITY_SHA256=""
+ARTIFACT_POLICY="release"
+APPROVED_TARGET="fleet"
+APPROVED_TARGET_IDENTITY_SHA256="none"
+ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS=0
 ALLOW_IDENTITY_MIGRATION=0
 LAUNCH_APP=0
 LAUNCH_TIMEOUT_SECONDS="${RECORDINGS_LAUNCH_TIMEOUT_SECONDS:-10}"
@@ -39,6 +43,26 @@ while [ "$#" -gt 0 ]; do
     --expected-version)
       EXPECTED_VERSION="${2:-}"
       shift 2
+      ;;
+    --artifact-policy)
+      case "${2:-}" in
+        release) ARTIFACT_POLICY="release" ;;
+        local-only|local_only) ARTIFACT_POLICY="local_only" ;;
+        *) echo "Artifact policy must be release or local-only." >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --approved-target)
+      APPROVED_TARGET="${2:-}"
+      shift 2
+      ;;
+    --approved-target-identity-sha256)
+      APPROVED_TARGET_IDENTITY_SHA256="${2:-}"
+      shift 2
+      ;;
+    --acknowledge-local-signing-and-permissions)
+      ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS=1
+      shift
       ;;
     --expected-old-identity-sha256)
       EXPECTED_OLD_IDENTITY_SHA256="${2:-}"
@@ -78,13 +102,72 @@ if [ -z "$ARTIFACT_PATH" ] || [ -z "$MANIFEST_PATH" ] || \
   echo "Install requires artifact, manifest, authenticated manifest SHA-256, exact source SHA, and exact version." >&2
   exit 2
 fi
-if [ -z "$EXPECTED_TEAM_ID" ]; then
-  echo "Install requires --expected-team-id or RECORDINGS_EXPECTED_TEAM_IDENTIFIER." >&2
-  exit 2
+if [ "$ARTIFACT_POLICY" = "release" ]; then
+  if [ -z "$EXPECTED_TEAM_ID" ]; then
+    echo "Release install requires --expected-team-id or RECORDINGS_EXPECTED_TEAM_IDENTIFIER." >&2
+    exit 2
+  fi
+  if [ "$APPROVED_TARGET" != "fleet" ]; then
+    echo "Release artifacts use the fleet target policy." >&2
+    exit 2
+  fi
+  if [ "$APPROVED_TARGET_IDENTITY_SHA256" != "none" ]; then
+    echo "Release artifacts do not accept a local-only target identity." >&2
+    exit 2
+  fi
+  if [ "$ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS" -eq 1 ]; then
+    echo "Local-only acknowledgment cannot be supplied for a release artifact." >&2
+    exit 2
+  fi
+else
+  if [ -n "$EXPECTED_TEAM_ID" ]; then
+    echo "Local-only artifacts do not accept --expected-team-id or a release TeamIdentifier environment value." >&2
+    exit 2
+  fi
+  if [ "$APPROVED_TARGET" != "station06" ]; then
+    echo "Local-only install is currently restricted to --approved-target station06." >&2
+    exit 2
+  fi
+  if ! [[ "$APPROVED_TARGET_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "Local-only install requires --approved-target-identity-sha256 from the approved machine registry." >&2
+    exit 2
+  fi
+  if [ "$ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS" -ne 1 ]; then
+    echo "Local-only install requires --acknowledge-local-signing-and-permissions because code identity can change and macOS may require Microphone or Accessibility reauthorization." >&2
+    exit 2
+  fi
+  ACTUAL_TARGET="$(hostname -s)"
+  if [ "$ACTUAL_TARGET" != "$APPROVED_TARGET" ]; then
+    echo "Local-only artifact target ${APPROVED_TARGET} does not match this Mac (${ACTUAL_TARGET})." >&2
+    exit 1
+  fi
+  ACTUAL_PLATFORM_ID="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ {print $(NF-1); exit}' | tr '[:upper:]' '[:lower:]')"
+  if [ -z "$ACTUAL_PLATFORM_ID" ]; then
+    echo "Could not read this Mac platform identity." >&2
+    exit 1
+  fi
+  ACTUAL_TARGET_IDENTITY_SHA256="$(printf '%s' "$ACTUAL_PLATFORM_ID" | shasum -a 256 | awk '{print $1}')"
+  unset ACTUAL_PLATFORM_ID
+  if [ "$ACTUAL_TARGET_IDENTITY_SHA256" != "$APPROVED_TARGET_IDENTITY_SHA256" ]; then
+    echo "Local-only artifact does not match this Mac's approved machine identity." >&2
+    exit 1
+  fi
+  if [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ] || [ -n "$EXPECTED_OLD_IDENTITY_SHA256" ] || [ -n "$EXPECTED_NEW_IDENTITY_SHA256" ]; then
+    echo "Release identity-migration flags are not valid for local-only artifacts." >&2
+    exit 2
+  fi
+  EXPECTED_TEAM_ID="ADHOC"
+  echo "WARNING: installing a non-notarized local-only artifact approved only for ${APPROVED_TARGET}." >&2
+  echo "WARNING: code identity can change; Microphone or Accessibility may require manual reauthorization." >&2
 fi
-if [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ] && \
+if [ "$ARTIFACT_POLICY" = "release" ] && [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ] && \
    { [ -z "$EXPECTED_OLD_IDENTITY_SHA256" ] || [ -z "$EXPECTED_NEW_IDENTITY_SHA256" ]; }; then
   echo "Identity migration requires exact --expected-old-identity-sha256 and --expected-new-identity-sha256 values." >&2
+  exit 2
+fi
+if [ "$ARTIFACT_POLICY" = "release" ] && [ "$ALLOW_IDENTITY_MIGRATION" -eq 0 ] && \
+   { [ -n "$EXPECTED_OLD_IDENTITY_SHA256" ] || [ -n "$EXPECTED_NEW_IDENTITY_SHA256" ]; }; then
+  echo "Identity migration digests require --allow-signing-identity-migration." >&2
   exit 2
 fi
 case "$LAUNCH_TIMEOUT_SECONDS" in
@@ -326,7 +409,10 @@ bun "$ARTIFACT_TOOL" verify-archive \
   --team-id "$EXPECTED_TEAM_ID" \
   --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
   --source-sha "$EXPECTED_SOURCE_SHA" \
-  --version "$EXPECTED_VERSION"
+  --version "$EXPECTED_VERSION" \
+  --artifact-policy "$ARTIFACT_POLICY" \
+  --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 
 CURRENT_MACOS="$(sw_vers -productVersion)"
 MINIMUM_MACOS="$(bun "$ARTIFACT_TOOL" manifest-get --manifest "$MANIFEST_PATH" --field minimum_macos)"
@@ -368,7 +454,10 @@ bun "$ARTIFACT_TOOL" verify-archive \
   --team-id "$EXPECTED_TEAM_ID" \
   --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
   --source-sha "$EXPECTED_SOURCE_SHA" \
-  --version "$EXPECTED_VERSION"
+  --version "$EXPECTED_VERSION" \
+  --artifact-policy "$ARTIFACT_POLICY" \
+  --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 
 add_unique_app() {
   local candidate="$1"
@@ -508,6 +597,9 @@ write_journal() {
     --expected-manifest-sha256 "$EXPECTED_MANIFEST_SHA256"
     --expected-source-sha "$EXPECTED_SOURCE_SHA"
     --expected-version "$EXPECTED_VERSION"
+    --artifact-policy "$ARTIFACT_POLICY"
+    --approved-target "$APPROVED_TARGET"
+    --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
     --candidate-identity-sha256 "$candidate_identity_sha256"
     --previous-identity-sha256 "$previous_identity_sha256"
   )
@@ -539,10 +631,15 @@ fi
 bun "$ARTIFACT_TOOL" verify-app \
   --app "$CANDIDATE_APP" \
   --manifest "$MANIFEST_SNAPSHOT" \
-  --team-id "$EXPECTED_TEAM_ID"
-xcrun stapler validate "$CANDIDATE_APP"
-spctl --assess --type execute --verbose=2 "$CANDIDATE_APP"
-syspolicy_check distribution "$CANDIDATE_APP"
+  --team-id "$EXPECTED_TEAM_ID" \
+  --artifact-policy "$ARTIFACT_POLICY" \
+  --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
+if [ "$ARTIFACT_POLICY" = "release" ]; then
+  xcrun stapler validate "$CANDIDATE_APP"
+  spctl --assess --type execute --verbose=2 "$CANDIDATE_APP"
+  syspolicy_check distribution "$CANDIDATE_APP"
+fi
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$CANDIDATE_APP" --uid "$(id -u)"
 
 DISCOVERED_APPS=()
@@ -602,46 +699,50 @@ require_space "$APP_PARENT" $((candidate_kb * 3 + existing_kb * 2 + data_kb * 2 
 require_space "$DATA_DIR" $((existing_kb * 2 + data_kb * 2 + 10240))
 
 candidate_requirement="$(codesign -d -r- "$CANDIDATE_APP" 2>&1 | sed -n 's/^designated => //p' | head -n 1 || true)"
-if [ -z "$candidate_requirement" ]; then
+if [ "$ARTIFACT_POLICY" = "release" ] && [ -z "$candidate_requirement" ]; then
   echo "Candidate app has no designated requirement." >&2
   exit 1
 fi
 identity_migration=0
-candidate_identity_sha256="$(bun "$ARTIFACT_TOOL" requirement-digest --app "$CANDIDATE_APP")"
+candidate_identity_sha256="$(bun "$ARTIFACT_TOOL" requirement-digest --app "$CANDIDATE_APP" --artifact-policy "$ARTIFACT_POLICY")"
 [ "$candidate_identity_sha256" = "$(bun "$ARTIFACT_TOOL" manifest-get --manifest "$MANIFEST_SNAPSHOT" --field identity)" ] || {
-  echo "Candidate identity does not match the release manifest." >&2
+  echo "Candidate identity does not match the artifact manifest." >&2
   exit 1
 }
 previous_identity_sha256="none"
 for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
   bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$existing_app" --uid "$(id -u)"
   bun "$ARTIFACT_TOOL" assert-transition --existing-app "$existing_app" --manifest "$MANIFEST_SNAPSHOT"
-  existing_identity_sha256="$(bun "$ARTIFACT_TOOL" requirement-digest --app "$existing_app")"
+  existing_requirement="$(codesign -d -r- "$existing_app" 2>&1 | sed -n 's/^designated => //p' | head -n 1 || true)"
+  existing_identity_policy="release"
+  if [ "$ARTIFACT_POLICY" = "local_only" ] && [ -z "$existing_requirement" ]; then
+    existing_identity_policy="local_only"
+  fi
+  existing_identity_sha256="$(bun "$ARTIFACT_TOOL" requirement-digest --app "$existing_app" --artifact-policy "$existing_identity_policy")"
   if [ "$previous_identity_sha256" = "none" ]; then
     previous_identity_sha256="$existing_identity_sha256"
   elif [ "$previous_identity_sha256" != "$existing_identity_sha256" ]; then
     echo "Installed duplicates have multiple signing identities; automatic migration is unsafe." >&2
     exit 1
   fi
-  existing_requirement="$(codesign -d -r- "$existing_app" 2>&1 | sed -n 's/^designated => //p' | head -n 1 || true)"
   if [ -z "$existing_requirement" ] || \
      ! codesign --verify --strict -R "$existing_requirement" "$CANDIDATE_APP" >/dev/null 2>&1 || \
      ! codesign --verify --strict -R "$candidate_requirement" "$existing_app" >/dev/null 2>&1; then
     identity_migration=1
   fi
 done
-if [ "$identity_migration" -eq 1 ] && [ "$ALLOW_IDENTITY_MIGRATION" -ne 1 ]; then
+if [ "$ARTIFACT_POLICY" = "release" ] && [ "$identity_migration" -eq 1 ] && [ "$ALLOW_IDENTITY_MIGRATION" -ne 1 ]; then
   echo "Candidate and existing app designated requirements are not mutually compatible; review the signer change and rerun once with --allow-signing-identity-migration." >&2
   exit 1
 fi
-if [ "$identity_migration" -eq 1 ] && {
+if [ "$ARTIFACT_POLICY" = "release" ] && [ "$identity_migration" -eq 1 ] && {
      [ "$previous_identity_sha256" != "$EXPECTED_OLD_IDENTITY_SHA256" ] ||
      [ "$candidate_identity_sha256" != "$EXPECTED_NEW_IDENTITY_SHA256" ];
    }; then
   echo "Signing identity migration does not match the exact operator-approved old/new identities." >&2
   exit 1
 fi
-if [ "$identity_migration" -eq 0 ] && [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ]; then
+if [ "$ARTIFACT_POLICY" = "release" ] && [ "$identity_migration" -eq 0 ] && [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ]; then
   echo "Identity migration approval was supplied but no identity migration is required." >&2
   exit 1
 fi
@@ -690,7 +791,10 @@ ditto "$CANDIDATE_APP" "$STAGED_APP"
 bun "$ARTIFACT_TOOL" verify-app \
   --app "$STAGED_APP" \
   --manifest "$MANIFEST_SNAPSHOT" \
-  --team-id "$EXPECTED_TEAM_ID"
+  --team-id "$EXPECTED_TEAM_ID" \
+  --artifact-policy "$ARTIFACT_POLICY" \
+  --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$STAGED_APP" --uid "$(id -u)"
 
 for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
@@ -739,15 +843,23 @@ write_journal candidate-installed
 bun "$ARTIFACT_TOOL" verify-app \
   --app "$APP_DEST" \
   --manifest "$MANIFEST_SNAPSHOT" \
-  --team-id "$EXPECTED_TEAM_ID"
-xcrun stapler validate "$APP_DEST"
-spctl --assess --type execute --verbose=2 "$APP_DEST"
-syspolicy_check distribution "$APP_DEST"
+  --team-id "$EXPECTED_TEAM_ID" \
+  --artifact-policy "$ARTIFACT_POLICY" \
+  --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
+if [ "$ARTIFACT_POLICY" = "release" ]; then
+  xcrun stapler validate "$APP_DEST"
+  spctl --assess --type execute --verbose=2 "$APP_DEST"
+  syspolicy_check distribution "$APP_DEST"
+fi
 bun "$ARTIFACT_TOOL" verify-filesystem-tree --path "$APP_DEST" --uid "$(id -u)"
 bun "$ARTIFACT_TOOL" verify-active \
   --app "$APP_DEST" \
   --manifest "$MANIFEST_SNAPSHOT" \
-  --team-id "$EXPECTED_TEAM_ID"
+  --team-id "$EXPECTED_TEAM_ID" \
+  --artifact-policy "$ARTIFACT_POLICY" \
+  --approved-target "$APPROVED_TARGET" \
+  --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
 "$RUNTIME_SMOKE" "$APP_DEST"
 write_journal activated
 
@@ -790,7 +902,11 @@ bun "$ARTIFACT_TOOL" journal-recover --journal "$JOURNAL_PATH"
 TRANSACTION_COMMITTED=1
 STOPPED_RUNNING_APP=0
 
-if [ "$identity_migration" -eq 1 ]; then
+if [ "$ARTIFACT_POLICY" = "local_only" ]; then
+  echo "Installed local-only Recordings.app for ${APPROVED_TARGET}; this artifact is ad-hoc signed and non-notarized."
+  echo "Microphone or Accessibility may require manual reauthorization after this code-identity change."
+elif [ "$identity_migration" -eq 1 ]; then
   echo "Installed a new signing identity; macOS will require one-time permission approval for this migration."
+else
+  echo "Installed verified Recordings.app release artifact: ${APP_DEST}"
 fi
-echo "Installed verified Recordings.app artifact: ${APP_DEST}"

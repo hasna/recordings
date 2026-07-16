@@ -233,6 +233,10 @@ describe("recordings CLI", () => {
     expect(stdout).toContain("--manifest-sha256");
     expect(stdout).toContain("--expected-source-sha");
     expect(stdout).toContain("--expected-version");
+    expect(stdout).toContain("--artifact-policy");
+    expect(stdout).toContain("--approved-target");
+    expect(stdout).toContain("--approved-target-identity-sha256");
+    expect(stdout).toContain("--acknowledge-local-signing-and-permissions");
     expect(stdout).toContain("--expected-old-identity-sha256");
     expect(stdout).toContain("--expected-new-identity-sha256");
     expect(stdout).toContain("--allow-signing-identity-migration");

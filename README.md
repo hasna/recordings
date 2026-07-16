@@ -67,6 +67,25 @@ cd src/native/Recordings
 RECORDINGS_CODESIGN_IDENTITY="Developer ID Application: ..." \
 RECORDINGS_EXPECTED_TEAM_IDENTIFIER="TEAMID1234" \
 RECORDINGS_NOTARY_KEYCHAIN_PROFILE="recordings-notary" ./build.sh release
+
+# Explicit local-only alternative when Developer ID credentials are unavailable.
+# Build on a Mac other than the approved target; this does not replace a release:
+RECORDINGS_LOCAL_APPROVED_TARGET="station06" \
+RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256="APPROVED_MACHINE_IDENTITY_SHA256" \
+  ./build.sh local
+
+# Install only on that exact target, with the immutable manifest digest recorded separately:
+recordings app install \
+  --artifact /path/to/Recordings-0.2.13-macos-station06-local-only.zip \
+  --manifest /path/to/Recordings-0.2.13-macos-station06-local-only.manifest.json \
+  --manifest-sha256 AUTHENTICATED_MANIFEST_SHA256 \
+  --expected-source-sha APPROVED_40_CHARACTER_COMMIT_SHA \
+  --expected-version 0.2.13 \
+  --artifact-policy local-only \
+  --approved-target station06 \
+  --approved-target-identity-sha256 APPROVED_MACHINE_IDENTITY_SHA256 \
+  --acknowledge-local-signing-and-permissions \
+  --launch
 swift test                    # run the native test suite
 ```
 
@@ -83,6 +102,15 @@ do not reset those permissions. The installer never calls `tccutil reset`, clear
 re-signs an artifact, or builds on the target machine. A private, fsynced phase journal and verified
 app/state backups recover interrupted replacement before the next install attempt; staged bundles are
 verified statically and only the activated canonical path runs readiness and packaged-helper probes.
+
+The `local` build mode is an explicit, target-scoped exception. It still requires a clean source
+commit, an immutable ZIP and manifest, matching app/helper architectures and hashes, consistent
+ad-hoc signatures, transactional state backup and rollback, and exact-path postactivation probes.
+It is intentionally marked `local_only` and `non_notarized`, binds only SHA-256 digests of the
+approved target and non-target builder platform identities, never runs notarization or Gatekeeper
+release checks, and cannot be installed without matching the live Mac name and acknowledging that
+the changed signing identity can require manual Microphone or Accessibility reauthorization. The
+installer never resets or inspects TCC and never clears quarantine in either policy.
 
 Requires macOS 26+; source builds also require a Swift toolchain (Xcode or Command Line Tools).
 Set the OpenAI API key in **Settings** or via `recordings` config;

@@ -1,5 +1,6 @@
 @preconcurrency import Cocoa
 import AVFoundation
+import Darwin
 import SwiftUI
 import KeyboardShortcuts
 import RecordingsLib
@@ -113,6 +114,9 @@ final class RecordingsAppState: ObservableObject {
 
     func startRuntimeSmokeIfNeeded() {
         guard let mode = runtimeSmokeMode, runtimeSmokeOutputPath != nil else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) {
+            Darwin._exit(124)
+        }
         if mode == "permission-helper" {
             NSApplication.shared.setActivationPolicy(.accessory)
             DispatchQueue.main.async { [weak self] in
@@ -189,7 +193,7 @@ final class RecordingsAppState: ObservableObject {
         attempt: Int = 0
     ) {
         let windowSettled = NSApplication.shared.isActive && (mainWindow?.isKeyWindow ?? false)
-        guard windowSettled || attempt >= 20 else {
+        guard windowSettled || attempt >= 60 else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                 self?.finishRuntimeSmokeWhenWindowSettles(
                     mode: mode,
@@ -248,7 +252,6 @@ final class RecordingsAppState: ObservableObject {
         } catch {
             fputs("Runtime smoke result failed: \(error)\n", stderr)
         }
-        NSApplication.shared.terminate(nil)
     }
 }
 

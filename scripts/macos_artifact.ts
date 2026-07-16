@@ -22,12 +22,21 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 
-export const ARTIFACT_SCHEMA_VERSION = 2;
+export const RELEASE_ARTIFACT_SCHEMA_VERSION = 2;
+export const LOCAL_ARTIFACT_SCHEMA_VERSION = 3;
 export const BUNDLE_ID = "com.hasna.recordings";
 export const PROVENANCE_FILENAME = "recordings-build-provenance.json";
+export const RELEASE_APPROVED_TARGET = "fleet";
+
+export type ArtifactPolicy = "release" | "local_only";
 
 export type BuildProvenance = {
-  schema_version: 2;
+  schema_version: 2 | 3;
+  artifact_policy?: "local_only";
+  approved_target?: string;
+  approved_target_identity_sha256?: string;
+  builder_identity_sha256?: string;
+  non_notarized?: true;
   bundle_id: string;
   bundle_version: string;
   bundle_build_version: string;
@@ -47,6 +56,7 @@ export type MacOSArtifactManifest = BuildProvenance & {
   app_sha256: string;
   provenance_sha256: string;
   signing: {
+    mode?: "ad_hoc";
     authority: string;
     team_id: string;
     trusted_timestamp: string;
@@ -60,12 +70,12 @@ export type MacOSArtifactManifest = BuildProvenance & {
   };
   notarization: {
     submission_id: string;
-    status: "Accepted";
+    status: "Accepted" | "Not Submitted";
     log_sha256: string;
     issue_count: 0;
     submitted_archive_sha256: string;
-    stapled: true;
-    distribution_check: true;
+    stapled: boolean;
+    distribution_check: boolean;
   };
   container: {
     type: "zip";
@@ -87,6 +97,7 @@ export type MacOSArtifactManifest = BuildProvenance & {
 };
 
 type SigningEvidence = {
+  mode: "developer_id" | "ad_hoc";
   authority: string;
   teamId: string;
   timestamp: string;
@@ -110,7 +121,7 @@ export type NestedCodeItem = {
   path: string;
   team_id: string;
   runtime: true;
-  timestamp_required: true;
+  timestamp_required: boolean;
   architectures: string[];
   entitlements_sha256: string;
 };
@@ -170,6 +181,22 @@ export function parseDesignatedRequirement(output: string): string {
   return requirement;
 }
 
+export function designatedRequirementForPolicy(
+  output: string,
+  artifactPolicy: ArtifactPolicy,
+  adHocSignatureVerified = false,
+): string {
+  if (artifactPolicy === "release") return parseDesignatedRequirement(output);
+  if (!adHocSignatureVerified) {
+    throw new Error("local-only designated requirement evidence requires verified ad-hoc signing");
+  }
+  try {
+    return parseDesignatedRequirement(output);
+  } catch {
+    return "none-ad-hoc";
+  }
+}
+
 export function assertCleanGitStatus(status: string): void {
   if (status.trim()) {
     throw new Error("refusing to claim a git SHA for a dirty source worktree");
@@ -209,17 +236,44 @@ function signingEvidence(
   expectedTeamId: string,
   expectedEntitlements: object,
   architecturePath = codePath,
+  artifactPolicy: ArtifactPolicy = "release",
 ): SigningEvidence {
   run("codesign", ["--verify", "--strict", "--all-architectures", "--verbose=2", codePath]);
   const details = signingDetails(codePath);
-  const authority = lineValue(details, "Authority");
-  const teamId = lineValue(details, "TeamIdentifier");
-  const timestamp = lineValue(details, "Timestamp");
-  if (!authority.startsWith("Developer ID Application:")) {
-    throw new Error(`${codePath} is not signed by a Developer ID Application authority`);
-  }
-  if (teamId !== expectedTeamId) {
-    throw new Error(`${codePath} TeamIdentifier ${teamId || "missing"} does not match ${expectedTeamId}`);
+  let authority = lineValue(details, "Authority");
+  const rawTeamId = lineValue(details, "TeamIdentifier");
+  const rawTimestamp = lineValue(details, "Timestamp");
+  const rawSignature = lineValue(details, "Signature");
+  let teamId = rawTeamId;
+  let timestamp = rawTimestamp;
+  let mode: SigningEvidence["mode"] = "developer_id";
+  if (artifactPolicy === "release") {
+    if (!authority.startsWith("Developer ID Application:")) {
+      throw new Error(`${codePath} is not signed by a Developer ID Application authority`);
+    }
+    if (teamId !== expectedTeamId) {
+      throw new Error(`${codePath} TeamIdentifier ${teamId || "missing"} does not match ${expectedTeamId}`);
+    }
+    if (!timestamp || timestamp.toLowerCase() === "none") {
+      throw new Error(`${codePath} is missing a trusted signing timestamp`);
+    }
+  } else {
+    mode = "ad_hoc";
+    if (expectedTeamId !== "ADHOC") {
+      throw new Error("local-only code verification requires the ADHOC signing identity");
+    }
+    if (rawSignature.toLowerCase() !== "adhoc" || authority) {
+      throw new Error(`${codePath} is not consistently ad-hoc signed for local-only use`);
+    }
+    if (rawTeamId && rawTeamId.toLowerCase() !== "not set") {
+      throw new Error(`${codePath} unexpectedly carries a TeamIdentifier in local-only mode`);
+    }
+    if (rawTimestamp && rawTimestamp.toLowerCase() !== "none") {
+      throw new Error(`${codePath} unexpectedly carries a trusted timestamp in local-only mode`);
+    }
+    teamId = "ADHOC";
+    timestamp = "none";
+    authority = "adhoc";
   }
   const flagList = details.match(/^CodeDirectory .*flags=[^(]*\(([^)]*)\)/m)?.[1]
     ?.split(",")
@@ -227,16 +281,18 @@ function signingEvidence(
   if (!flagList?.includes("runtime")) {
     throw new Error(`${codePath} is missing hardened runtime signing`);
   }
-  if (!timestamp || timestamp.toLowerCase() === "none") {
-    throw new Error(`${codePath} is missing a trusted signing timestamp`);
-  }
   const requirementOutput = run("codesign", ["-d", "-r-", codePath]);
-  const designatedRequirement = parseDesignatedRequirement(requirementOutput);
+  const designatedRequirement = designatedRequirementForPolicy(
+    requirementOutput,
+    artifactPolicy,
+    mode === "ad_hoc",
+  );
   const entitlements = canonicalEntitlements(codePath);
   if (entitlements !== canonicalJson(expectedEntitlements)) {
     throw new Error(`${codePath} has unexpected signed entitlements`);
   }
   return {
+    mode,
     authority,
     teamId,
     timestamp,
@@ -266,9 +322,14 @@ function isHex(value: string, length: number): boolean {
   return new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 }
 
+function manifestPolicy(manifest: MacOSArtifactManifest): ArtifactPolicy {
+  return manifest.schema_version === LOCAL_ARTIFACT_SCHEMA_VERSION ? "local_only" : "release";
+}
+
 function nestedItems(
   appPath: string,
   expectedTeamId: string,
+  artifactPolicy: ArtifactPolicy = "release",
   outerSigning?: SigningEvidence,
   helperSigning?: SigningEvidence,
 ): NestedCodeItem[] {
@@ -282,6 +343,7 @@ function nestedItems(
           expectedTeamId,
           APP_ENTITLEMENTS,
           join(appPath, "Contents", "MacOS", "Recordings"),
+          artifactPolicy,
         ),
     },
     {
@@ -292,6 +354,8 @@ function nestedItems(
           join(appPath, "Contents", "Helpers", "recordings"),
           expectedTeamId,
           HELPER_ENTITLEMENTS,
+          undefined,
+          artifactPolicy,
         ),
     },
   ];
@@ -299,7 +363,7 @@ function nestedItems(
     path,
     team_id: value.teamId,
     runtime: true,
-    timestamp_required: true,
+    timestamp_required: artifactPolicy === "release",
     architectures: value.architectures,
     entitlements_sha256: value.entitlementsSha256,
   }));
@@ -359,9 +423,15 @@ function assertArchitectures(values: string[], label: string): void {
 }
 
 export function assertManifestShape(manifest: MacOSArtifactManifest): void {
-  if (manifest.schema_version !== ARTIFACT_SCHEMA_VERSION) throw new Error("unsupported manifest schema");
+  if (
+    manifest.schema_version !== RELEASE_ARTIFACT_SCHEMA_VERSION &&
+    manifest.schema_version !== LOCAL_ARTIFACT_SCHEMA_VERSION
+  ) {
+    throw new Error("unsupported manifest schema");
+  }
   if (manifest.artifact_type !== "recordings-macos-app") throw new Error("unexpected artifact type");
   if (manifest.bundle_id !== BUNDLE_ID) throw new Error("unexpected bundle identifier");
+  const artifactPolicy = manifestPolicy(manifest);
   for (const [label, value] of [
     ["bundle version", manifest.bundle_version],
     ["bundle build version", manifest.bundle_build_version],
@@ -369,9 +439,7 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
     ["Team ID", manifest.team_id],
     ["app hash", manifest.app_sha256],
     ["provenance hash", manifest.provenance_sha256],
-    ["signing authority", manifest.signing?.authority],
     ["signing Team ID", manifest.signing?.team_id],
-    ["helper signing authority", manifest.signing?.helper_authority],
     ["helper signing Team ID", manifest.signing?.helper_team_id],
     ["archive filename", manifest.archive?.filename],
     ["archive hash", manifest.archive?.sha256],
@@ -384,8 +452,6 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
     ["companion version", manifest.companion?.version],
     ["companion hash", manifest.companion?.sha256],
     ["minimum macOS", manifest.minimum_macos],
-    ["notary submission ID", manifest.notarization?.submission_id],
-    ["notary log hash", manifest.notarization?.log_sha256],
     ["nested-code allowlist hash", manifest.nested_code_policy?.allowlist_sha256],
   ] as const) {
     if (!value || typeof value !== "string") throw new Error(`manifest is missing ${label}`);
@@ -405,38 +471,90 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
   if (!sameStrings([...manifest.architectures].sort(), [...manifest.companion.architectures].sort())) {
     throw new Error("manifest app and helper architectures differ");
   }
-  if (
-    !manifest.signing.authority.startsWith("Developer ID Application:") ||
-    !manifest.signing.helper_authority.startsWith("Developer ID Application:")
-  ) {
-    throw new Error("manifest requires Developer ID Application signing authorities");
-  }
   if (!isHex(manifest.git_sha, 40)) throw new Error("manifest git SHA must be a full commit SHA");
   for (const [label, value] of [
     ["app hash", manifest.app_sha256],
     ["provenance hash", manifest.provenance_sha256],
     ["archive hash", manifest.archive.sha256],
-    ["notary log hash", manifest.notarization.log_sha256],
     ["nested allowlist hash", manifest.nested_code_policy.allowlist_sha256],
     ["entitlements hash", manifest.signing.entitlements_sha256],
     ["helper entitlements hash", manifest.signing.helper_entitlements_sha256],
     ["helper designated requirement hash", manifest.signing.helper_designated_requirement_sha256],
-    ["submitted archive hash", manifest.notarization.submitted_archive_sha256],
     ["companion hash", manifest.companion.sha256],
     ["designated requirement hash", manifest.signing.designated_requirement_sha256],
   ] as const) {
     if (!isHex(value, 64)) throw new Error(`manifest ${label} must be SHA-256`);
   }
-  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(manifest.notarization.submission_id)) {
-    throw new Error("manifest notary submission ID is invalid");
-  }
-  if (
-    manifest.notarization.status !== "Accepted" ||
-    manifest.notarization.stapled !== true ||
-    manifest.notarization.distribution_check !== true ||
-    manifest.notarization.issue_count !== 0
-  ) {
-    throw new Error("manifest requires accepted and stapled notarization evidence");
+  if (artifactPolicy === "release") {
+    if (
+      manifest.artifact_policy !== undefined ||
+      manifest.approved_target !== undefined ||
+      manifest.approved_target_identity_sha256 !== undefined ||
+      manifest.builder_identity_sha256 !== undefined ||
+      manifest.non_notarized !== undefined ||
+      manifest.signing.mode !== undefined
+    ) {
+      throw new Error("release schema v2 must not contain local-only policy fields");
+    }
+    if (
+      !manifest.signing.authority.startsWith("Developer ID Application:") ||
+      !manifest.signing.helper_authority.startsWith("Developer ID Application:")
+    ) {
+      throw new Error("release manifest requires Developer ID Application signing authorities");
+    }
+    for (const [label, value] of [
+      ["notary log hash", manifest.notarization.log_sha256],
+      ["submitted archive hash", manifest.notarization.submitted_archive_sha256],
+    ] as const) {
+      if (!isHex(value, 64)) throw new Error(`manifest ${label} must be SHA-256`);
+    }
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(manifest.notarization.submission_id)) {
+      throw new Error("manifest notary submission ID is invalid");
+    }
+    if (
+      manifest.notarization.status !== "Accepted" ||
+      manifest.notarization.stapled !== true ||
+      manifest.notarization.distribution_check !== true ||
+      manifest.notarization.issue_count !== 0
+    ) {
+      throw new Error("release manifest requires accepted and stapled notarization evidence");
+    }
+  } else {
+    if (
+      manifest.artifact_policy !== "local_only" ||
+      manifest.approved_target !== "station06" ||
+      !manifest.approved_target_identity_sha256 ||
+      !isHex(manifest.approved_target_identity_sha256, 64) ||
+      !manifest.builder_identity_sha256 ||
+      !isHex(manifest.builder_identity_sha256, 64) ||
+      manifest.builder_identity_sha256 === manifest.approved_target_identity_sha256
+    ) {
+      throw new Error("local-only schema v3 requires exact station06 name and machine identity");
+    }
+    if (
+      manifest.non_notarized !== true ||
+      manifest.team_id !== "ADHOC" ||
+      manifest.signing.mode !== "ad_hoc" ||
+      manifest.signing.authority !== "adhoc" ||
+      manifest.signing.helper_authority !== "adhoc" ||
+      manifest.signing.team_id !== "ADHOC" ||
+      manifest.signing.helper_team_id !== "ADHOC" ||
+      manifest.signing.trusted_timestamp !== "none" ||
+      manifest.signing.helper_trusted_timestamp !== "none"
+    ) {
+      throw new Error("local-only manifest requires consistent ad-hoc signing evidence");
+    }
+    if (
+      manifest.notarization.status !== "Not Submitted" ||
+      manifest.notarization.submission_id !== "none" ||
+      manifest.notarization.log_sha256 !== "none" ||
+      manifest.notarization.submitted_archive_sha256 !== "none" ||
+      manifest.notarization.stapled !== false ||
+      manifest.notarization.distribution_check !== false ||
+      manifest.notarization.issue_count !== 0
+    ) {
+      throw new Error("local-only manifest must state that it is non-notarized");
+    }
   }
   if (
     manifest.container?.type !== "zip" ||
@@ -463,7 +581,7 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
         item.path !== expectedPaths[index] ||
         item.team_id !== manifest.team_id ||
         item.runtime !== true ||
-        item.timestamp_required !== true ||
+        item.timestamp_required !== (artifactPolicy === "release") ||
         !isHex(item.entitlements_sha256, 64),
     )
   ) {
@@ -481,6 +599,9 @@ export function verifyArchiveManifest(
   expectedManifestSha256: string,
   expectedSourceSha: string,
   expectedVersion: string,
+  expectedPolicy: ArtifactPolicy = "release",
+  expectedApprovedTarget: string = RELEASE_APPROVED_TARGET,
+  expectedApprovedTargetIdentitySha256: string = "none",
 ): MacOSArtifactManifest {
   if (!expectedTeamId) throw new Error("expected Team ID is required");
   if (!isHex(expectedManifestSha256, 64) || sha256File(manifestPath) !== expectedManifestSha256) {
@@ -488,6 +609,19 @@ export function verifyArchiveManifest(
   }
   const manifest = readJson<MacOSArtifactManifest>(manifestPath);
   assertManifestShape(manifest);
+  if (manifestPolicy(manifest) !== expectedPolicy) {
+    throw new Error("manifest artifact policy does not match the explicit operator selection");
+  }
+  const actualApprovedTarget = manifest.approved_target ?? RELEASE_APPROVED_TARGET;
+  if (actualApprovedTarget !== expectedApprovedTarget) {
+    throw new Error("manifest approved target does not match the exact operator-approved target");
+  }
+  if (
+    expectedPolicy === "local_only" &&
+    manifest.approved_target_identity_sha256 !== expectedApprovedTargetIdentitySha256
+  ) {
+    throw new Error("manifest machine identity does not match the exact operator-approved target");
+  }
   if (!isHex(expectedSourceSha, 40) || manifest.git_sha !== expectedSourceSha) {
     throw new Error("manifest source SHA does not match the operator-approved source");
   }
@@ -513,7 +647,20 @@ function assertProvenanceMatchesManifest(
   provenance: BuildProvenance,
   manifest: MacOSArtifactManifest,
 ): void {
-  for (const key of ["bundle_id", "bundle_version", "git_sha", "team_id"] as const) {
+  if (provenance.schema_version !== manifest.schema_version) {
+    throw new Error("signed provenance schema version mismatch");
+  }
+  for (const key of [
+    "artifact_policy",
+    "approved_target",
+    "approved_target_identity_sha256",
+    "builder_identity_sha256",
+    "non_notarized",
+    "bundle_id",
+    "bundle_version",
+    "git_sha",
+    "team_id",
+  ] as const) {
     if (provenance[key] !== manifest[key]) throw new Error(`signed provenance ${key} mismatch`);
   }
   if (
@@ -541,9 +688,22 @@ export function verifyExtractedApp(
   appPath: string,
   manifestPath: string,
   expectedTeamId: string,
+  expectedPolicy: ArtifactPolicy = "release",
+  expectedApprovedTarget: string = RELEASE_APPROVED_TARGET,
+  expectedApprovedTargetIdentitySha256: string = "none",
 ): MacOSArtifactManifest {
   const manifest = readJson<MacOSArtifactManifest>(manifestPath);
   assertManifestShape(manifest);
+  if (manifestPolicy(manifest) !== expectedPolicy) throw new Error("manifest artifact policy mismatch");
+  if ((manifest.approved_target ?? RELEASE_APPROVED_TARGET) !== expectedApprovedTarget) {
+    throw new Error("manifest approved target mismatch");
+  }
+  if (
+    expectedPolicy === "local_only" &&
+    manifest.approved_target_identity_sha256 !== expectedApprovedTargetIdentitySha256
+  ) {
+    throw new Error("manifest approved target machine identity mismatch");
+  }
   if (manifest.team_id !== expectedTeamId) throw new Error("manifest Team ID mismatch");
 
   const executablePath = join(appPath, "Contents", "MacOS", "Recordings");
@@ -551,8 +711,20 @@ export function verifyExtractedApp(
   const embeddedPath = provenancePath(appPath);
   const provenance = readJson<BuildProvenance>(embeddedPath);
   assertExpectedCodeLayout(appPath);
-  const outerSigning = signingEvidence(appPath, expectedTeamId, APP_ENTITLEMENTS, executablePath);
-  const helperSigning = signingEvidence(helperPath, expectedTeamId, HELPER_ENTITLEMENTS);
+  const outerSigning = signingEvidence(
+    appPath,
+    expectedTeamId,
+    APP_ENTITLEMENTS,
+    executablePath,
+    expectedPolicy,
+  );
+  const helperSigning = signingEvidence(
+    helperPath,
+    expectedTeamId,
+    HELPER_ENTITLEMENTS,
+    helperPath,
+    expectedPolicy,
+  );
 
   if (plistValue(appPath, "CFBundleIdentifier") !== manifest.bundle_id) {
     throw new Error("installed bundle identifier does not match the manifest");
@@ -606,21 +778,44 @@ export function verifyExtractedApp(
   ) {
     throw new Error("helper signing provenance mismatch");
   }
-  const actualNestedItems = nestedItems(appPath, expectedTeamId, outerSigning, helperSigning);
+  if (
+    outerSigning.mode !== (expectedPolicy === "release" ? "developer_id" : manifest.signing.mode) ||
+    helperSigning.mode !== (expectedPolicy === "release" ? "developer_id" : manifest.signing.mode)
+  ) {
+    throw new Error("signing mode provenance mismatch");
+  }
+  const actualNestedItems = nestedItems(
+    appPath,
+    expectedTeamId,
+    expectedPolicy,
+    outerSigning,
+    helperSigning,
+  );
   if (JSON.stringify(actualNestedItems) !== JSON.stringify(manifest.nested_code_policy.items)) {
     throw new Error("nested-code policy does not match the extracted app");
   }
   return manifest;
 }
 
-function writeProvenance(appPath: string, expectedTeamId: string, packageRoot: string): void {
+function writeProvenance(
+  appPath: string,
+  expectedTeamId: string,
+  packageRoot: string,
+  artifactPolicy: ArtifactPolicy,
+  approvedTarget: string,
+  approvedTargetIdentitySha256: string,
+  builderIdentitySha256: string,
+): void {
   const executablePath = join(appPath, "Contents", "MacOS", "Recordings");
   const helperPath = join(appPath, "Contents", "Helpers", "recordings");
   assertCleanGitStatus(
     run("git", ["-C", packageRoot, "status", "--porcelain=v1", "--untracked-files=all"]),
   );
   const provenance: BuildProvenance = {
-    schema_version: ARTIFACT_SCHEMA_VERSION,
+    schema_version:
+      artifactPolicy === "release"
+        ? RELEASE_ARTIFACT_SCHEMA_VERSION
+        : LOCAL_ARTIFACT_SCHEMA_VERSION,
     bundle_id: plistValue(appPath, "CFBundleIdentifier"),
     bundle_version: plistValue(appPath, "CFBundleShortVersionString"),
     bundle_build_version: plistValue(appPath, "CFBundleVersion"),
@@ -635,6 +830,30 @@ function writeProvenance(appPath: string, expectedTeamId: string, packageRoot: s
     },
   };
   if (provenance.bundle_id !== BUNDLE_ID) throw new Error("unexpected bundle identifier");
+  if (artifactPolicy === "release") {
+    if (
+      approvedTarget !== RELEASE_APPROVED_TARGET ||
+      approvedTargetIdentitySha256 !== "none" ||
+      builderIdentitySha256 !== "none" ||
+      expectedTeamId === "ADHOC"
+    ) {
+      throw new Error("release provenance has an invalid target or Team ID");
+    }
+  } else if (
+    expectedTeamId !== "ADHOC" ||
+    approvedTarget !== "station06" ||
+    !isHex(approvedTargetIdentitySha256, 64) ||
+    !isHex(builderIdentitySha256, 64) ||
+    approvedTargetIdentitySha256 === builderIdentitySha256
+  ) {
+    throw new Error("local-only provenance requires ADHOC and exact station06 machine identity");
+  } else {
+    provenance.artifact_policy = "local_only";
+    provenance.approved_target = approvedTarget;
+    provenance.approved_target_identity_sha256 = approvedTargetIdentitySha256;
+    provenance.builder_identity_sha256 = builderIdentitySha256;
+    provenance.non_notarized = true;
+  }
   writeJson(provenancePath(appPath), provenance);
 }
 
@@ -667,7 +886,7 @@ function finalizeArtifact(
     throw new Error("notary log job ID does not match the submission ID");
   }
   if (!isHex(submittedArchiveSha256, 64)) throw new Error("submitted archive SHA-256 is invalid");
-  const items = nestedItems(appPath, expectedTeamId, outerSigning, helperSigning);
+  const items = nestedItems(appPath, expectedTeamId, "release", outerSigning, helperSigning);
   const manifest: MacOSArtifactManifest = {
     ...provenance,
     artifact_type: "recordings-macos-app",
@@ -721,8 +940,114 @@ function finalizeArtifact(
     sha256File(manifestPath),
     manifest.git_sha,
     manifest.bundle_version,
+    "release",
+    RELEASE_APPROVED_TARGET,
   );
-  verifyExtractedApp(appPath, manifestPath, expectedTeamId);
+  verifyExtractedApp(appPath, manifestPath, expectedTeamId, "release", RELEASE_APPROVED_TARGET);
+}
+
+function finalizeLocalArtifact(
+  appPath: string,
+  archivePath: string,
+  manifestPath: string,
+  approvedTarget: string,
+  approvedTargetIdentitySha256: string,
+): void {
+  const executablePath = join(appPath, "Contents", "MacOS", "Recordings");
+  const helperPath = join(appPath, "Contents", "Helpers", "recordings");
+  const embeddedPath = provenancePath(appPath);
+  const provenance = readJson<BuildProvenance>(embeddedPath);
+  if (
+    provenance.artifact_policy !== "local_only" ||
+    provenance.approved_target !== approvedTarget ||
+    provenance.approved_target_identity_sha256 !== approvedTargetIdentitySha256 ||
+    provenance.non_notarized !== true ||
+    provenance.team_id !== "ADHOC"
+  ) {
+    throw new Error("embedded provenance is not approved for this local-only target");
+  }
+  assertExpectedCodeLayout(appPath);
+  const outerSigning = signingEvidence(
+    appPath,
+    "ADHOC",
+    APP_ENTITLEMENTS,
+    executablePath,
+    "local_only",
+  );
+  const helperSigning = signingEvidence(
+    helperPath,
+    "ADHOC",
+    HELPER_ENTITLEMENTS,
+    helperPath,
+    "local_only",
+  );
+  const items = nestedItems(appPath, "ADHOC", "local_only", outerSigning, helperSigning);
+  const manifest: MacOSArtifactManifest = {
+    ...provenance,
+    artifact_type: "recordings-macos-app",
+    app_sha256: sha256File(executablePath),
+    provenance_sha256: sha256File(embeddedPath),
+    signing: {
+      mode: "ad_hoc",
+      authority: outerSigning.authority,
+      team_id: outerSigning.teamId,
+      trusted_timestamp: outerSigning.timestamp,
+      helper_authority: helperSigning.authority,
+      helper_team_id: helperSigning.teamId,
+      helper_trusted_timestamp: helperSigning.timestamp,
+      entitlements_sha256: outerSigning.entitlementsSha256,
+      helper_entitlements_sha256: helperSigning.entitlementsSha256,
+      designated_requirement_sha256: sha256(outerSigning.designatedRequirement),
+      helper_designated_requirement_sha256: sha256(helperSigning.designatedRequirement),
+    },
+    notarization: {
+      submission_id: "none",
+      status: "Not Submitted",
+      log_sha256: "none",
+      issue_count: 0,
+      submitted_archive_sha256: "none",
+      stapled: false,
+      distribution_check: false,
+    },
+    container: {
+      type: "zip",
+      install_locations: ["~/Applications/Recordings.app"],
+    },
+    nested_code_policy: {
+      allowlist_sha256: nestedPolicyDigest(items),
+      items,
+    },
+    external_state: {
+      paths: ["~/.hasna/recordings"],
+      classification: "user-private",
+      rollback: "transactional-backup-restore",
+    },
+    archive: {
+      filename: basename(archivePath),
+      sha256: sha256File(archivePath),
+    },
+  };
+  assertManifestShape(manifest);
+  writeJson(manifestPath, manifest);
+  verifyArchiveManifest(
+    archivePath,
+    manifestPath,
+    "ADHOC",
+    sha256File(manifestPath),
+    manifest.git_sha,
+    manifest.bundle_version,
+    "local_only",
+    approvedTarget,
+    approvedTargetIdentitySha256,
+  );
+  verifyExtractedApp(
+    appPath,
+    manifestPath,
+    "ADHOC",
+    "local_only",
+    approvedTarget,
+    approvedTargetIdentitySha256,
+  );
 }
 
 function assertExpectedRelease(
@@ -739,6 +1064,9 @@ function assertExpectedRelease(
   }
   const manifest = readJson<MacOSArtifactManifest>(manifestPath);
   assertManifestShape(manifest);
+  if (manifestPolicy(manifest) !== "release") {
+    throw new Error("release assertion rejects local-only artifacts");
+  }
   if (manifest.git_sha !== expectedSourceSha) {
     throw new Error("manifest source SHA does not match the operator-approved source");
   }
@@ -795,7 +1123,18 @@ function assertInstallTransition(existingAppPath: string, manifestPath: string):
   assertVersionTransition(installedVersion, installedSource, manifest);
 }
 
-function requirementDigest(appPath: string): void {
+function requirementDigest(appPath: string, artifactPolicy: ArtifactPolicy): void {
+  if (artifactPolicy === "local_only") {
+    const evidence = signingEvidence(
+      appPath,
+      "ADHOC",
+      APP_ENTITLEMENTS,
+      join(appPath, "Contents", "MacOS", "Recordings"),
+      "local_only",
+    );
+    console.log(sha256(evidence.designatedRequirement));
+    return;
+  }
   const output = run("codesign", ["-d", "-r-", appPath]);
   console.log(sha256(parseDesignatedRequirement(output)));
 }
@@ -823,8 +1162,22 @@ function assertFilesystemTree(root: string, expectedUid: number): void {
   visit(root);
 }
 
-function verifyActiveApp(appPath: string, manifestPath: string, expectedTeamId: string): void {
-  const manifest = verifyExtractedApp(appPath, manifestPath, expectedTeamId);
+function verifyActiveApp(
+  appPath: string,
+  manifestPath: string,
+  expectedTeamId: string,
+  expectedPolicy: ArtifactPolicy,
+  expectedApprovedTarget: string,
+  expectedApprovedTargetIdentitySha256: string,
+): void {
+  const manifest = verifyExtractedApp(
+    appPath,
+    manifestPath,
+    expectedTeamId,
+    expectedPolicy,
+    expectedApprovedTarget,
+    expectedApprovedTargetIdentitySha256,
+  );
   const helperPath = join(appPath, "Contents", "Helpers", "recordings");
   if (companionVersion(helperPath) !== manifest.companion.version) {
     throw new Error("activated companion version mismatch");
@@ -878,7 +1231,7 @@ function verifyActiveApp(appPath: string, manifestPath: string, expectedTeamId: 
 }
 
 export type InstallJournal = {
-  schema_version: 2;
+  schema_version: 2 | 3;
   phase: string;
   transaction_dir: string;
   app_parent: string;
@@ -891,6 +1244,9 @@ export type InstallJournal = {
   expected_manifest_sha256: string;
   expected_source_sha: string;
   expected_version: string;
+  artifact_policy?: ArtifactPolicy;
+  approved_target?: string;
+  approved_target_identity_sha256?: string;
   candidate_identity_sha256: string;
   previous_identity_sha256: string;
 };
@@ -920,7 +1276,7 @@ function writeDurableJournal(path: string, journal: InstallJournal): void {
 
 function journalArgument(): InstallJournal {
   const value: InstallJournal = {
-    schema_version: 2,
+    schema_version: 3,
     phase: argument("--phase"),
     transaction_dir: argument("--transaction-dir"),
     app_parent: argument("--app-parent"),
@@ -933,6 +1289,9 @@ function journalArgument(): InstallJournal {
     expected_manifest_sha256: argument("--expected-manifest-sha256"),
     expected_source_sha: argument("--expected-source-sha"),
     expected_version: argument("--expected-version"),
+    artifact_policy: argument("--artifact-policy") as ArtifactPolicy,
+    approved_target: argument("--approved-target"),
+    approved_target_identity_sha256: argument("--approved-target-identity-sha256"),
     candidate_identity_sha256: argument("--candidate-identity-sha256"),
     previous_identity_sha256: argument("--previous-identity-sha256"),
   };
@@ -950,7 +1309,7 @@ function journalArgument(): InstallJournal {
 
 function readJournal(path: string): InstallJournal {
   const journal = readJson<InstallJournal>(path);
-  if (journal.schema_version !== 2 || !journal.transaction_dir || !journal.phase) {
+  if ((journal.schema_version !== 2 && journal.schema_version !== 3) || !journal.transaction_dir || !journal.phase) {
     throw new Error("invalid install transaction journal");
   }
   const allowedPhases = new Set([
@@ -975,6 +1334,30 @@ function readJournal(path: string): InstallJournal {
       !isHex(journal.previous_identity_sha256, 64))
   ) {
     throw new Error("install transaction journal has invalid release identity fields");
+  }
+  if (journal.schema_version === 2) {
+    if (
+      journal.artifact_policy !== undefined ||
+      journal.approved_target !== undefined ||
+      journal.approved_target_identity_sha256 !== undefined
+    ) {
+      throw new Error("legacy install transaction journal contains unsupported policy fields");
+    }
+    journal.artifact_policy = "release";
+    journal.approved_target = RELEASE_APPROVED_TARGET;
+    journal.approved_target_identity_sha256 = "none";
+  } else if (
+    (journal.artifact_policy !== "release" && journal.artifact_policy !== "local_only") ||
+    !journal.approved_target ||
+    (journal.artifact_policy === "release" &&
+      (journal.approved_target !== RELEASE_APPROVED_TARGET ||
+        journal.approved_target_identity_sha256 !== "none")) ||
+    (journal.artifact_policy === "local_only" &&
+      (journal.approved_target !== "station06" ||
+        !journal.approved_target_identity_sha256 ||
+        !isHex(journal.approved_target_identity_sha256, 64)))
+  ) {
+    throw new Error("install transaction journal has an invalid artifact policy or target");
   }
   const expectedParent = resolve(journal.app_parent);
   const transaction = resolve(journal.transaction_dir);
@@ -1168,6 +1551,9 @@ function manifestGet(path: string, field: string): void {
   else if (field === "version") console.log(manifest.bundle_version);
   else if (field === "source") console.log(manifest.git_sha);
   else if (field === "identity") console.log(manifest.signing.designated_requirement_sha256);
+  else if (field === "artifact_policy") console.log(manifest.artifact_policy);
+  else if (field === "approved_target") console.log(manifest.approved_target);
+  else if (field === "approved_target_identity_sha256") console.log(manifest.approved_target_identity_sha256);
   else throw new Error(`unsupported manifest field: ${field}`);
 }
 
@@ -1178,11 +1564,27 @@ function argument(name: string): string {
   return value;
 }
 
+function artifactPolicyArgument(): ArtifactPolicy {
+  const value = argument("--artifact-policy");
+  if (value !== "release" && value !== "local_only") {
+    throw new Error("artifact policy must be release or local_only");
+  }
+  return value;
+}
+
 function main(): void {
   const command = Bun.argv[2];
   if (command === "provenance") {
     const teamId = argument("--team-id");
-    writeProvenance(argument("--app"), teamId, argument("--package-root"));
+    writeProvenance(
+      argument("--app"),
+      teamId,
+      argument("--package-root"),
+      artifactPolicyArgument(),
+      argument("--approved-target"),
+      argument("--approved-target-identity-sha256"),
+      argument("--builder-identity-sha256"),
+    );
   } else if (command === "finalize") {
     const teamId = argument("--team-id");
     finalizeArtifact(
@@ -1194,6 +1596,14 @@ function main(): void {
       argument("--notary-submission-id"),
       argument("--submitted-archive-sha256"),
     );
+  } else if (command === "finalize-local") {
+    finalizeLocalArtifact(
+      argument("--app"),
+      argument("--archive"),
+      argument("--manifest"),
+      argument("--approved-target"),
+      argument("--approved-target-identity-sha256"),
+    );
   } else if (command === "verify-archive") {
     const teamId = argument("--team-id");
     verifyArchiveManifest(
@@ -1203,13 +1613,30 @@ function main(): void {
       argument("--manifest-sha256"),
       argument("--source-sha"),
       argument("--version"),
+      artifactPolicyArgument(),
+      argument("--approved-target"),
+      argument("--approved-target-identity-sha256"),
     );
   } else if (command === "verify-app") {
     const teamId = argument("--team-id");
-    verifyExtractedApp(argument("--app"), argument("--manifest"), teamId);
+    verifyExtractedApp(
+      argument("--app"),
+      argument("--manifest"),
+      teamId,
+      artifactPolicyArgument(),
+      argument("--approved-target"),
+      argument("--approved-target-identity-sha256"),
+    );
   } else if (command === "verify-active") {
     const teamId = argument("--team-id");
-    verifyActiveApp(argument("--app"), argument("--manifest"), teamId);
+    verifyActiveApp(
+      argument("--app"),
+      argument("--manifest"),
+      teamId,
+      artifactPolicyArgument(),
+      argument("--approved-target"),
+      argument("--approved-target-identity-sha256"),
+    );
   } else if (command === "assert-release") {
     assertExpectedRelease(
       argument("--manifest"),
@@ -1220,7 +1647,7 @@ function main(): void {
   } else if (command === "assert-transition") {
     assertInstallTransition(argument("--existing-app"), argument("--manifest"));
   } else if (command === "requirement-digest") {
-    requirementDigest(argument("--app"));
+    requirementDigest(argument("--app"), artifactPolicyArgument());
   } else if (command === "verify-filesystem-tree") {
     assertFilesystemTree(argument("--path"), Number(argument("--uid")));
   } else if (command === "fsync-tree") {
