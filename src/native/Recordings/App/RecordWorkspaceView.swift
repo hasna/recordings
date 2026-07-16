@@ -155,20 +155,25 @@ struct RecordWorkspaceView: View {
     // MARK: Idle
 
     private var idleContent: some View {
-        VStack(spacing: 14) {
+        let presentation = RecordingStartControlPresentation(
+            kind: .record,
+            canStartRecording: engine.canStartRecording
+        )
+        return VStack(spacing: 14) {
             Button {
                 engine.startRecording()
             } label: {
                 VStack(spacing: 10) {
                     Image(systemName: "mic.fill").font(.system(size: 44, weight: .semibold)).foregroundStyle(.tint)
-                    Text("Record").font(.system(.title, design: .rounded).weight(.semibold)).foregroundStyle(.primary)
+                    Text(presentation.title).font(.system(.title, design: .rounded).weight(.semibold)).foregroundStyle(.primary)
                     Text(idleHint).font(.callout).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity).padding(.vertical, 14).contentShape(.rect)
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.defaultAction)
-            .accessibilityLabel("Start recording")
+            .disabled(!presentation.isEnabled)
+            .accessibilityLabel(presentation.accessibilityLabel)
 
             Text("Speak — Recordings types what you say, answers questions, and edits selected text.")
                 .font(.caption)
@@ -263,7 +268,11 @@ struct RecordWorkspaceView: View {
     // MARK: Ready
 
     private func readyContent(summary: String) -> some View {
-        VStack(spacing: 14) {
+        let presentation = RecordingStartControlPresentation(
+            kind: .recordAgain,
+            canStartRecording: engine.canStartRecording
+        )
+        return VStack(spacing: 14) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 40, weight: .semibold))
                 .foregroundStyle(.green)
@@ -274,12 +283,13 @@ struct RecordWorkspaceView: View {
             Button {
                 engine.startRecording()
             } label: {
-                Label("Record Again", systemImage: "mic.fill")
+                Label(presentation.title, systemImage: "mic.fill")
             }
             .buttonStyle(.glass)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
-            .accessibilityLabel("Start a new recording")
+            .disabled(!presentation.isEnabled)
+            .accessibilityLabel(presentation.accessibilityLabel)
         }
         .accessibilityElement(children: .contain)
     }
@@ -287,7 +297,11 @@ struct RecordWorkspaceView: View {
     // MARK: Error
 
     private func failedContent(message: String) -> some View {
-        VStack(spacing: 14) {
+        let presentation = RecordingStartControlPresentation(
+            kind: .tryAgain,
+            canStartRecording: engine.canStartRecording
+        )
+        return VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 36, weight: .semibold))
                 .foregroundStyle(.orange)
@@ -298,12 +312,13 @@ struct RecordWorkspaceView: View {
             Button {
                 engine.startRecording()
             } label: {
-                Label("Try Again", systemImage: "mic.fill")
+                Label(presentation.title, systemImage: "mic.fill")
             }
             .buttonStyle(.glass)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
-            .accessibilityLabel("Try recording again")
+            .disabled(!presentation.isEnabled)
+            .accessibilityLabel(presentation.accessibilityLabel)
         }
         .accessibilityElement(children: .contain)
     }
