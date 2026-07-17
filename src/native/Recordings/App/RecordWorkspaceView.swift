@@ -47,8 +47,9 @@ struct RecordWorkspaceView: View {
         }
         .animation(reduceMotion ? nil : .smooth(duration: 0.28), value: phase)
         .onChange(of: engine.isTranscribing) { wasTranscribing, isTranscribing in
-            // When transcription finishes the CLI has persisted the recording — refresh the
-            // library. Fires for every intent route and on success or failure.
+            // Refresh promptly when the foreground path finishes. RecordingsStore also
+            // observes confirmed persistence so async saves still refresh after this view
+            // has been unmounted, without treating failed saves as completed recordings.
             if wasTranscribing && !isTranscribing { store.loadLibrary() }
         }
     }
