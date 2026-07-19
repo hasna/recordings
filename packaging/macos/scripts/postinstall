@@ -1,0 +1,565 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export LC_ALL=C
+export LANG=C
+export TZ=UTC0
+
+PACKAGE_BOOTSTRAP_ID="__RECORDINGS_PACKAGE_BOOTSTRAP_ID__"
+AUTHORIZATION_ROOT="/private/var/db/com.hasna.recordings.bootstrap-authorization"
+AUTHORIZATION_JOURNAL="${AUTHORIZATION_ROOT}/journal"
+BROKER="/Library/PrivilegedHelperTools/com.hasna.recordings.updater"
+CLIENT="/Applications/Recordings.app/Contents/Helpers/recordings-update-client"
+VERIFIER="/Library/PrivilegedHelperTools/com.hasna.recordings.artifact-verifier"
+APP="/Applications/Recordings.app"
+STATE_ROOT="/Library/Application Support/Hasna/Recordings/Updates"
+TRUST_ROOT="/Library/Application Support/Hasna/Recordings/Trust"
+BOOTSTRAP_ROOT="/Library/Application Support/Hasna/Recordings/Bootstrap"
+RELEASE_SEQUENCE_FILE="${BOOTSTRAP_ROOT}/release-sequence"
+KEY_EPOCH_FILE="${BOOTSTRAP_ROOT}/key-epoch"
+SOURCE_SHA_FILE="${BOOTSTRAP_ROOT}/source-sha"
+BROKER_POLICY="${TRUST_ROOT}/broker-policy.json"
+VERIFIER_SANDBOX="${TRUST_ROOT}/artifact-verifier.sb"
+BOOTSTRAP_MARKER="${TRUST_ROOT}/bootstrap-marker.json"
+LAUNCHD_PLIST="/Library/LaunchDaemons/com.hasna.recordings.updater.plist"
+VERIFIER_USER="_recordingsverify"
+VERIFIER_GROUP="_recordingsverify"
+
+fail() {
+  echo "Recordings updater bootstrap failed: $*" >&2
+  exit 1
+}
+
+path_exists_or_symlink() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+require_no_extended_acl() {
+  local path="$1"
+  local acl_listing acl_status
+  acl_listing="$(/bin/ls -lade "$path")" || fail "could not inspect extended ACLs on $path"
+  if /usr/bin/printf '%s\n' "$acl_listing" | /usr/bin/awk '
+    NR == 1 && length($1) == 11 && substr($1, 11, 1) == "+" { found = 1 }
+    NR > 1 && $1 ~ /^[0-9]+:$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    fail "unexpected extended ACL on package trust path: $path"
+  else
+    acl_status=$?
+    [ "$acl_status" -eq 1 ] || fail "could not evaluate extended ACLs on $path"
+  fi
+}
+
+read_journal_value() {
+  local key="$1"
+  /usr/bin/awk -F= -v key="$key" '
+    $1 == key { count += 1; value = substr($0, length(key) + 2) }
+    END { if (count != 1) exit 1; print value }
+  ' "$AUTHORIZATION_JOURNAL"
+}
+
+require_authorization_journal() {
+  path_exists_or_symlink "$AUTHORIZATION_ROOT" && \
+    [ -d "$AUTHORIZATION_ROOT" ] && [ ! -L "$AUTHORIZATION_ROOT" ] && \
+    [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$AUTHORIZATION_ROOT")" = "0:0:700" ] || \
+    fail "authorization evidence is missing or unsafe"
+  [ -f "$AUTHORIZATION_JOURNAL" ] && [ ! -L "$AUTHORIZATION_JOURNAL" ] && \
+    [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$AUTHORIZATION_JOURNAL")" = "0:0:400" ] && \
+    [ "$(/usr/bin/stat -f '%l' "$AUTHORIZATION_JOURNAL")" = "1" ] && \
+    [ "$(/usr/bin/wc -l <"$AUTHORIZATION_JOURNAL" | /usr/bin/tr -d ' ')" = "6" ] || \
+    fail "authorization journal is missing or unsafe"
+  require_no_extended_acl "$AUTHORIZATION_ROOT"
+  require_no_extended_acl "$AUTHORIZATION_JOURNAL"
+  [ "$(read_journal_value schema_version)" = "1" ] || fail "authorization journal schema is invalid"
+  JOURNAL_PHASE="$(read_journal_value phase)"
+  JOURNAL_PACKAGE_SHA256="$(read_journal_value package_sha256)"
+  JOURNAL_PACKAGE_BOOTSTRAP_ID="$(read_journal_value package_bootstrap_id)"
+  JOURNAL_INSTALLER_TEAM_ID="$(read_journal_value installer_team_id)"
+  JOURNAL_INSTALLER_CERTIFICATE_SHA256="$(read_journal_value installer_certificate_sha256)"
+  [ "$JOURNAL_PHASE" = "installer-started" ] || fail "authorization journal is not in Installer repair phase"
+  [[ "$JOURNAL_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] && \
+    [[ "$JOURNAL_PACKAGE_BOOTSTRAP_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && \
+    [[ "$JOURNAL_INSTALLER_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] && \
+    [[ "$JOURNAL_INSTALLER_CERTIFICATE_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+    fail "authorization journal values are malformed"
+  [ "$JOURNAL_PACKAGE_BOOTSTRAP_ID" = "$PACKAGE_BOOTSTRAP_ID" ] || \
+    fail "authorization journal belongs to a different authenticated package"
+}
+
+require_tree_without_extended_acl() {
+  local tree="$1"
+  local acl_listing acl_status
+  require_no_extended_acl "$tree"
+  [ -d "$tree" ] || return 0
+  acl_listing="$(/bin/ls -laeR "$tree")" || fail "could not recursively inspect extended ACLs on $tree"
+  if /usr/bin/printf '%s\n' "$acl_listing" | /usr/bin/awk '
+    length($1) == 11 && substr($1, 11, 1) == "+" { found = 1 }
+    $1 ~ /^[0-9]+:$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    fail "unexpected extended ACL inside package-owned tree: $tree"
+  else
+    acl_status=$?
+    [ "$acl_status" -eq 1 ] || fail "could not evaluate recursive extended ACLs on $tree"
+  fi
+}
+
+# Prove every recursive mutation target before chmod/chown can traverse it.
+# Recursive mutation roots are under root-owned, non-writable ancestry, so once
+# every entry is root-owned and non-writable an unprivileged process cannot
+# replace a validated path before the immediately following mutation. The app
+# is validated with the same structure policy but is never recursively mutated,
+# preserving the exact root:admin /Applications compatibility boundary.
+package_entry_structure_is_safe() {
+  local entry="$1"
+  local expected_device="$2"
+  local mode owner links device
+  [ ! -L "$entry" ] || return 1
+  if [ -d "$entry" ]; then
+    :
+  elif [ -f "$entry" ]; then
+    links="$(/usr/bin/stat -f '%l' "$entry")" || return 1
+    [ "$links" = "1" ] || return 1
+  else
+    return 1
+  fi
+  owner="$(/usr/bin/stat -f '%u' "$entry")" || return 1
+  [ "$owner" = "0" ] || return 1
+  device="$(/usr/bin/stat -f '%d' "$entry")" || return 1
+  [ "$device" = "$expected_device" ] || return 1
+  mode="$(/usr/bin/stat -f '%Lp' "$entry")" || return 1
+  [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+}
+
+require_safe_package_tree_structure() {
+  local tree="$1"
+  local entry listing tree_device invalid=0
+  [ -d "$tree" ] && [ ! -L "$tree" ] || \
+    fail "package-owned tree is missing, linked, or not a directory: $tree"
+  listing="$(/usr/bin/mktemp -t recordings-package-tree)" || \
+    fail "could not allocate package-tree inspection state"
+  tree_device="$(/usr/bin/stat -f '%d' "$tree")" || {
+    /bin/rm -f "$listing"
+    fail "could not inspect package-owned tree device: $tree"
+  }
+  if ! /usr/bin/find -x "$tree" -print0 >"$listing"; then
+    /bin/rm -f "$listing"
+    fail "could not enumerate package-owned tree: $tree"
+  fi
+  while IFS= read -r -d '' entry; do
+    if ! package_entry_structure_is_safe "$entry" "$tree_device"; then
+      invalid=1
+      break
+    fi
+  done <"$listing"
+  /bin/rm -f "$listing"
+  [ "$invalid" -eq 0 ] || \
+    fail "package-owned tree contains a link, hard link, special file, unsafe owner, or writable entry: $tree"
+}
+
+require_safe_package_leaf_structure() {
+  local leaf="$1"
+  local leaf_device
+  leaf_device="$(/usr/bin/stat -f '%d' "$leaf")" || \
+    fail "could not inspect package-owned leaf device: $leaf"
+  [ -f "$leaf" ] && package_entry_structure_is_safe "$leaf" "$leaf_device" || \
+    fail "package-owned leaf is linked, hard-linked, special, unsafely owned, or writable: $leaf"
+}
+
+require_root_owned_nonwritable_directory() {
+  local directory="$1"
+  local mode
+  [ -d "$directory" ] && [ ! -L "$directory" ] && \
+    [ "$(/usr/bin/stat -f '%u' "$directory")" = 0 ] || \
+    fail "target ancestry is missing, linked, or not root-owned: $directory"
+  mode="$(/usr/bin/stat -f '%Lp' "$directory")"
+  [ $((8#$mode & 8#022)) -eq 0 ] || \
+    fail "target ancestry is group/other writable: $directory"
+  require_no_extended_acl "$directory"
+}
+
+# Standard macOS permits the admin group to install app bundles. Executable
+# authority remains the pinned Developer ID/audit-token policy, so accept only
+# that exact OS topology and reject every ACL or broader mode.
+require_managed_applications_directory() {
+  local mode group_id
+  [ -d "/Applications" ] && [ ! -L "/Applications" ] && \
+    [ "$(/usr/bin/stat -f '%u' "/Applications")" = 0 ] || \
+    fail "canonical /Applications directory is missing, linked, or not root-owned"
+  require_no_extended_acl "/Applications"
+  mode="$(/usr/bin/stat -f '%Lp' "/Applications")"
+  group_id="$(/usr/bin/stat -f '%g' "/Applications")"
+  case "$mode:$group_id" in
+    755:*|775:80) ;;
+    *) fail "/Applications must be ACL-free mode 0755 or root:admin mode 0775" ;;
+  esac
+}
+
+require_expected_var_link() {
+  local var_target
+  [ -L "/var" ] || fail "canonical macOS /var system link is missing"
+  var_target="$(/usr/bin/readlink "/var")" || fail "could not inspect the macOS /var system link"
+  [ "$var_target" = "private/var" ] && \
+    [ "$(cd "/var" && /bin/pwd -P)" = "/private/var" ] || \
+    fail "macOS /var system link is noncanonical"
+}
+
+validate_existing_mutation_root() {
+  local mutation_root="$1"
+  if path_exists_or_symlink "$mutation_root"; then
+    [ -d "$mutation_root" ] && [ ! -L "$mutation_root" ] && \
+      [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$mutation_root")" = "0:0:700" ] || \
+      fail "interrupted package mutation root is linked or has ownership/mode drift: $mutation_root"
+    require_safe_package_tree_structure "$mutation_root"
+    require_tree_without_extended_acl "$mutation_root"
+  fi
+}
+
+[ "$(/usr/bin/id -u)" = "0" ] || fail "postinstall must run as root through Installer or MDM"
+
+require_authorization_journal
+require_expected_var_link
+require_managed_applications_directory
+for required_ancestor in \
+  "/" \
+  "/Library" \
+  "/Library/Application Support" \
+  "/Library/Application Support/Hasna" \
+  "/Library/Application Support/Hasna/Recordings" \
+  "/Library/PrivilegedHelperTools" \
+  "/Library/LaunchDaemons" \
+  "/private" \
+  "/private/var" \
+  "/private/var/db"; do
+  require_root_owned_nonwritable_directory "$required_ancestor"
+done
+for mutation_root in "$STATE_ROOT" "/var/db/com.hasna.recordings.updater"; do
+  validate_existing_mutation_root "$mutation_root"
+done
+
+for required in "$BROKER" "$CLIENT" "$VERIFIER" "$BROKER_POLICY" "$VERIFIER_SANDBOX" "$BOOTSTRAP_MARKER" "$LAUNCHD_PLIST" \
+  "$RELEASE_SEQUENCE_FILE" "$KEY_EPOCH_FILE" "$SOURCE_SHA_FILE"; do
+  [ -e "$required" ] || fail "package payload is missing $required"
+  [ ! -L "$required" ] || fail "package payload contains a symbolic-link trust boundary: $required"
+  require_no_extended_acl "$required"
+done
+release_sequence="$(/bin/cat "$RELEASE_SEQUENCE_FILE")"
+key_epoch="$(/bin/cat "$KEY_EPOCH_FILE")"
+source_sha="$(/bin/cat "$SOURCE_SHA_FILE")"
+[[ "$release_sequence" =~ ^[1-9][0-9]*$ ]] || fail "bootstrap release sequence is invalid"
+[[ "$key_epoch" =~ ^[1-9][0-9]*$ ]] || fail "bootstrap key epoch is invalid"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail "bootstrap source commit is invalid"
+PUBLIC_KEY="${TRUST_ROOT}/envelope-keys/${key_epoch}.raw"
+[ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "package payload is missing the epoch release-envelope key"
+[ -d "$APP" ] && [ ! -L "$APP" ] || fail "package payload is missing the canonical app bundle"
+[ "$(/usr/bin/stat -f '%z' "$PUBLIC_KEY")" = "32" ] || fail "release-envelope public key must be exactly 32 raw Ed25519 bytes"
+for installed_package_tree in "$APP" "$TRUST_ROOT" "$BOOTSTRAP_ROOT"; do
+  require_safe_package_tree_structure "$installed_package_tree"
+done
+require_tree_without_extended_acl "$APP"
+for installed_package_leaf in "$BROKER" "$VERIFIER" "$LAUNCHD_PLIST"; do
+  require_safe_package_leaf_structure "$installed_package_leaf"
+done
+
+find_unused_directory_id() {
+  local candidate=499
+  local user_ids group_ids
+  user_ids="$(/usr/bin/dscl . -list /Users UniqueID)"
+  group_ids="$(/usr/bin/dscl . -list /Groups PrimaryGroupID)"
+  while [ "$candidate" -ge 400 ]; do
+    if ! /usr/bin/awk -v value="$candidate" '$2 == value { found=1 } END { exit found ? 0 : 1 }' <<<"$user_ids" && \
+       ! /usr/bin/awk -v value="$candidate" '$2 == value { found=1 } END { exit found ? 0 : 1 }' <<<"$group_ids"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    candidate=$((candidate - 1))
+  done
+  return 1
+}
+
+read_directory_value() {
+  local record="$1"
+  local key="$2"
+  { /usr/bin/dscl . -read "$record" "$key" 2>/dev/null || true; } | \
+    /usr/bin/awk -v key="$key:" '$1 == key { $1=""; sub(/^ /, ""); print; exit }'
+}
+
+ensure_directory_value() {
+  local record="$1"
+  local key="$2"
+  local expected="$3"
+  local label="$4"
+  local actual
+  if /usr/bin/dscl . -read "$record" "$key" >/dev/null 2>&1; then
+    actual="$(read_directory_value "$record" "$key")"
+    [ "$actual" = "$expected" ] || fail "$label has an unexpected existing value"
+  else
+    /usr/bin/dscl . -create "$record" "$key" "$expected"
+  fi
+}
+
+validate_numeric_system_id() {
+  local label="$1"
+  local value="$2"
+  case "$value" in ''|*[!0-9]*) fail "$label is not numeric" ;; esac
+  [ "$value" -ge 400 ] && [ "$value" -le 499 ] || fail "$label is outside the reserved verifier range"
+}
+
+validate_verifier_group() {
+  local gid real_name password members member_ids
+  gid="$(read_directory_value "/Groups/${VERIFIER_GROUP}" PrimaryGroupID)"
+  real_name="$(read_directory_value "/Groups/${VERIFIER_GROUP}" RealName)"
+  password="$(read_directory_value "/Groups/${VERIFIER_GROUP}" Password)"
+  members="$(read_directory_value "/Groups/${VERIFIER_GROUP}" GroupMembership)"
+  member_ids="$(read_directory_value "/Groups/${VERIFIER_GROUP}" GroupMembers)"
+  validate_numeric_system_id "verifier group PrimaryGroupID" "$gid"
+  [ "$real_name" = "Recordings Artifact Verifier" ] || fail "existing verifier group has an unexpected RealName"
+  case "$password" in \**|\*\*\** ) ;; *) fail "existing verifier group is not password-disabled" ;; esac
+  [ -z "$members" ] && [ -z "$member_ids" ] || fail "verifier group must not grant supplementary membership"
+  printf '%s\n' "$gid"
+}
+
+validate_verifier_user() {
+  local expected_gid="$1"
+  local uid real_name password hidden
+  uid="$(read_directory_value "/Users/${VERIFIER_USER}" UniqueID)"
+  real_name="$(read_directory_value "/Users/${VERIFIER_USER}" RealName)"
+  password="$(read_directory_value "/Users/${VERIFIER_USER}" Password)"
+  hidden="$(read_directory_value "/Users/${VERIFIER_USER}" IsHidden)"
+  validate_numeric_system_id "verifier user UniqueID" "$uid"
+  [ "$real_name" = "Recordings Artifact Verifier" ] || fail "existing verifier account has an unexpected RealName"
+  case "$password" in \**|\*\*\** ) ;; *) fail "existing verifier account is not password-disabled" ;; esac
+  [ "$hidden" = "1" ] || fail "existing verifier account is not hidden"
+  [ "$(read_directory_value "/Users/${VERIFIER_USER}" UserShell)" = "/usr/bin/false" ] || \
+    fail "existing verifier account has an interactive shell"
+  [ "$(read_directory_value "/Users/${VERIFIER_USER}" NFSHomeDirectory)" = "/var/empty" ] || \
+    fail "existing verifier account has an unexpected home"
+  [ "$(read_directory_value "/Users/${VERIFIER_USER}" PrimaryGroupID)" = "$expected_gid" ] || \
+    fail "existing verifier account has an unexpected primary group"
+}
+
+if ! /usr/bin/dscl . -read "/Groups/${VERIFIER_GROUP}" >/dev/null 2>&1; then
+  /usr/bin/dscl . -create "/Groups/${VERIFIER_GROUP}"
+fi
+echo "Recordings updater will repair interrupted verifier group initialization when expected attributes are absent." >&2
+ensure_directory_value "/Groups/${VERIFIER_GROUP}" RealName "Recordings Artifact Verifier" "verifier group RealName"
+if /usr/bin/dscl . -read "/Groups/${VERIFIER_GROUP}" Password >/dev/null 2>&1; then
+  verifier_group_password="$(read_directory_value "/Groups/${VERIFIER_GROUP}" Password)"
+  case "$verifier_group_password" in \**|\*\*\** ) ;; *) fail "existing verifier group is not password-disabled" ;; esac
+else
+  /usr/bin/dscl . -create "/Groups/${VERIFIER_GROUP}" Password "*"
+fi
+if /usr/bin/dscl . -read "/Groups/${VERIFIER_GROUP}" PrimaryGroupID >/dev/null 2>&1; then
+  verifier_gid="$(read_directory_value "/Groups/${VERIFIER_GROUP}" PrimaryGroupID)"
+  validate_numeric_system_id "verifier group PrimaryGroupID" "$verifier_gid"
+else
+  verifier_gid="$(find_unused_directory_id)" || fail "no unused system account ID is available"
+  /usr/bin/dscl . -create "/Groups/${VERIFIER_GROUP}" PrimaryGroupID "$verifier_gid"
+fi
+verifier_gid="$(validate_verifier_group)"
+
+if ! /usr/bin/dscl . -read "/Users/${VERIFIER_USER}" >/dev/null 2>&1; then
+  /usr/bin/dscl . -create "/Users/${VERIFIER_USER}"
+fi
+echo "Recordings updater will repair interrupted verifier account initialization when expected attributes are absent." >&2
+ensure_directory_value "/Users/${VERIFIER_USER}" RealName "Recordings Artifact Verifier" "verifier account RealName"
+if /usr/bin/dscl . -read "/Users/${VERIFIER_USER}" Password >/dev/null 2>&1; then
+  verifier_user_password="$(read_directory_value "/Users/${VERIFIER_USER}" Password)"
+  case "$verifier_user_password" in \**|\*\*\** ) ;; *) fail "existing verifier account is not password-disabled" ;; esac
+else
+  /usr/bin/dscl . -create "/Users/${VERIFIER_USER}" Password "*"
+fi
+if /usr/bin/dscl . -read "/Users/${VERIFIER_USER}" UniqueID >/dev/null 2>&1; then
+  verifier_uid="$(read_directory_value "/Users/${VERIFIER_USER}" UniqueID)"
+  validate_numeric_system_id "verifier user UniqueID" "$verifier_uid"
+else
+  verifier_uid="$(find_unused_directory_id)" || fail "no unused system account ID is available"
+  /usr/bin/dscl . -create "/Users/${VERIFIER_USER}" UniqueID "$verifier_uid"
+fi
+ensure_directory_value "/Users/${VERIFIER_USER}" PrimaryGroupID "$verifier_gid" "verifier account PrimaryGroupID"
+ensure_directory_value "/Users/${VERIFIER_USER}" UserShell "/usr/bin/false" "verifier account UserShell"
+ensure_directory_value "/Users/${VERIFIER_USER}" NFSHomeDirectory "/var/empty" "verifier account NFSHomeDirectory"
+ensure_directory_value "/Users/${VERIFIER_USER}" IsHidden 1 "verifier account IsHidden"
+validate_verifier_user "$verifier_gid"
+
+/bin/mkdir -p \
+  "$STATE_ROOT/staging" \
+  "$STATE_ROOT/journal" \
+  "$STATE_ROOT/rollback" \
+  "$TRUST_ROOT/envelope-keys" \
+  "/var/db/com.hasna.recordings.updater"
+for created_directory in \
+  "$STATE_ROOT" \
+  "$STATE_ROOT/staging" \
+  "$STATE_ROOT/journal" \
+  "$STATE_ROOT/rollback" \
+  "$TRUST_ROOT" \
+  "$TRUST_ROOT/envelope-keys" \
+  "$BOOTSTRAP_ROOT" \
+  "/var/db/com.hasna.recordings.updater"; do
+  require_root_owned_nonwritable_directory "$created_directory"
+done
+
+# Re-prove the complete recursive targets immediately before mutation. Strip
+# ACLs one target at a time and revalidate that target before proceeding.
+for package_owned_tree in \
+  "$STATE_ROOT" \
+  "$TRUST_ROOT" \
+  "$BOOTSTRAP_ROOT" \
+  "/var/db/com.hasna.recordings.updater"; do
+  require_safe_package_tree_structure "$package_owned_tree"
+  /bin/chmod -RN "$package_owned_tree"
+  require_tree_without_extended_acl "$package_owned_tree"
+done
+for package_owned_leaf in "$BROKER" "$VERIFIER" "$LAUNCHD_PLIST"; do
+  require_safe_package_leaf_structure "$package_owned_leaf"
+  /bin/chmod -N "$package_owned_leaf"
+  require_no_extended_acl "$package_owned_leaf"
+done
+/usr/sbin/chown -R root:wheel "$STATE_ROOT" "$TRUST_ROOT" "$BOOTSTRAP_ROOT" "/var/db/com.hasna.recordings.updater"
+/usr/sbin/chown root:wheel "$BROKER" "$VERIFIER" "$PUBLIC_KEY" "$BROKER_POLICY" "$VERIFIER_SANDBOX" "$BOOTSTRAP_MARKER" "$LAUNCHD_PLIST"
+/bin/chmod 0555 "$BROKER" "$VERIFIER"
+[ "$(/usr/bin/stat -f '%Lp' "$CLIENT")" = "755" ] || fail "package update client mode is not 0755"
+/bin/chmod 0700 "$STATE_ROOT" "$STATE_ROOT/staging" "$STATE_ROOT/journal" "$STATE_ROOT/rollback"
+/bin/chmod 0700 "/var/db/com.hasna.recordings.updater"
+/bin/chmod 0755 "$TRUST_ROOT"
+/bin/chmod 0755 "$TRUST_ROOT/envelope-keys"
+/bin/chmod 0444 "$PUBLIC_KEY" "$BROKER_POLICY" "$VERIFIER_SANDBOX" "$BOOTSTRAP_MARKER" "$LAUNCHD_PLIST"
+
+for package_owned_tree in \
+  "$APP" \
+  "$STATE_ROOT" \
+  "$TRUST_ROOT" \
+  "$BOOTSTRAP_ROOT" \
+  "/var/db/com.hasna.recordings.updater"; do
+  require_tree_without_extended_acl "$package_owned_tree"
+done
+for package_owned_leaf in "$BROKER" "$VERIFIER" "$LAUNCHD_PLIST"; do
+  require_no_extended_acl "$package_owned_leaf"
+done
+
+/usr/bin/plutil -lint "$LAUNCHD_PLIST" >/dev/null
+/usr/bin/plutil -lint "$BROKER_POLICY" >/dev/null
+/usr/bin/plutil -lint "$BOOTSTRAP_MARKER" >/dev/null
+EXPECTED_TEAM_ID="$(/usr/bin/plutil -extract signing_team_identifier raw -o - "$BROKER_POLICY")"
+[[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || fail "broker policy TeamIdentifier is invalid"
+[ "$(/usr/bin/plutil -extract lifecycle raw -o - "$BROKER_POLICY")" = "bootstrap-v1-app-updates-only" ] || \
+  fail "broker policy lifecycle is unsupported"
+[ "$(/usr/bin/plutil -extract root_maintenance_supported raw -o - "$BROKER_POLICY")" = "false" ] || \
+  fail "broker policy must disable root maintenance"
+[ "$(/usr/bin/plutil -extract key_rotation_supported raw -o - "$BROKER_POLICY")" = "false" ] || \
+  fail "broker policy must disable key rotation"
+[ "$(/usr/bin/plutil -extract initial_key_epoch raw -o - "$BROKER_POLICY")" = "$key_epoch" ] || \
+  fail "broker policy initial key epoch does not match the bootstrap"
+[ "$(/usr/bin/plutil -extract allowed_key_epochs.0 raw -o - "$BROKER_POLICY")" = "$key_epoch" ] || \
+  fail "broker policy does not pin the bootstrap key epoch"
+[ "$(/usr/bin/plutil -extract allowed_key_epochs json -o - "$BROKER_POLICY" | /usr/bin/tr -d '[:space:]')" = "[${key_epoch}]" ] || \
+  fail "broker policy authorizes unsupported key-epoch transitions"
+[ "$(/usr/bin/plutil -extract lifecycle raw -o - "$BOOTSTRAP_MARKER")" = "bootstrap-v1-app-updates-only" ] || \
+  fail "bootstrap marker lifecycle is unsupported"
+[ "$(/usr/bin/plutil -extract root_maintenance_supported raw -o - "$BOOTSTRAP_MARKER")" = "false" ] || \
+  fail "bootstrap marker must disable root maintenance"
+[ "$(/usr/bin/plutil -extract key_rotation_supported raw -o - "$BOOTSTRAP_MARKER")" = "false" ] || \
+  fail "bootstrap marker must disable key rotation"
+
+verify_entitlement_allowlist() {
+  local code_path="$1"
+  local policy="$2"
+  local entitlement_plist
+  entitlement_plist="$(/usr/bin/mktemp -t recordings-entitlements)"
+  if ! /usr/bin/codesign -d --entitlements :- "$code_path" >"$entitlement_plist" 2>/dev/null || \
+     [ ! -s "$entitlement_plist" ]; then
+    /bin/rm -f "$entitlement_plist"
+    [ "$policy" = "none" ] || fail "$code_path is missing required entitlements"
+    return 0
+  fi
+  /usr/bin/plutil -lint "$entitlement_plist" >/dev/null || fail "$code_path has malformed signed entitlements"
+  case "$policy" in
+    app)
+      [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$entitlement_plist")" = "false" ] || fail "$code_path app sandbox entitlement changed"
+      [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$entitlement_plist")" = "true" ] || fail "$code_path audio entitlement changed"
+      [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.automation.apple-events' "$entitlement_plist")" = "true" ] || fail "$code_path automation entitlement changed"
+      /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.app-sandbox' "$entitlement_plist"
+      /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.device.audio-input' "$entitlement_plist"
+      /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.automation.apple-events' "$entitlement_plist"
+      ;;
+    verifier)
+      [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.allow-jit' "$entitlement_plist")" = "true" ] || fail "$code_path JIT entitlement changed"
+      [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.allow-unsigned-executable-memory' "$entitlement_plist")" = "true" ] || fail "$code_path executable-memory entitlement changed"
+      /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.cs.allow-jit' "$entitlement_plist"
+      /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.cs.allow-unsigned-executable-memory' "$entitlement_plist"
+      ;;
+    none) ;;
+    *) fail "unknown entitlement policy" ;;
+  esac
+  remaining="$(/usr/libexec/PlistBuddy -c Print "$entitlement_plist" | /usr/bin/tr -d '[:space:]')"
+  /bin/rm -f "$entitlement_plist"
+  [ "$remaining" = "Dict{}" ] || fail "$code_path has entitlements outside its allowlist"
+}
+
+verify_release_code() {
+  local code_path="$1"
+  local expected_identifier="$2"
+  local entitlement_policy="$3"
+  local details authority team identifier timestamp flags
+  /usr/bin/codesign --verify --strict --all-architectures --verbose=2 "$code_path"
+  details="$(/usr/bin/codesign -d --verbose=4 "$code_path" 2>&1)"
+  authority="$(printf '%s\n' "$details" | /usr/bin/awk -F= '/^Authority=/ { print $2; exit }')"
+  team="$(printf '%s\n' "$details" | /usr/bin/awk -F= '/^TeamIdentifier=/ { print $2; exit }')"
+  identifier="$(printf '%s\n' "$details" | /usr/bin/awk -F= '/^Identifier=/ { print $2; exit }')"
+  timestamp="$(printf '%s\n' "$details" | /usr/bin/awk -F= '/^Timestamp=/ { print $2; exit }')"
+  flags="$(printf '%s\n' "$details" | /usr/bin/sed -n 's/^CodeDirectory .*flags=[^(]*(\([^)]*\)).*/\1/p' | /usr/bin/head -n 1)"
+  [[ "$authority" == "Developer ID Application:"* ]] || fail "$code_path is not Developer ID Application signed"
+  [ "$team" = "$EXPECTED_TEAM_ID" ] || fail "$code_path has an unexpected TeamIdentifier"
+  [ "$identifier" = "$expected_identifier" ] || fail "$code_path has an unexpected signing identifier"
+  case ",$flags," in *,runtime,*) ;; *) fail "$code_path lacks hardened runtime" ;; esac
+  case "$timestamp" in ''|none|None|NONE) fail "$code_path lacks a trusted timestamp" ;; esac
+  verify_entitlement_allowlist "$code_path" "$entitlement_policy"
+}
+
+verify_release_code "$BROKER" "com.hasna.recordings.updater" none
+verify_release_code "$CLIENT" "com.hasna.recordings.update-client" none
+verify_release_code "$VERIFIER" "com.hasna.recordings.artifact-verifier" verifier
+verify_release_code "$APP" "com.hasna.recordings" app
+/usr/bin/codesign --verify --deep --strict --all-architectures --verbose=2 "$APP"
+
+# Close the ancestry-check-to-launch window after all package mutations and
+# code validation. An ACL added anywhere in the launch path aborts bootstrap.
+require_managed_applications_directory
+for launch_ancestor in \
+  "/" \
+  "/Library" \
+  "/Library/Application Support" \
+  "/Library/Application Support/Hasna" \
+  "/Library/Application Support/Hasna/Recordings" \
+  "/Library/PrivilegedHelperTools" \
+  "/Library/LaunchDaemons" \
+  "/private" \
+  "/private/var" \
+  "/private/var/db"; do
+  require_root_owned_nonwritable_directory "$launch_ancestor"
+done
+require_expected_var_link
+for launch_tree in "$APP" "$STATE_ROOT" "$TRUST_ROOT" "$BOOTSTRAP_ROOT" "/var/db/com.hasna.recordings.updater"; do
+  require_tree_without_extended_acl "$launch_tree"
+done
+for launch_leaf in "$BROKER" "$VERIFIER" "$LAUNCHD_PLIST"; do
+  require_no_extended_acl "$launch_leaf"
+done
+
+if ! /bin/launchctl print system/com.hasna.recordings.updater >/dev/null 2>&1; then
+  /bin/launchctl bootstrap system "$LAUNCHD_PLIST"
+fi
+/bin/launchctl enable system/com.hasna.recordings.updater
+/bin/launchctl kickstart -k system/com.hasna.recordings.updater
+/bin/launchctl print system/com.hasna.recordings.updater >/dev/null
+
+# The external signed bootstrap envelope is generated only after the final PKG
+# is stapled, because it binds that exact PKG digest. Managed deployment passes
+# that sidecar to the broker after Installer succeeds. Postinstall deliberately
+# leaves release-state.json absent; until bootstrap initialization completes the
+# broker is status-only and rejects every update request.
+[ ! -e "/var/db/com.hasna.recordings.updater/release-state.json" ] || \
+  fail "a bootstrap PKG must not overwrite existing anti-rollback state"

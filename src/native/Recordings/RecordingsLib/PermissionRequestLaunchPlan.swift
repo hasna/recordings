@@ -5,6 +5,8 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
     public let opensPermissionSettings: Bool
     public let runtimeSmokeMode: String?
     public let runtimeSmokeOutputPath: String?
+    public let runtimeSmokeAcknowledgementPath: String?
+    public let runtimeSmokeCompletionPath: String?
 
     public var isRuntimeSmoke: Bool { runtimeSmokeMode != nil }
     public var installsGlobalHandlers: Bool { !isHelper && !isRuntimeSmoke }
@@ -21,6 +23,14 @@ public struct PermissionRequestLaunchPlan: Sendable, Equatable {
         opensPermissionSettings = isHelper && arguments.contains("--open-permission-settings")
         runtimeSmokeMode = Self.optionValue("--runtime-smoke", arguments: arguments)
         runtimeSmokeOutputPath = Self.optionValue("--runtime-smoke-output", arguments: arguments)
+        runtimeSmokeAcknowledgementPath = Self.optionValue(
+            "--runtime-smoke-ack",
+            arguments: arguments
+        )
+        runtimeSmokeCompletionPath = Self.optionValue(
+            "--runtime-smoke-completion",
+            arguments: arguments
+        )
     }
 
     private static func optionValue(_ name: String, arguments: [String]) -> String? {

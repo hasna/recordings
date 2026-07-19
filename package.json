@@ -35,6 +35,7 @@
     "build:mcp": "bun build src/mcp/index.ts --target=bun --outfile=dist/mcp/index.js --external=@modelcontextprotocol/sdk --external=openai",
     "build:serve": "bun build src/server/index.ts --target=bun --outfile=dist/server/index.js --external=@modelcontextprotocol/sdk --external=@hasna/contracts --external=openai --external=pg",
     "build:lib": "bun build src/index.ts src/storage.ts src/sdk/index.ts --target=bun --outdir=dist --external=openai",
+    "build:native-fs-guard": "/bin/bash scripts/build_native_fs_guard.sh",
     "generate:sdk": "bun run scripts/generate-sdk.ts",
     "migrate": "bun run scripts/migrate.ts",
     "typecheck": "tsc --noEmit",
@@ -43,7 +44,7 @@
     "dev:cli": "bun run src/cli/index.ts",
     "dev:mcp": "bun run src/mcp/index.ts",
     "verify:release": "bun run scripts/release-guard.ts",
-    "prepack": "bun run build && bun run verify:release",
+    "prepack": "bun run build:native-fs-guard && bun run build && bun run verify:release",
     "prepublishOnly": "bun run typecheck && bun run test"
   },
   "files": [
@@ -54,9 +55,11 @@
     "src/native/Recordings/App/",
     "src/native/Recordings/RecordingsLib/",
     "src/native/Recordings/RecordingsTests/",
+    "src/native/Recordings/Updater/",
     "src/native/Recordings/Package.swift",
     "src/native/Recordings/Package.resolved",
     "src/native/Recordings/build.sh",
+    "packaging/macos/",
     "README.md",
     "LICENSE"
   ],
@@ -73,6 +76,7 @@
   "devDependencies": {
     "@types/bun": "^1.2.5",
     "@types/pg": "^8.11.11",
+    "node-api-headers": "1.9.0",
     "typescript": "^5.8.2"
   },
   "publishConfig": {

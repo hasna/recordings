@@ -1,0 +1,297 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export LC_ALL=C
+export LANG=C
+export TZ=UTC0
+
+PACKAGE_BOOTSTRAP_ID="__RECORDINGS_PACKAGE_BOOTSTRAP_ID__"
+AUTHORIZATION_ROOT="/private/var/db/com.hasna.recordings.bootstrap-authorization"
+AUTHORIZATION_JOURNAL="${AUTHORIZATION_ROOT}/journal"
+AUTHORIZATION_NEXT="${AUTHORIZATION_ROOT}/.journal.next"
+STATE="/var/db/com.hasna.recordings.updater/release-state.json"
+VERIFIER_USER="_recordingsverify"
+VERIFIER_GROUP="_recordingsverify"
+
+[ "$(/usr/bin/id -u)" = "0" ] || {
+  echo "Recordings updater bootstrap must run as root through Installer or MDM." >&2
+  exit 1
+}
+
+path_exists_or_symlink() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+require_no_extended_acl() {
+  local path="$1"
+  local acl_listing acl_status
+  acl_listing="$(/bin/ls -lade "$path")" || {
+    echo "Recordings updater could not inspect target ACLs: $path" >&2
+    exit 1
+  }
+  if /usr/bin/printf '%s\n' "$acl_listing" | /usr/bin/awk '
+    NR == 1 && length($1) == 11 && substr($1, 11, 1) == "+" { found = 1 }
+    NR > 1 && $1 ~ /^[0-9]+:$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    echo "Recordings updater target trust path has an extended ACL: $path" >&2
+    exit 1
+  else
+    acl_status=$?
+    [ "$acl_status" -eq 1 ] || {
+      echo "Recordings updater could not evaluate target ACLs: $path" >&2
+      exit 1
+    }
+  fi
+}
+
+require_tree_without_extended_acl() {
+  local tree="$1"
+  local acl_listing acl_status
+  require_no_extended_acl "$tree"
+  [ -d "$tree" ] || return 0
+  acl_listing="$(/bin/ls -laeR "$tree")" || {
+    echo "Recordings updater could not recursively inspect target ACLs: $tree" >&2
+    exit 1
+  }
+  if /usr/bin/printf '%s\n' "$acl_listing" | /usr/bin/awk '
+    length($1) == 11 && substr($1, 11, 1) == "+" { found = 1 }
+    $1 ~ /^[0-9]+:$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    echo "Recordings updater target tree has an extended ACL: $tree" >&2
+    exit 1
+  else
+    acl_status=$?
+    [ "$acl_status" -eq 1 ] || {
+      echo "Recordings updater could not evaluate recursive target ACLs: $tree" >&2
+      exit 1
+    }
+  fi
+}
+
+require_root_owned_nonwritable_directory() {
+  local directory="$1"
+  local mode
+  [ -d "$directory" ] && [ ! -L "$directory" ] && \
+    [ "$(/usr/bin/stat -f '%u' "$directory")" = 0 ] || {
+    echo "Recordings updater target ancestry is missing, linked, or not root-owned: $directory" >&2
+    exit 1
+  }
+  mode="$(/usr/bin/stat -f '%Lp' "$directory")"
+  [ $((8#$mode & 8#022)) -eq 0 ] || {
+    echo "Recordings updater target ancestry is group/other writable: $directory" >&2
+    exit 1
+  }
+  require_no_extended_acl "$directory"
+}
+
+require_managed_applications_directory() {
+  local mode group_id
+  [ -d "/Applications" ] && [ ! -L "/Applications" ] && \
+    [ "$(/usr/bin/stat -f '%u' "/Applications")" = 0 ] || {
+    echo "Recordings updater requires a root-owned canonical /Applications directory." >&2
+    exit 1
+  }
+  require_no_extended_acl "/Applications"
+  mode="$(/usr/bin/stat -f '%Lp' "/Applications")"
+  group_id="$(/usr/bin/stat -f '%g' "/Applications")"
+  case "$mode:$group_id" in
+    755:*|775:80) ;;
+    *) echo "Recordings updater requires ACL-free /Applications mode 0755 or root:admin mode 0775." >&2; exit 1 ;;
+  esac
+}
+
+require_expected_var_link() {
+  local var_target
+  [ -L "/var" ] || { echo "Recordings updater requires the canonical macOS /var system link." >&2; exit 1; }
+  var_target="$(/usr/bin/readlink "/var")" || { echo "Recordings updater could not inspect the macOS /var system link." >&2; exit 1; }
+  [ "$var_target" = "private/var" ] && \
+    [ "$(cd "/var" && /bin/pwd -P)" = "/private/var" ] || {
+    echo "Recordings updater found a noncanonical macOS /var system link." >&2
+    exit 1
+  }
+}
+
+read_journal_value() {
+  local key="$1"
+  /usr/bin/awk -F= -v key="$key" '
+    $1 == key { count += 1; value = substr($0, length(key) + 2) }
+    END { if (count != 1) exit 1; print value }
+  ' "$AUTHORIZATION_JOURNAL"
+}
+
+require_authorization_journal() {
+  path_exists_or_symlink "$AUTHORIZATION_ROOT" && \
+    [ -d "$AUTHORIZATION_ROOT" ] && [ ! -L "$AUTHORIZATION_ROOT" ] && \
+    [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$AUTHORIZATION_ROOT")" = "0:0:700" ] || {
+    echo "Recordings updater authorization evidence is missing or unsafe." >&2
+    exit 1
+  }
+  [ -f "$AUTHORIZATION_JOURNAL" ] && [ ! -L "$AUTHORIZATION_JOURNAL" ] && \
+    [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$AUTHORIZATION_JOURNAL")" = "0:0:400" ] && \
+    [ "$(/usr/bin/stat -f '%l' "$AUTHORIZATION_JOURNAL")" = "1" ] && \
+    [ "$(/usr/bin/wc -l <"$AUTHORIZATION_JOURNAL" | /usr/bin/tr -d ' ')" = "6" ] || {
+    echo "Recordings updater authorization journal is missing or unsafe." >&2
+    exit 1
+  }
+  require_no_extended_acl "$AUTHORIZATION_ROOT"
+  require_no_extended_acl "$AUTHORIZATION_JOURNAL"
+  [ "$(read_journal_value schema_version)" = "1" ] || { echo "Recordings updater authorization journal schema is invalid." >&2; exit 1; }
+  JOURNAL_PHASE="$(read_journal_value phase)"
+  JOURNAL_PACKAGE_SHA256="$(read_journal_value package_sha256)"
+  JOURNAL_PACKAGE_BOOTSTRAP_ID="$(read_journal_value package_bootstrap_id)"
+  JOURNAL_INSTALLER_TEAM_ID="$(read_journal_value installer_team_id)"
+  JOURNAL_INSTALLER_CERTIFICATE_SHA256="$(read_journal_value installer_certificate_sha256)"
+  [[ "$JOURNAL_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] && \
+    [[ "$JOURNAL_PACKAGE_BOOTSTRAP_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && \
+    [[ "$JOURNAL_INSTALLER_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] && \
+    [[ "$JOURNAL_INSTALLER_CERTIFICATE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Recordings updater authorization journal values are malformed." >&2
+    exit 1
+  }
+  [ "$JOURNAL_PACKAGE_BOOTSTRAP_ID" = "$PACKAGE_BOOTSTRAP_ID" ] || {
+    echo "Recordings updater authorization journal belongs to a different authenticated package." >&2
+    exit 1
+  }
+}
+
+write_authorization_phase() {
+  local phase="$1"
+  local replacement
+  replacement="$AUTHORIZATION_NEXT"
+  if path_exists_or_symlink "$replacement"; then
+    [ -f "$replacement" ] && [ ! -L "$replacement" ] && \
+      [ "$(/usr/bin/stat -f '%u:%g' "$replacement")" = "0:0" ] && \
+      [ "$(/usr/bin/stat -f '%l' "$replacement")" = "1" ] || {
+      echo "Recordings updater authorization journal staging is unsafe." >&2
+      exit 1
+    }
+    case "$(/usr/bin/stat -f '%Lp' "$replacement")" in 400|600) ;; *) echo "Recordings updater authorization journal staging mode is unsafe." >&2; exit 1 ;; esac
+    require_no_extended_acl "$replacement"
+    /bin/rm -f "$replacement"
+  fi
+  /usr/bin/printf 'schema_version=1\nphase=%s\npackage_sha256=%s\npackage_bootstrap_id=%s\ninstaller_team_id=%s\ninstaller_certificate_sha256=%s\n' \
+    "$phase" "$JOURNAL_PACKAGE_SHA256" "$JOURNAL_PACKAGE_BOOTSTRAP_ID" \
+    "$JOURNAL_INSTALLER_TEAM_ID" "$JOURNAL_INSTALLER_CERTIFICATE_SHA256" >"$replacement"
+  /usr/sbin/chown root:wheel "$replacement"
+  /bin/chmod -N "$replacement"
+  /bin/chmod 0400 "$replacement"
+  require_no_extended_acl "$replacement"
+  /bin/mv -f "$replacement" "$AUTHORIZATION_JOURNAL"
+  /bin/sync
+}
+
+require_safe_existing_cohort_path() {
+  local path="$1"
+  local expected_mode="$2"
+  local entry listing device mode owner links invalid=0
+  [ ! -L "$path" ] && [ "$(/usr/bin/stat -f '%u' "$path")" = "0" ] || {
+    echo "Recordings updater authorized exact-package repair found linked or non-root-owned cohort evidence: $path" >&2
+    exit 1
+  }
+  mode="$(/usr/bin/stat -f '%Lp' "$path")"
+  case "$expected_mode:$mode" in
+    "$mode:$mode"|700-or-755:700|700-or-755:755) ;;
+    *)
+      echo "Recordings updater authorized exact-package repair found cohort mode drift: $path" >&2
+      exit 1
+      ;;
+  esac
+  require_tree_without_extended_acl "$path"
+  if [ -f "$path" ]; then
+    [ "$(/usr/bin/stat -f '%l' "$path")" = "1" ] || { echo "Recordings updater cohort evidence is hard-linked: $path" >&2; exit 1; }
+    return
+  fi
+  [ -d "$path" ] || { echo "Recordings updater cohort evidence is not a regular file or directory: $path" >&2; exit 1; }
+  listing="$(/usr/bin/mktemp -t recordings-preinstall-cohort)"
+  device="$(/usr/bin/stat -f '%d' "$path")"
+  /usr/bin/find -x "$path" -print0 >"$listing" || { /bin/rm -f "$listing"; exit 1; }
+  while IFS= read -r -d '' entry; do
+    owner="$(/usr/bin/stat -f '%u' "$entry")" || { invalid=1; break; }
+    mode="$(/usr/bin/stat -f '%Lp' "$entry")" || { invalid=1; break; }
+    [ ! -L "$entry" ] && [ "$owner" = "0" ] && \
+      [ "$(/usr/bin/stat -f '%d' "$entry")" = "$device" ] && \
+      [ $((8#$mode & 8#022)) -eq 0 ] || { invalid=1; break; }
+    if [ -f "$entry" ]; then
+      links="$(/usr/bin/stat -f '%l' "$entry")" || { invalid=1; break; }
+      [ "$links" = "1" ] || { invalid=1; break; }
+    elif [ ! -d "$entry" ]; then
+      invalid=1
+      break
+    fi
+  done <"$listing"
+  /bin/rm -f "$listing"
+  [ "$invalid" -eq 0 ] || { echo "Recordings updater authorized exact-package repair found unsafe cohort structure: $path" >&2; exit 1; }
+}
+
+require_expected_var_link
+require_managed_applications_directory
+for required_ancestor in \
+  "/" "/Library" "/Library/Application Support" "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons" \
+  "/private" "/private/var" "/private/var/db"; do
+  require_root_owned_nonwritable_directory "$required_ancestor"
+done
+for optional_ancestor in "/Library/Application Support/Hasna" "/Library/Application Support/Hasna/Recordings"; do
+  if path_exists_or_symlink "$optional_ancestor"; then require_root_owned_nonwritable_directory "$optional_ancestor"; fi
+done
+
+require_authorization_journal
+path_exists_or_symlink "$STATE" && {
+  echo "Recordings uses an immutable updater cohort; a bootstrap PKG cannot replace committed anti-rollback state." >&2
+  exit 1
+}
+
+COHORT_PATHS=(
+  "/Library/PrivilegedHelperTools/com.hasna.recordings.updater:555"
+  "/Library/PrivilegedHelperTools/com.hasna.recordings.artifact-verifier:555"
+  "/Library/LaunchDaemons/com.hasna.recordings.updater.plist:444"
+  "/Applications/Recordings.app:755"
+  "/Applications/Recordings.app/Contents/Helpers/recordings-update-client:755"
+  "/Library/Application Support/Hasna/Recordings/Trust:700-or-755"
+  "/Library/Application Support/Hasna/Recordings/Bootstrap:700"
+  "/Library/Application Support/Hasna/Recordings/Updates:700"
+  "/var/db/com.hasna.recordings.updater:700"
+)
+present_count=0
+for cohort_spec in "${COHORT_PATHS[@]}"; do
+  cohort_path="${cohort_spec%:*}"
+  cohort_mode="${cohort_spec##*:}"
+  if path_exists_or_symlink "$cohort_path"; then
+    present_count=$((present_count + 1))
+    require_safe_existing_cohort_path "$cohort_path" "$cohort_mode"
+  fi
+done
+service_present=false
+if /bin/launchctl print system/com.hasna.recordings.updater >/dev/null 2>&1; then service_present=true; fi
+
+case "$JOURNAL_PHASE" in
+  authorized)
+    JOURNAL_PHASE="authorized"
+    [ "$present_count" -eq 0 ] && [ "$service_present" = false ] && \
+      ! /usr/bin/dscl . -read "/Groups/${VERIFIER_GROUP}" >/dev/null 2>&1 && \
+      ! /usr/bin/dscl . -read "/Users/${VERIFIER_USER}" >/dev/null 2>&1 || {
+      echo "Recordings updater found a partial updater cohort without exact-package authorization or another existing unrelated cohort." >&2
+      exit 1
+    }
+    write_authorization_phase "installer-started"
+    ;;
+  installer-started)
+    JOURNAL_PHASE="installer-started"
+    [ "$service_present" = false ] || {
+      echo "Recordings updater refuses Installer replay while the authorized service is already registered." >&2
+      exit 1
+    }
+    ;;
+  *) echo "Recordings updater authorization journal has an invalid phase." >&2; exit 1 ;;
+esac
+
+# This package remains an immutable, one-time bootstrap cohort. Only an
+# interrupted install bearing this exact signed-script identity may repair its
+# own partial updater cohort; all other replacement requires managed reprovisioning.
+if [ "$present_count" -gt 0 ]; then
+  echo "Recordings updater continuing authorized exact-package repair of a partial updater cohort." >&2
+fi
+# Once installed, only app-artifact updates are supported.

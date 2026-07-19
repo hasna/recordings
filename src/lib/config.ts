@@ -2,6 +2,10 @@ import { copyFileSync, existsSync, readFileSync, mkdirSync, readdirSync, realpat
 import { dirname, join, resolve, sep } from "path";
 import { homedir } from "os";
 import type { PostProcessingMode, RecordingsConfig } from "../types/index.js";
+import {
+  acquireLocalStoreReaderLease,
+  isGlobalRecordingsStatePath,
+} from "./install-maintenance.js";
 
 const POST_PROCESSING_MODES = new Set<PostProcessingMode>([
   "off",
@@ -301,10 +305,15 @@ export function getDataDir(): string {
 
   // Auto-migrate from old location without overwriting newer target files.
   if (existsSync(oldDir)) {
+    const releaseLease = acquireLocalStoreReaderLease();
     try {
-      mergeDirectoryContents(oldDir, newDir);
-    } catch {
-      // Fall through to use new dir
+      try {
+        if (existsSync(oldDir)) mergeDirectoryContents(oldDir, newDir);
+      } catch {
+        // Fall through to use new dir
+      }
+    } finally {
+      releaseLease();
     }
   }
 
@@ -428,12 +437,19 @@ function getHomeDir(): string {
 
 export function ensureDataDir(config: RecordingsConfig): void {
   const { mkdirSync } = require("fs") as typeof import("fs");
-  mkdirSync(config.audio_dir, { recursive: true });
-
-  // Ensure db directory exists
   const dbDir = config.db_path.substring(
     0,
     config.db_path.lastIndexOf("/")
   );
-  if (dbDir) mkdirSync(dbDir, { recursive: true });
+  const releaseLease = [config.audio_dir, dbDir]
+    .some((path) => path.length > 0 && isGlobalRecordingsStatePath(path))
+    ? acquireLocalStoreReaderLease()
+    : () => {};
+
+  try {
+    mkdirSync(config.audio_dir, { recursive: true });
+    if (dbDir) mkdirSync(dbDir, { recursive: true });
+  } finally {
+    releaseLease();
+  }
 }

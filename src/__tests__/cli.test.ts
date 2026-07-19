@@ -1,7 +1,29 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import {
+  createInstallerEnvironment,
+  resolveInstallBunExecutable,
+} from "../lib/bun-runtime.js";
+import {
+  assertExpectedReleaseHostname,
+  assertReleaseOnlyOptions,
+  parseLaunchTimeout,
+  prepareReleaseInstallInputs,
+} from "../lib/release-install-policy.js";
+import { createHash } from "node:crypto";
 
 const tempDirs: string[] = [];
 const cliEntry = join(process.cwd(), "src", "cli", "index.ts");
@@ -229,10 +251,12 @@ describe("recordings CLI", () => {
     expect(stderr).toBe("");
     expect(stdout).toContain("--artifact");
     expect(stdout).toContain("--manifest");
+    expect(stdout).toContain("--envelope");
     expect(stdout).toContain("--expected-team-id");
     expect(stdout).toContain("--manifest-sha256");
     expect(stdout).toContain("--expected-source-sha");
     expect(stdout).toContain("--expected-version");
+    expect(stdout).toContain("--expected-hostname");
     expect(stdout).toContain("--artifact-policy");
     expect(stdout).toContain("--approved-target");
     expect(stdout).toContain("--approved-target-identity-kind");
@@ -244,6 +268,188 @@ describe("recordings CLI", () => {
     expect(stdout).toContain("--launch");
     expect(stdout).not.toContain("--app-source");
     expect(stdout).not.toContain("--mode");
+  });
+
+  test("release install authenticates and snapshots exact manifest provenance before mutation", () => {
+    const root = mkdtempSync(join(tmpdir(), "open-recordings-release-policy-"));
+    tempDirs.push(root);
+    const sourceSha = "b".repeat(40);
+    const manifest = {
+      schema_version: 4,
+      artifact_type: "recordings-macos-app",
+      bundle_id: "com.hasna.recordings",
+      bundle_version: "0.2.13",
+      bundle_build_version: "213",
+      git_sha: sourceSha,
+      team_id: "EXAMPLE123",
+      architectures: ["arm64", "x86_64"],
+      minimum_macos: "14.0",
+      binding: { bundle_tree_sha256: "c".repeat(64) },
+      signing: {
+        team_id: "EXAMPLE123",
+        helper_team_id: "EXAMPLE123",
+        designated_requirement_sha256: "d".repeat(64),
+      },
+      archive: { sha256: "e".repeat(64) },
+    };
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
+    const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+    const envelope = {
+      payload: {
+        purpose: "update",
+        version: manifest.bundle_version,
+        build: manifest.bundle_build_version,
+        source_commit: sourceSha,
+        manifest_sha256: manifestSha256,
+        manifest_byte_count: manifestBytes.byteLength,
+        artifact_sha256: manifest.archive.sha256,
+        candidate_tree_sha256: manifest.binding.bundle_tree_sha256,
+        signing_team_identifier: "EXAMPLE123",
+      },
+      signature: Buffer.alloc(64, 7).toString("base64"),
+    };
+    const envelopeBytes = Buffer.from(`${JSON.stringify(envelope)}\n`);
+    const manifestPath = join(root, "release.manifest.json");
+    const envelopePath = join(root, "release.envelope.json");
+    writeFileSync(manifestPath, manifestBytes);
+    writeFileSync(envelopePath, envelopeBytes);
+
+    const prepared = prepareReleaseInstallInputs({
+      artifactPath: join(root, "Recordings.zip"),
+      manifestPath,
+      envelopePath,
+      manifestSha256,
+      expectedSourceSha: sourceSha,
+      expectedVersion: "0.2.13",
+      expectedTeamId: "EXAMPLE123",
+      snapshotRoot: root,
+    });
+
+    expect(prepared.manifestPath).not.toBe(manifestPath);
+    expect(prepared.envelopePath).not.toBe(envelopePath);
+    expect(readFileSync(prepared.manifestPath)).toEqual(manifestBytes);
+    expect(readFileSync(prepared.envelopePath)).toEqual(envelopeBytes);
+    prepared.cleanup();
+    expect(existsSync(prepared.manifestPath)).toBeFalse();
+  });
+
+  test("release install rejects every operator constraint mismatch before snapshot creation", () => {
+    const root = mkdtempSync(join(tmpdir(), "open-recordings-release-policy-reject-"));
+    tempDirs.push(root);
+    const sourceSha = "b".repeat(40);
+    const manifest = {
+      schema_version: 4,
+      artifact_type: "recordings-macos-app",
+      bundle_id: "com.hasna.recordings",
+      bundle_version: "0.2.13",
+      bundle_build_version: "213",
+      git_sha: sourceSha,
+      team_id: "EXAMPLE123",
+      architectures: ["arm64", "x86_64"],
+      minimum_macos: "14.0",
+      binding: { bundle_tree_sha256: "c".repeat(64) },
+      signing: {
+        team_id: "EXAMPLE123",
+        helper_team_id: "EXAMPLE123",
+        designated_requirement_sha256: "d".repeat(64),
+      },
+      archive: { sha256: "e".repeat(64) },
+    };
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+    const envelopePath = join(root, "release.envelope.json");
+    const manifestPath = join(root, "release.manifest.json");
+    writeFileSync(manifestPath, manifestBytes);
+    writeFileSync(envelopePath, JSON.stringify({
+      payload: {
+        purpose: "update",
+        version: manifest.bundle_version,
+        build: manifest.bundle_build_version,
+        source_commit: sourceSha,
+        manifest_sha256: manifestSha256,
+        manifest_byte_count: manifestBytes.byteLength,
+        artifact_sha256: manifest.archive.sha256,
+        candidate_tree_sha256: manifest.binding.bundle_tree_sha256,
+        signing_team_identifier: "EXAMPLE123",
+      },
+      signature: Buffer.alloc(64, 7).toString("base64"),
+    }));
+    const base = {
+      artifactPath: join(root, "Recordings.zip"),
+      manifestPath,
+      envelopePath,
+      manifestSha256,
+      expectedSourceSha: sourceSha,
+      expectedVersion: "0.2.13",
+      expectedTeamId: "EXAMPLE123",
+      snapshotRoot: root,
+    };
+
+    expect(() => prepareReleaseInstallInputs({ ...base, manifestSha256: "A".repeat(64) }))
+      .toThrow("manifest SHA-256 must be 64 lowercase hexadecimal characters");
+    expect(() => prepareReleaseInstallInputs({ ...base, expectedSourceSha: "B".repeat(40) }))
+      .toThrow("source SHA must be 40 lowercase hexadecimal characters");
+    expect(() => prepareReleaseInstallInputs({ ...base, expectedVersion: "v0.2.13" }))
+      .toThrow("release version is invalid");
+    expect(() => prepareReleaseInstallInputs({ ...base, expectedTeamId: "example123" }))
+      .toThrow("Team ID must be 10 uppercase alphanumeric characters");
+    expect(() => prepareReleaseInstallInputs({ ...base, manifestSha256: "f".repeat(64) }))
+      .toThrow("manifest does not match the operator-approved SHA-256");
+    expect(() => prepareReleaseInstallInputs({ ...base, expectedSourceSha: "a".repeat(40) }))
+      .toThrow("manifest source SHA does not match the operator-approved source");
+    expect(() => prepareReleaseInstallInputs({ ...base, expectedVersion: "0.2.14" }))
+      .toThrow("manifest version does not match the operator-approved version");
+    expect(() => prepareReleaseInstallInputs({ ...base, expectedTeamId: "EXAMPLE124" }))
+      .toThrow("manifest Team ID does not match the operator-approved Team ID");
+
+    const mismatchedEnvelope = JSON.parse(readFileSync(envelopePath, "utf8"));
+    mismatchedEnvelope.payload.source_commit = "a".repeat(40);
+    writeFileSync(envelopePath, JSON.stringify(mismatchedEnvelope));
+    expect(() => prepareReleaseInstallInputs(base))
+      .toThrow("release envelope does not match the operator-approved provenance");
+
+    const manifestLink = join(root, "manifest-link.json");
+    symlinkSync(manifestPath, manifestLink);
+    expect(() => prepareReleaseInstallInputs({ ...base, manifestPath: manifestLink })).toThrow();
+    expect(readdirSync(root).filter((name) => name.startsWith("recordings-release-install."))).toEqual([]);
+  });
+
+  test("release install rejects local-only and unsupported launch controls", () => {
+    expect(() => assertReleaseOnlyOptions({
+      approvedTarget: "station06",
+      approvedTargetIdentitySha256: "none",
+    })).toThrow("release installs require --approved-target fleet");
+    expect(() => assertReleaseOnlyOptions({
+      approvedTarget: "fleet",
+      approvedTargetIdentitySha256: "a".repeat(64),
+    })).toThrow("release installs reject local-only target identity controls");
+    expect(() => assertReleaseOnlyOptions({
+      approvedTarget: "fleet",
+      approvedTargetIdentitySha256: "none",
+      allowSigningIdentityMigration: true,
+    })).toThrow("release installs reject local-only signing migration controls");
+    expect(() => assertReleaseOnlyOptions({
+      approvedTarget: "fleet",
+      approvedTargetIdentitySha256: "none",
+      launch: true,
+    })).toThrow("release --launch is unsupported");
+    expect(() => assertReleaseOnlyOptions({
+      approvedTarget: "fleet",
+      approvedTargetIdentitySha256: "none",
+      launchTimeout: "10",
+    })).toThrow("release --launch-timeout is unsupported");
+  });
+
+  test("release hostname and local launch timeout policy are exact and bounded", () => {
+    expect(() => assertExpectedReleaseHostname("station02", "station02")).not.toThrow();
+    expect(() => assertExpectedReleaseHostname("station02", "station03"))
+      .toThrow("does not match the expected hostname");
+    expect(() => assertExpectedReleaseHostname("station02.local", "station02.local"))
+      .toThrow("expected hostname is invalid");
+    expect(parseLaunchTimeout(undefined)).toBe("10");
+    expect(parseLaunchTimeout("120")).toBe("120");
+    expect(() => parseLaunchTimeout("0")).toThrow("between 1 and 120 seconds");
+    expect(() => parseLaunchTimeout("1.5")).toThrow("between 1 and 120 seconds");
   });
 
   test("app install rejects non-macOS before inspecting artifact paths", async () => {
@@ -277,6 +483,205 @@ describe("recordings CLI", () => {
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain("only supported on macOS");
     expect(stderr).not.toContain("missing from package");
+  });
+
+  test("app install pins bash and forwards only a validated Bun executable", () => {
+    const cli = readFileSync("src/cli/index.ts", "utf8");
+    const installer = readFileSync("scripts/install_macos_app.sh", "utf8");
+    const installAction = cli.slice(
+      cli.indexOf('.command("install")'),
+      cli.indexOf('appCommand\n  .command("status")'),
+    );
+    expect(cli).toContain('spawnSync("/bin/bash", installerArgs');
+    expect(cli).toContain("resolveInstallBunExecutable(process.env)");
+    expect(cli).toContain("createInstallerEnvironment(process.env, bunExecutable)");
+    expect(installAction).toContain("getMacOSInstallerPath()");
+    expect(installAction).not.toContain("getMacOSAppStatus()");
+    expect(cli).toContain('spawnSync("/usr/bin/codesign"');
+    expect(cli).toContain('spawnSync("/usr/bin/sqlite3"');
+    expect(cli).not.toContain('key.startsWith("RECORDINGS_TEST_INSTALL_")');
+    expect(cli).not.toContain('spawnSync("bash", installerArgs');
+    expect(installer.startsWith("#!/bin/bash\n")).toBeTrue();
+    expect(cli.indexOf('process.platform !== "darwin"')).toBeLessThan(
+      cli.indexOf("resolveInstallBunExecutable(process.env)"),
+    );
+  });
+
+  test("installer environment removes Bash startup injection and test overrides", () => {
+    const sanitized = createInstallerEnvironment(
+      {
+        HOME: "/safe/home",
+        PATH: "/hostile/path",
+        BASH_ENV: "/hostile/bash-env",
+        ENV: "/hostile/env",
+        SHELLOPTS: "xtrace",
+        BASHOPTS: "extdebug",
+        CDPATH: "/hostile/cdpath",
+        GLOBIGNORE: "*",
+        BUN_OPTIONS: "--preload=/hostile/bun-preload.ts",
+        NODE_OPTIONS: "--require=/hostile/node-preload.cjs",
+        LD_PRELOAD: "/hostile/runtime.so",
+        DYLD_INSERT_LIBRARIES: "/hostile/runtime.dylib",
+        "BASH_FUNC_codesign%%": "() { printf hostile; }",
+        RECORDINGS_TEST_INSTALL_CODESIGN_EXECUTABLE: "/hostile/codesign",
+        RECORDINGS_API_URL: "http://127.0.0.1:9999",
+        LC_ALL: "fr_FR.UTF-8",
+        LANG: "de_DE.UTF-8",
+        TZ: "America/Los_Angeles",
+        RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "EXAMPLE123",
+        RECORDINGS_LOCK_STALE_SECONDS: "45",
+      },
+      "/trusted/bun",
+    );
+
+    expect(sanitized).toEqual({
+      HOME: "/safe/home",
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      LC_ALL: "C",
+      LANG: "C",
+      TZ: "UTC0",
+      RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "EXAMPLE123",
+      RECORDINGS_LOCK_STALE_SECONDS: "45",
+      RECORDINGS_BUN_EXECUTABLE: "/trusted/bun",
+    });
+  });
+
+  test("installer environment pins PATH instead of forwarding caller command resolution", () => {
+    const sanitized = createInstallerEnvironment(
+      {
+        HOME: "/safe/home",
+        PATH: "/tmp/attacker-bin:/opt/unreviewed/bin",
+      },
+      "/trusted/bun",
+    );
+
+    expect(sanitized.PATH).toBe("/usr/bin:/bin:/usr/sbin:/sbin");
+    expect(sanitized.PATH).not.toContain("attacker-bin");
+  });
+
+  test("installer environment cannot execute ambient Bun or Node preload controls", () => {
+    const root = mkdtempSync(join(tmpdir(), "open-recordings-installer-preload-"));
+    tempDirs.push(root);
+    const marker = join(root, "hostile-preload-ran");
+    const preload = join(root, "hostile-preload.ts");
+    writeFileSync(
+      preload,
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "hostile");\n`,
+    );
+
+    const environment = createInstallerEnvironment(
+      {
+        HOME: root,
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        BUN_OPTIONS: `--preload=${preload}`,
+        NODE_OPTIONS: `--require=${preload}`,
+      },
+      process.execPath,
+    );
+    const result = Bun.spawnSync(
+      [
+        "/bin/bash",
+        "-c",
+        '"$RECORDINGS_BUN_EXECUTABLE" -e \'process.stdout.write("ok")\'',
+      ],
+      { env: environment, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.stdout.toString()).toBe("ok");
+    expect(existsSync(marker)).toBeFalse();
+  });
+
+  test("compiled app install rejects itself as Bun and ignores a hostile PATH", () => {
+    const root = mkdtempSync(join(tmpdir(), "open-recordings-compiled-bun-"));
+    tempDirs.push(root);
+    const compiledCli = join(root, "recordings");
+    const compile = Bun.spawnSync(
+      [
+        process.execPath,
+        "build",
+        "--compile",
+        "--reject-unresolved",
+        "--no-compile-autoload-dotenv",
+        "--no-compile-autoload-bunfig",
+        "--no-compile-autoload-tsconfig",
+        "--no-compile-autoload-package-json",
+        cliEntry,
+        "--outfile",
+        compiledCli,
+      ],
+      { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
+    );
+    expect(compile.exitCode, compile.stderr.toString()).toBe(0);
+
+    const hostileBin = join(root, "hostile-bin");
+    const hostileMarker = join(root, "hostile-bun-ran");
+    mkdirSync(hostileBin);
+    writeFileSync(
+      join(hostileBin, "bun"),
+      `#!/bin/bash\nprintf hostile > ${JSON.stringify(hostileMarker)}\nexit 91\n`,
+    );
+    chmodSync(join(hostileBin, "bun"), 0o755);
+
+    const installArgs = [
+      "app",
+      "install",
+      "--artifact",
+      join(root, "missing-Recordings.zip"),
+      "--manifest",
+      join(root, "missing-Recordings.manifest.json"),
+      "--expected-team-id",
+      "EXAMPLE123",
+      "--manifest-sha256",
+      "a".repeat(64),
+      "--expected-source-sha",
+      "b".repeat(40),
+      "--expected-version",
+      "0.2.13",
+    ];
+    const baseEnvironment = (home: string) => {
+      const environment = {
+        ...process.env,
+        HOME: home,
+        PATH: `${hostileBin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      };
+      delete environment.RECORDINGS_BUN_EXECUTABLE;
+      return environment;
+    };
+    const runInstall = (environment: Record<string, string | undefined>) =>
+      Bun.spawnSync([compiledCli, ...installArgs], {
+        cwd: process.cwd(),
+        env: environment,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+    const selfHome = join(root, "self-home");
+    mkdirSync(selfHome);
+    const selfResult = runInstall({
+      ...baseEnvironment(selfHome),
+      RECORDINGS_BUN_EXECUTABLE: compiledCli,
+    });
+    expect(selfResult.exitCode).not.toBe(0);
+    expect(selfResult.stderr.toString()).toContain("only supported on macOS");
+    expect(existsSync(hostileMarker)).toBeFalse();
+
+    expect(() =>
+      resolveInstallBunExecutable(
+        { RECORDINGS_BUN_EXECUTABLE: compiledCli },
+        compiledCli,
+      ),
+    ).toThrow("not a validated general Bun interpreter");
+    expect(
+      resolveInstallBunExecutable(
+        { RECORDINGS_BUN_EXECUTABLE: process.execPath },
+        compiledCli,
+      ),
+    ).toBe(realpathSync(process.execPath));
+    expect(() => resolveInstallBunExecutable(baseEnvironment(selfHome), compiledCli)).toThrow(
+      "not a general Bun interpreter",
+    );
+    expect(existsSync(hostileMarker)).toBeFalse();
   });
 
   test("app status inspects the canonical app and reports legacy duplicates", async () => {

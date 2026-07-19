@@ -637,6 +637,10 @@ public final class RecordingEngine: ObservableObject {
     /// can never be attributed to a later recording.
     @Published public private(set) var conversationReply: ConversationReply?
     @Published public var recentTranscriptions: [TranscriptionResult] = []
+    /// Advances only after the CLI confirms that a recording has been persisted. The app
+    /// store observes this independently of the Record pane so asynchronous saves and
+    /// background recovery refresh the Library even after that pane has been unmounted.
+    @Published public private(set) var persistedRecordingRevision: UInt64 = 0
     @Published public var statusMessage = "Starting..."
     @Published public var isTranscribing = false
     @Published public var recordingDuration: TimeInterval = 0
@@ -1579,6 +1583,7 @@ public final class RecordingEngine: ObservableObject {
                             }
                         },
                         persistenceCompleted: { result in
+                            self.recordPersistenceCompletion(savedText: result.text)
                             if result.text == nil {
                                 self.recoverAsyncPersistenceFailure(
                                     error: result.error ?? "Realtime save returned no recording",
@@ -1605,6 +1610,7 @@ public final class RecordingEngine: ObservableObject {
                 }
 
                 let saveResult = await persist()
+                self.recordPersistenceCompletion(savedText: saveResult.text)
                 guard let savedText = saveResult.text else {
                     self.log("realtime fast-path save failed error=\(saveResult.error ?? "unknown")")
                     if let audioPath, FileManager.default.fileExists(atPath: audioPath) || self.writeCapturedWAV(to: audioPath) {
@@ -1769,6 +1775,13 @@ public final class RecordingEngine: ObservableObject {
             let result = await persist()
             persistenceCompleted(result)
         }
+    }
+
+    /// Publishes a monotonic completion event only for confirmed persistence. A failed
+    /// helper result must not make the Library appear current before recovery succeeds.
+    func recordPersistenceCompletion(savedText: String?) {
+        guard savedText != nil else { return }
+        persistedRecordingRevision &+= 1
     }
 
     public nonisolated static func shouldUseRealtimeFastPath(
@@ -2638,6 +2651,7 @@ public final class RecordingEngine: ObservableObject {
                 } else {
                     self.log("cli transcription succeeded chars=\(cliText?.count ?? 0)")
                 }
+                self.recordPersistenceCompletion(savedText: cliError == nil ? cliText : nil)
                 switch Self.fallbackCompletionAction(
                     cliText: cliText,
                     cliError: cliError,

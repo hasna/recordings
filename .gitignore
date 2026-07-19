@@ -1,4 +1,5 @@
 node_modules/
+scripts/native/prebuilds/
 dist/
 .build/
 .recordings/

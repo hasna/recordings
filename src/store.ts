@@ -29,6 +29,7 @@ import { saveFeedback as saveFeedbackLocal, type FeedbackInput } from "./db/feed
 import { resolveStorageClient, type StorageClient } from "./http/client.js";
 import { createHash, randomUUID } from "node:crypto";
 import { recordingCreateIdentity } from "./lib/recording-create-identity.js";
+import { withLocalStoreReaderLease } from "./lib/install-maintenance.js";
 
 export const APP = "recordings";
 
@@ -102,52 +103,54 @@ const localStore: Store = {
   mode: "local",
   baseUrl: null,
   async createRecording(input, idempotencyKey) {
-    return recordingsDb.createRecording(input, undefined, idempotencyKey);
+    return withLocalStoreReaderLease(() =>
+      recordingsDb.createRecording(input, undefined, idempotencyKey)
+    );
   },
   async getRecording(id) {
-    return recordingsDb.getRecording(id);
+    return withLocalStoreReaderLease(() => recordingsDb.getRecording(id));
   },
   async listRecordings(filter) {
-    return recordingsDb.listRecordings(filter);
+    return withLocalStoreReaderLease(() => recordingsDb.listRecordings(filter));
   },
   async countRecordings(filter) {
-    return recordingsDb.countRecordings(filter);
+    return withLocalStoreReaderLease(() => recordingsDb.countRecordings(filter));
   },
   async searchRecordings(query, filter) {
-    return recordingsDb.searchRecordings(query, filter);
+    return withLocalStoreReaderLease(() => recordingsDb.searchRecordings(query, filter));
   },
   async deleteRecording(id) {
-    return recordingsDb.deleteRecording(id);
+    return withLocalStoreReaderLease(() => recordingsDb.deleteRecording(id));
   },
   async getRecordingStats() {
-    return recordingsDb.getRecordingStats();
+    return withLocalStoreReaderLease(() => recordingsDb.getRecordingStats());
   },
   async registerAgent(name, description, role) {
-    return agentsDb.registerAgent(name, description, role);
+    return withLocalStoreReaderLease(() => agentsDb.registerAgent(name, description, role));
   },
   async getAgent(idOrName) {
-    return agentsDb.getAgent(idOrName);
+    return withLocalStoreReaderLease(() => agentsDb.getAgent(idOrName));
   },
   async listAgents() {
-    return agentsDb.listAgents();
+    return withLocalStoreReaderLease(() => agentsDb.listAgents());
   },
   async heartbeatAgent(idOrName) {
-    return agentsDb.heartbeatAgent(idOrName);
+    return withLocalStoreReaderLease(() => agentsDb.heartbeatAgent(idOrName));
   },
   async setAgentFocus(idOrName, projectId) {
-    return agentsDb.setAgentFocus(idOrName, projectId);
+    return withLocalStoreReaderLease(() => agentsDb.setAgentFocus(idOrName, projectId));
   },
   async registerProject(name, path, description) {
-    return projectsDb.registerProject(name, path, description);
+    return withLocalStoreReaderLease(() => projectsDb.registerProject(name, path, description));
   },
   async getProject(idOrPath) {
-    return projectsDb.getProject(idOrPath);
+    return withLocalStoreReaderLease(() => projectsDb.getProject(idOrPath));
   },
   async listProjects() {
-    return projectsDb.listProjects();
+    return withLocalStoreReaderLease(() => projectsDb.listProjects());
   },
   async saveFeedback(input) {
-    saveFeedbackLocal(input);
+    await withLocalStoreReaderLease(() => saveFeedbackLocal(input));
   },
 };
 

@@ -32,9 +32,11 @@ const roots = [
   "src/native/Recordings/App",
   "src/native/Recordings/RecordingsLib",
   "src/native/Recordings/RecordingsTests",
+  "src/native/Recordings/Updater",
   "src/native/Recordings/Package.swift",
   "src/native/Recordings/Package.resolved",
   "src/native/Recordings/build.sh",
+  "packaging/macos",
   "dist",
 ];
 

@@ -23,6 +23,12 @@ private final class PermissionRequestResultBox: @unchecked Sendable {
     }
 }
 
+private struct RuntimeSmokeCompletionResponse: Encodable, Sendable {
+    let challenge: String
+    let mode: String
+    let processIdentifier: Int32
+}
+
 /// Recordings — a full native macOS app. The main window is the Recordings workspace
 /// (record + library); the menu-bar surface, global shortcuts, and the intent-routed
 /// recording flow keep working while the window is in the background.
@@ -53,6 +59,8 @@ final class RecordingsAppState: ObservableObject {
     let runtimeSmokeProbe: RuntimeSmokeProbe?
     private let runtimeSmokeMode: String?
     private let runtimeSmokeOutputPath: String?
+    private let runtimeSmokeAcknowledgementPath: String?
+    private let runtimeSmokeCompletionPath: String?
     private var mainWindow: NSWindow?
     private(set) var windowCreationCount = 0
     private(set) var windowActivationCount = 0
@@ -61,6 +69,8 @@ final class RecordingsAppState: ObservableObject {
         declaresMenuBar = plan.declaresMenuBar
         runtimeSmokeMode = plan.runtimeSmokeMode
         runtimeSmokeOutputPath = plan.runtimeSmokeOutputPath
+        runtimeSmokeAcknowledgementPath = plan.runtimeSmokeAcknowledgementPath
+        runtimeSmokeCompletionPath = plan.runtimeSmokeCompletionPath
         runtimeSmokeProbe = plan.runtimeSmokeMode == "normal" ? RuntimeSmokeProbe() : nil
         if plan.installsGlobalHandlers {
             let store = RecordingsStore()
@@ -249,6 +259,37 @@ final class RecordingsAppState: ObservableObject {
         do {
             let data = try JSONEncoder().encode(result)
             try data.write(to: URL(fileURLWithPath: runtimeSmokeOutputPath), options: .atomic)
+            if let acknowledgementPath = runtimeSmokeAcknowledgementPath,
+               let completionPath = runtimeSmokeCompletionPath {
+                let processIdentifier = getpid()
+                DispatchQueue.global(qos: .utility).async {
+                    for _ in 0..<300 {
+                        if let challenge = try? String(
+                            contentsOfFile: acknowledgementPath,
+                            encoding: .utf8
+                        ).trimmingCharacters(in: .whitespacesAndNewlines),
+                           !challenge.isEmpty {
+                            do {
+                                let response = RuntimeSmokeCompletionResponse(
+                                    challenge: challenge,
+                                    mode: mode,
+                                    processIdentifier: processIdentifier
+                                )
+                                let responseData = try JSONEncoder().encode(response)
+                                try responseData.write(
+                                    to: URL(fileURLWithPath: completionPath),
+                                    options: .atomic
+                                )
+                            } catch {
+                                NativeAppLog.write("Runtime smoke completion failed: \(error)")
+                                return
+                            }
+                            Darwin._exit(0)
+                        }
+                        usleep(50_000)
+                    }
+                }
+            }
         } catch {
             fputs("Runtime smoke result failed: \(error)\n", stderr)
         }

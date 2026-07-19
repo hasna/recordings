@@ -663,6 +663,21 @@ struct RealtimeTranscriptionTests {
         #expect(probe.persistedResult?.text == nil)
     }
 
+    @Test("Persistence revision advances only for confirmed saves")
+    @MainActor
+    func persistenceRevisionTracksConfirmedSaves() {
+        let engine = RecordingEngine()
+
+        #expect(engine.persistedRecordingRevision == 0)
+        engine.recordPersistenceCompletion(savedText: nil)
+        #expect(engine.persistedRecordingRevision == 0)
+
+        engine.recordPersistenceCompletion(savedText: "stored realtime text")
+        #expect(engine.persistedRecordingRevision == 1)
+        engine.recordPersistenceCompletion(savedText: "recovered full-audio text")
+        #expect(engine.persistedRecordingRevision == 2)
+    }
+
     @Test("Background recovery never overwrites a newer recording pipeline or pastes twice")
     func backgroundRecoveryRespectsPipelineGeneration() {
         #expect(RecordingEngine.shouldApplyBackgroundRecoveryStatus(

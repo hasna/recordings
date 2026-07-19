@@ -57,6 +57,10 @@ final class RecordingsStore: ObservableObject {
         engine.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        engine.$persistedRecordingRevision
+            .dropFirst()
+            .sink { [weak self] _ in self?.loadLibrary() }
+            .store(in: &cancellables)
         projectStore.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)

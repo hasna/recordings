@@ -352,6 +352,44 @@ describe("ensureDataDir", () => {
     expect(existsSync(audioDir)).toBe(true);
     expect(existsSync(join(tempDir, "db-dir"))).toBe(true);
   });
+
+  test("does not create global state directories while installation maintenance is active", () => {
+    const home = join(tempDir, "maintenance-home");
+    const workspace = join(home, "workspace");
+    const marker = join(home, ".hasna", ".recordings-install-maintenance");
+    const audioDir = join(home, ".hasna", "recordings", "audio");
+    const dbDir = join(home, ".hasna", "recordings", "database");
+    mkdirSync(marker, { recursive: true, mode: 0o700 });
+
+    withHomeAndCwd(home, workspace, () => {
+      expect(() => ensureDataDir({
+        ...DEFAULT_CONFIG,
+        audio_dir: audioDir,
+        db_path: join(dbDir, "recordings.db"),
+      })).toThrow("installation maintenance");
+      expect(existsSync(audioDir)).toBe(false);
+      expect(existsSync(dbDir)).toBe(false);
+    });
+  });
+
+  test("keeps unrelated project-local directory creation available during global maintenance", () => {
+    const home = join(tempDir, "project-maintenance-home");
+    const project = join(home, "workspace", "project");
+    const marker = join(home, ".hasna", ".recordings-install-maintenance");
+    const audioDir = join(project, ".recordings", "audio");
+    const dbDir = join(project, ".recordings", "database");
+    mkdirSync(marker, { recursive: true, mode: 0o700 });
+
+    withHomeAndCwd(home, project, () => {
+      ensureDataDir({
+        ...DEFAULT_CONFIG,
+        audio_dir: audioDir,
+        db_path: join(dbDir, "recordings.db"),
+      });
+      expect(existsSync(audioDir)).toBe(true);
+      expect(existsSync(dbDir)).toBe(true);
+    });
+  });
 });
 
 describe("getDataDir", () => {
@@ -367,6 +405,7 @@ describe("getDataDir", () => {
     const legacyDir = join(home, ".recordings");
     const targetDir = join(home, ".hasna", "recordings");
     mkdirSync(join(legacyDir, "audio"), { recursive: true });
+    mkdirSync(join(home, ".hasna"), { recursive: true, mode: 0o700 });
     mkdirSync(targetDir, { recursive: true });
     writeFileSync(join(legacyDir, "config.json"), JSON.stringify({ language: "de" }));
     writeFileSync(join(legacyDir, "audio", "legacy.wav"), "legacy-audio");
@@ -380,6 +419,22 @@ describe("getDataDir", () => {
       expect(readFileSync(join(targetDir, "audio", "legacy.wav"), "utf8")).toBe("legacy-audio");
       expect(readFileSync(join(targetDir, "config.json"), "utf8")).toContain("fr");
       expect(existsSync(legacyDir)).toBe(true);
+    });
+  });
+
+  test("does not migrate legacy global state while installation maintenance is active", () => {
+    const home = join(tempDir, "migration-maintenance-home");
+    const workspace = join(home, "workspace", "repo");
+    const legacyDir = join(home, ".recordings");
+    const targetDir = join(home, ".hasna", "recordings");
+    const marker = join(home, ".hasna", ".recordings-install-maintenance");
+    mkdirSync(legacyDir, { recursive: true });
+    mkdirSync(marker, { recursive: true, mode: 0o700 });
+    writeFileSync(join(legacyDir, "config.json"), JSON.stringify({ language: "de" }));
+
+    withHomeAndCwd(home, workspace, () => {
+      expect(() => getDataDir()).toThrow("installation maintenance");
+      expect(existsSync(targetDir)).toBe(false);
     });
   });
 
