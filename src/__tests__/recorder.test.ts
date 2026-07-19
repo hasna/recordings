@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
-import { mkdirSync, rmSync, existsSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "fs";
 import { DEFAULT_CONFIG } from "../lib/config.js";
 import type { RecordingsConfig } from "../types/index.js";
 import { RecordingError } from "../types/index.js";
@@ -69,6 +69,124 @@ describe("stopRecording", () => {
 });
 
 describe("startRecording with mocked spawn", () => {
+  test("holds global-state maintenance exclusion until the stopped child actually exits", async () => {
+    const mockProcess = new EventEmitter() as any;
+    mockProcess.kill = mock(() => {});
+    mockProcess.stdin = null;
+    mockProcess.stdout = null;
+    mockProcess.stderr = null;
+
+    mock.module("child_process", () => ({
+      spawn: mock(() => mockProcess),
+    }));
+
+    const recorder = await import("../lib/recorder.js");
+    recorder.stopRecording();
+    const previousHome = process.env.HOME;
+    const home = join(tempDir, "home");
+    const readers = join(home, ".hasna", ".recordings-store-readers");
+    const marker = join(home, ".hasna", ".recordings-install-maintenance");
+    process.env.HOME = home;
+
+    try {
+      const config: RecordingsConfig = {
+        ...DEFAULT_CONFIG,
+        audio_dir: join(home, ".hasna", "recordings", "audio"),
+        max_recording_seconds: 0,
+      };
+
+      recorder.startRecording(config);
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(1);
+
+      recorder.stopRecording();
+      expect(mockProcess.kill).toHaveBeenCalledWith("SIGINT");
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(1);
+
+      mkdirSync(marker, { mode: 0o700 });
+      expect(() => recorder.startRecording(config)).toThrow("installation maintenance");
+
+      mockProcess.emit("exit", 0);
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(0);
+    } finally {
+      mockProcess.emit("exit", 0);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      recorder.stopRecording();
+    }
+  });
+
+  test("releases global-state maintenance exclusion when the recording child errors", async () => {
+    const mockProcess = new EventEmitter() as any;
+    mockProcess.kill = mock(() => {});
+    mockProcess.stdin = null;
+    mockProcess.stdout = null;
+    mockProcess.stderr = null;
+
+    mock.module("child_process", () => ({
+      spawn: mock(() => mockProcess),
+    }));
+
+    const recorder = await import("../lib/recorder.js");
+    recorder.stopRecording();
+    const previousHome = process.env.HOME;
+    const home = join(tempDir, "error-home");
+    const readers = join(home, ".hasna", ".recordings-store-readers");
+    process.env.HOME = home;
+
+    try {
+      recorder.startRecording({
+        ...DEFAULT_CONFIG,
+        audio_dir: join(home, ".hasna", "recordings", "audio"),
+        max_recording_seconds: 0,
+      });
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(1);
+
+      expect(() => mockProcess.emit("error", new Error("spawn ENOENT"))).toThrow(RecordingError);
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(0);
+    } finally {
+      mockProcess.emit("exit", 0);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      recorder.stopRecording();
+    }
+  });
+
+  test("keeps project-local recording available during global maintenance", async () => {
+    const mockProcess = new EventEmitter() as any;
+    mockProcess.kill = mock(() => {});
+    mockProcess.stdin = null;
+    mockProcess.stdout = null;
+    mockProcess.stderr = null;
+
+    mock.module("child_process", () => ({
+      spawn: mock(() => mockProcess),
+    }));
+
+    const recorder = await import("../lib/recorder.js");
+    recorder.stopRecording();
+    const previousHome = process.env.HOME;
+    const home = join(tempDir, "project-home");
+    const marker = join(home, ".hasna", ".recordings-install-maintenance");
+    const readers = join(home, ".hasna", ".recordings-store-readers");
+    mkdirSync(marker, { recursive: true, mode: 0o700 });
+    process.env.HOME = home;
+
+    try {
+      const filepath = recorder.startRecording({
+        ...DEFAULT_CONFIG,
+        audio_dir: join(home, "workspace", "project", ".recordings", "audio"),
+        max_recording_seconds: 0,
+      });
+      expect(filepath).toContain(join("project", ".recordings", "audio"));
+      expect(existsSync(readers)).toBe(false);
+    } finally {
+      recorder.stopRecording();
+      mockProcess.emit("exit", 0);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   test("spawns rec process and returns filepath", async () => {
     // Create a mock child process
     const mockProcess = new EventEmitter() as any;
@@ -258,6 +376,46 @@ describe("startRecording with mocked spawn", () => {
 });
 
 describe("recordDuration", () => {
+  test("holds global-state maintenance exclusion until the bounded child exits", async () => {
+    const { recordDuration } = await import("../lib/recorder.js");
+    const previousHome = process.env.HOME;
+    const originalSpawn = Bun.spawn;
+    const home = join(tempDir, "duration-home");
+    const readers = join(home, ".hasna", ".recordings-store-readers");
+    const marker = join(home, ".hasna", ".recordings-install-maintenance");
+    let finish!: (exitCode: number) => void;
+    const exited = new Promise<number>((resolve) => { finish = resolve; });
+    const spawnMock = mock(() => ({
+      exited,
+      exitCode: null,
+      stderr: new Blob([""]),
+    })) as unknown as typeof Bun.spawn;
+    Bun.spawn = spawnMock;
+    process.env.HOME = home;
+
+    const config: RecordingsConfig = {
+      ...DEFAULT_CONFIG,
+      audio_dir: join(home, ".hasna", "recordings", "audio"),
+    };
+    const recording = recordDuration(1, config);
+
+    try {
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(1);
+      mkdirSync(marker, { mode: 0o700 });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+
+      finish(0);
+      expect(await recording).toContain(config.audio_dir);
+      expect(readdirSync(readers).filter((entry) => entry.startsWith("lease-"))).toHaveLength(0);
+    } finally {
+      finish(1);
+      await recording.catch(() => undefined);
+      Bun.spawn = originalSpawn;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   test("throws when rec is not available", async () => {
     const { recordDuration } = await import("../lib/recorder.js");
 

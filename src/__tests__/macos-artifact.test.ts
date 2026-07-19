@@ -1,7 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ensureNativeFsGuardAddon } from "./helpers/native-fs-guard";
 import {
   type MacOSArtifactManifest,
   assertCleanGitStatus,
@@ -14,6 +24,8 @@ import {
   sha256File as fileDigest,
   tailscaleNodeIdSha256,
 } from "../../scripts/macos_artifact";
+
+process.env.RECORDINGS_TEST_FS_GUARD_ADDON = ensureNativeFsGuardAddon();
 
 const temporaryDirectories: string[] = [];
 const targetIdentitySha256 = Bun.CryptoHasher.hash(
@@ -54,7 +66,7 @@ function fixture(): {
   const manifestPath = join(root, "Recordings-0.2.12-macos.manifest.json");
   writeFileSync(archivePath, "immutable signed archive fixture");
   const manifest: MacOSArtifactManifest = {
-    schema_version: 2,
+    schema_version: 4,
     artifact_type: "recordings-macos-app",
     bundle_id: "com.hasna.recordings",
     bundle_version: "0.2.12",
@@ -64,6 +76,7 @@ function fixture(): {
     team_id: "EXAMPLE123",
     minimum_macos: "26.0",
     app_sha256: "b".repeat(64),
+    binding: { bundle_tree_sha256: "9".repeat(64) },
     provenance_sha256: "c".repeat(64),
     companion: { version: "0.2.12", sha256: "d".repeat(64), architectures: ["arm64"] },
     signing: {
@@ -87,18 +100,19 @@ function fixture(): {
       stapled: true,
       distribution_check: true,
     },
-    container: { type: "zip", install_locations: ["~/Applications/Recordings.app"] },
+    container: { type: "zip", install_locations: ["/Applications/Recordings.app"] },
     nested_code_policy: {
       allowlist_sha256: "",
       items: [
         { path: ".", team_id: "EXAMPLE123", runtime: true, timestamp_required: true, architectures: ["arm64"], entitlements_sha256: "1".repeat(64) },
         { path: "Contents/Helpers/recordings", team_id: "EXAMPLE123", runtime: true, timestamp_required: true, architectures: ["arm64"], entitlements_sha256: "2".repeat(64) },
+        { path: "Contents/Helpers/recordings-update-client", team_id: "EXAMPLE123", runtime: true, timestamp_required: true, architectures: ["arm64"], entitlements_sha256: "3".repeat(64) },
       ],
     },
     external_state: {
       paths: ["~/.hasna/recordings"],
       classification: "user-private",
-      rollback: "transactional-backup-restore",
+      rollback: "database-preserving-transactional-restore",
     },
     archive: {
       filename: "Recordings-0.2.12-macos.zip",
@@ -148,6 +162,10 @@ function localFixture(
     stapled: false,
     distribution_check: false,
   };
+  manifest.container.install_locations = ["~/Applications/Recordings.app"];
+  manifest.nested_code_policy.items = manifest.nested_code_policy.items.filter(
+    (item) => item.path !== "Contents/Helpers/recordings-update-client",
+  );
   manifest.nested_code_policy.items = manifest.nested_code_policy.items.map((item) => ({
     ...item,
     team_id: "ADHOC",
@@ -325,7 +343,7 @@ describe("macOS artifact manifest", () => {
       "0.2.12",
     );
     expect(manifest.bundle_id).toBe("com.hasna.recordings");
-    expect(manifest.schema_version).toBe(2);
+    expect(manifest.schema_version).toBe(4);
     expect(manifest.artifact_policy).toBeUndefined();
     expect(manifest.approved_target).toBeUndefined();
     expect(manifest.approved_target_identity_kind).toBeUndefined();
@@ -336,7 +354,7 @@ describe("macOS artifact manifest", () => {
     expect(manifest.signing.mode).toBeUndefined();
   });
 
-  test("release schema v2 rejects every local target identity field", () => {
+  test("release schema v4 rejects every local target identity field", () => {
     const { archivePath, manifestPath, manifest } = fixture();
     manifest.approved_target_identity_kind = "tailscale_node_id_sha256";
     writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
@@ -349,10 +367,10 @@ describe("macOS artifact manifest", () => {
         manifest.git_sha,
         manifest.bundle_version,
       ),
-    ).toThrow("release schema v2");
+    ).toThrow("release schema v4");
   });
 
-  test("manifest-get reports no target identity kind for release schema v2", () => {
+  test("manifest-get reports no target identity kind for release schema v4", () => {
     const { manifestPath } = fixture();
     const result = Bun.spawnSync([
       process.execPath,
@@ -360,6 +378,8 @@ describe("macOS artifact manifest", () => {
       "manifest-get",
       "--manifest",
       manifestPath,
+      "--manifest-sha256",
+      fileDigest(manifestPath),
       "--field",
       "approved_target_identity_kind",
     ]);
@@ -747,6 +767,229 @@ describe("macOS artifact manifest", () => {
 });
 
 describe("macOS install journal compatibility", () => {
+  const artifactTool = join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts");
+  const legacySchemas = [2, 3, 4, 5] as const;
+  const mutationPhases = [
+    "processes-stopped",
+    "originals-moving",
+    "originals-moved",
+    "candidate-moving",
+    "candidate-installed",
+    "activated",
+    "launching",
+  ] as const;
+
+  function journalWriteArguments(root: string, phase: string): string[] {
+    const home = join(root, "home");
+    const appParent = join(home, "Applications");
+    const transaction = join(appParent, ".Recordings-transaction.journal-temp");
+    return [
+      process.execPath,
+      artifactTool,
+      "journal-write",
+      "--journal",
+      join(appParent, ".Recordings-install-transaction.json"),
+      "--phase",
+      phase,
+      "--transaction-dir",
+      transaction,
+      "--app-parent",
+      appParent,
+      "--app-destination",
+      join(appParent, "Recordings.app"),
+      "--data-dir",
+      join(home, ".hasna", "recordings"),
+      "--state-backup",
+      join(transaction, "state.initial"),
+      "--state-backup-sha256",
+      "1".repeat(64),
+      "--expected-manifest-sha256",
+      "2".repeat(64),
+      "--expected-source-sha",
+      "3".repeat(40),
+      "--expected-version",
+      "0.2.13",
+      "--artifact-policy",
+      "release",
+      "--approved-target",
+      "fleet",
+      "--approved-target-identity-kind",
+      "none",
+      "--approved-target-identity-sha256",
+      "none",
+      "--builder-identity-kind",
+      "none",
+      "--candidate-identity-sha256",
+      "4".repeat(64),
+      "--candidate-tree-sha256",
+      "5".repeat(64),
+      "--previous-identity-sha256",
+      "none",
+      "--original-state-mode",
+      "700",
+    ];
+  }
+
+  test("replays a pre-rename journal crash and removes only its safe stale temporary", () => {
+    const root = mkdtempSync(join(tmpdir(), "recordings-journal-pre-rename-"));
+    temporaryDirectories.push(root);
+    const applications = join(root, "home", "Applications");
+    const journalPath = join(applications, ".Recordings-install-transaction.json");
+    mkdirSync(applications, { recursive: true, mode: 0o700 });
+
+    const initial = Bun.spawnSync(journalWriteArguments(root, "prepared"));
+    expect(initial.exitCode, initial.stderr.toString()).toBe(0);
+    const initialJournal = readFileSync(journalPath, "utf8");
+    expect(JSON.parse(initialJournal).phase).toBe("prepared");
+
+    const crashed = Bun.spawnSync(journalWriteArguments(root, "processes-stopping"), {
+      env: {
+        ...Bun.env,
+        RECORDINGS_TEST_ENABLE_RECOVERY_HOOKS: "1",
+        RECORDINGS_TEST_CRASH_DURABLE_JOURNAL: "before-rename",
+      },
+    });
+    expect(crashed.exitCode).not.toBe(0);
+    expect(readFileSync(journalPath, "utf8")).toBe(initialJournal);
+    const temporaryPattern =
+      /^\.Recordings-install-transaction\.json\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    const staleTemporaries = readdirSync(applications).filter((entry) =>
+      temporaryPattern.test(entry)
+    );
+    expect(staleTemporaries).toHaveLength(1);
+    expect(readFileSync(join(applications, staleTemporaries[0]!), "utf8")).toContain(
+      '"phase":"processes-stopping"',
+    );
+    const unrelatedLookalike = join(
+      applications,
+      ".Recordings-install-transaction.json.tmp-operator-note",
+    );
+    writeFileSync(unrelatedLookalike, "do not remove\n", { mode: 0o600 });
+
+    const replayed = Bun.spawnSync(journalWriteArguments(root, "processes-stopped"));
+    expect(replayed.exitCode, replayed.stderr.toString()).toBe(0);
+    expect(JSON.parse(readFileSync(journalPath, "utf8")).phase).toBe("processes-stopped");
+    expect(readdirSync(applications).filter((entry) => temporaryPattern.test(entry))).toEqual([]);
+    expect(readFileSync(unrelatedLookalike, "utf8")).toBe("do not remove\n");
+  });
+
+  function legacyJournalFixture(schemaVersion: 2 | 3 | 4 | 5, phase: string) {
+    const root = mkdtempSync(join(tmpdir(), "recordings-legacy-recovery-journal-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const appParent = join(home, "Applications");
+    const appDestination = join(appParent, "Recordings.app");
+    const dataDir = join(home, ".hasna", "recordings");
+    const transaction = join(appParent, `.Recordings-transaction.schema-${schemaVersion}`);
+    const stateBackup = join(transaction, "state.initial");
+    const journalPath = join(appParent, ".Recordings-install-transaction.json");
+    mkdirSync(appDestination, { recursive: true, mode: 0o700 });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    mkdirSync(stateBackup, { recursive: true, mode: 0o700 });
+    writeFileSync(join(appDestination, "candidate-marker"), "candidate remains\n", { mode: 0o600 });
+    writeFileSync(join(dataDir, "settings.json"), "live state\n", { mode: 0o600 });
+    writeFileSync(join(dataDir, "recordings.db"), "live database\n", { mode: 0o600 });
+    writeFileSync(join(stateBackup, "settings.json"), "backup state\n", { mode: 0o600 });
+    writeFileSync(join(stateBackup, "recordings.db"), "backup database\n", { mode: 0o600 });
+    const digestResult = Bun.spawnSync([
+      process.execPath,
+      artifactTool,
+      "tree-digest",
+      "--path",
+      stateBackup,
+    ]);
+    expect(digestResult.exitCode, digestResult.stderr.toString()).toBe(0);
+    const journal = {
+      schema_version: schemaVersion,
+      phase,
+      transaction_dir: transaction,
+      app_parent: appParent,
+      app_destination: appDestination,
+      data_dir: dataDir,
+      state_backup: stateBackup,
+      state_backup_sha256: digestResult.stdout.toString().trim(),
+      originals: [],
+      was_running: false,
+      expected_manifest_sha256: "2".repeat(64),
+      expected_source_sha: "3".repeat(40),
+      expected_version: "0.2.13",
+      candidate_identity_sha256: "4".repeat(64),
+      previous_identity_sha256: "none",
+      ...(schemaVersion >= 3
+        ? {
+            artifact_policy: "release",
+            approved_target: "fleet",
+            approved_target_identity_kind: "none",
+            approved_target_identity_sha256: "none",
+            builder_identity_kind: "none",
+          }
+        : {}),
+      ...(schemaVersion >= 4 ? { original_state_mode: "700" } : {}),
+      ...(schemaVersion >= 5 ? { prior_running_app_paths: [] } : {}),
+    };
+    writeFileSync(journalPath, `${JSON.stringify(journal)}\n`, { mode: 0o600 });
+    return { appDestination, dataDir, journalPath, stateBackup, transaction };
+  }
+
+  test.each(legacySchemas.flatMap((schemaVersion) =>
+    mutationPhases.map((phase) => [schemaVersion, phase] as const)
+  ))(
+    "schema-%i %s recovery fails closed without database rollback policy and preserves evidence",
+    (schemaVersion, phase) => {
+      const fixture = legacyJournalFixture(schemaVersion, phase);
+      const journalBefore = readFileSync(fixture.journalPath, "utf8");
+      const result = Bun.spawnSync([
+        process.execPath,
+        artifactTool,
+        "journal-recover",
+        "--journal",
+        fixture.journalPath,
+      ]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain(
+        "cannot safely restore state without replacing the canonical database",
+      );
+      expect(readFileSync(fixture.journalPath, "utf8")).toBe(journalBefore);
+      expect(readFileSync(join(fixture.dataDir, "settings.json"), "utf8")).toBe("live state\n");
+      expect(readFileSync(join(fixture.dataDir, "recordings.db"), "utf8")).toBe(
+        "live database\n",
+      );
+      expect(readFileSync(join(fixture.appDestination, "candidate-marker"), "utf8")).toBe(
+        "candidate remains\n",
+      );
+      expect(existsSync(fixture.stateBackup)).toBeTrue();
+      expect(existsSync(fixture.transaction)).toBeTrue();
+    },
+  );
+
+  test.each(legacySchemas)(
+    "committed schema-%i journal fails closed without retained deletion evidence",
+    (schemaVersion) => {
+      const fixture = legacyJournalFixture(schemaVersion, "committed");
+      const journalBefore = readFileSync(fixture.journalPath, "utf8");
+      const result = Bun.spawnSync([
+        process.execPath,
+        artifactTool,
+        "journal-recover",
+        "--journal",
+        fixture.journalPath,
+      ]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain(
+        "legacy cleanup journal lacks retained deletion evidence",
+      );
+      expect(readFileSync(fixture.journalPath, "utf8")).toBe(journalBefore);
+      expect(existsSync(fixture.transaction)).toBeFalse();
+      expect(readFileSync(join(fixture.dataDir, "settings.json"), "utf8")).toBe("live state\n");
+      expect(readFileSync(join(fixture.dataDir, "recordings.db"), "utf8")).toBe(
+        "live database\n",
+      );
+      expect(readFileSync(join(fixture.appDestination, "candidate-marker"), "utf8")).toBe(
+        "candidate remains\n",
+      );
+    },
+  );
+
   test.each([
     [4, undefined, "invalid original state mode"],
     [4, "750", "invalid original state mode"],

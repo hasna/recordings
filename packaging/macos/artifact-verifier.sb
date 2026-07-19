@@ -1,0 +1,33 @@
+(version 1)
+(deny default)
+
+; The verifier receives already-open, read-only descriptors from the broker. It
+; can load the signed Bun runtime and system frameworks, but it cannot open the
+; broker staging tree by pathname, write files, use the network, or launch tools.
+(allow process-info*)
+(allow signal (target self))
+(allow process-exec
+  (literal "/Library/PrivilegedHelperTools/com.hasna.recordings.artifact-verifier"))
+(allow sysctl-read)
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center"))
+(allow file-read-metadata
+  (subpath "/System")
+  (subpath "/usr/lib")
+  (subpath "/Library/Apple")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (literal "/dev/fd/4")
+  (literal "/Library/PrivilegedHelperTools/com.hasna.recordings.artifact-verifier"))
+(allow file-read-data
+  (subpath "/System")
+  (subpath "/usr/lib")
+  (subpath "/Library/Apple")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (literal "/Library/PrivilegedHelperTools/com.hasna.recordings.artifact-verifier"))
+(allow file-read* (subpath (param "OUTPUT_DIR")))
+(allow file-write* (subpath (param "OUTPUT_DIR")))
+(deny network*)

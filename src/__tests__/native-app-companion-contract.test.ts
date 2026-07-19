@@ -33,10 +33,14 @@ async function stopAndReap(process: Subprocess | undefined, label: string): Prom
 beforeAll(() => {
   compiledCompanionDirectory = mkdtempSync(join(tmpdir(), "recordings-companion-fixture-"));
   compiledCompanion = join(compiledCompanionDirectory, "recordings");
-  const build = spawnSync("bash", ["scripts/build_companion_cli.sh", compiledCompanion], {
-    encoding: "utf8",
-    timeout: 60_000,
-  });
+  const build = spawnSync(
+    "/bin/bash",
+    ["scripts/build_companion_cli.sh", compiledCompanion, process.execPath],
+    {
+      encoding: "utf8",
+      timeout: 60_000,
+    },
+  );
   expect(build.error, build.stderr).toBeUndefined();
   expect(build.status, build.stderr).toBe(0);
 }, 60_000);
@@ -59,7 +63,10 @@ describe("native app companion contract", () => {
     expect(build).toContain('HELPERS="$CONTENTS/Helpers"');
     expect(build).toContain("build_companion_cli.sh");
     expect(companionBuild).toContain("--compile");
-    expect(companionBuild).toContain('COMPILE_DIR="$(mktemp -d)"');
+    expect(companionBuild).toContain(
+      'WORK_DIR="$($MKTEMP_EXECUTABLE -d /tmp/recordings-companion-build.XXXXXX)"',
+    );
+    expect(companionBuild).toContain('COMPILE_DIR="$WORK_DIR/compile"');
     expect(companionBuild).toContain('trap cleanup EXIT');
     expect(runner).toContain("Contents/Helpers/recordings");
   });
@@ -451,22 +458,50 @@ describe("native app companion contract", () => {
     expect(app.match(/self\.openRecordings\(\)/g)?.length).toBeGreaterThanOrEqual(2);
 
     const smoke = readFileSync("scripts/smoke_macos_app.sh", "utf8");
-    expect(smoke).toContain('open -n -W "$APP_PATH"');
+    expect(smoke).toContain('"$OPEN_EXECUTABLE" -n -W "$APP_PATH"');
     expect(smoke).not.toContain("open -n -g");
     expect(smoke).toContain("applicationActivationPolicy !== 0");
     expect(smoke).toContain("mainWindowCanBecomeKey");
     expect(smoke).toContain("!result.applicationIsActive || !result.mainWindowIsKey");
     expect(smoke).toContain('result.accessibilityObservationStatus !== "absent"');
     expect(smoke).not.toContain("accessibilityMenuBarItemCount > 0");
-    expect(smoke).toContain('APP_PARENT="$(cd -P "$(dirname "$1")" && pwd)"');
-    expect(smoke).toContain('lsof -a -p "$result_pid" -d txt -Fn');
+    expect(smoke).toContain(
+      'APP_PARENT="$(cd -P "$("$DIRNAME_EXECUTABLE" "$1")" && "$PWD_EXECUTABLE" -P)"',
+    );
+    expect(smoke).toContain('"$LSOF_EXECUTABLE" -a -p "$pid" -d txt -Fn');
     expect(smoke).not.toContain("ps -axo");
     expect(smoke).toContain('if [ -z "$SMOKE_APP_PID" ]');
-    expect(smoke).toContain('kill -KILL "$SMOKE_APP_PID"');
+    expect(smoke).toContain('--runtime-smoke-ack "$acknowledgement"');
+    expect(smoke).toContain('--runtime-smoke-completion "$completion"');
+    expect(smoke).toContain("umask 077");
+    expect(smoke).toContain("crypto.randomUUID()");
+    expect(smoke).toContain("SMOKE_COMPLETION_ATTEMPTS=200");
+    expect(smoke).toContain("completion handshake timed out");
+    expect(smoke).toContain('write_atomic_text_file "$acknowledgement" "$challenge"');
+    expect(smoke).toContain('if wait "$SMOKE_PID"');
+    expect(smoke).toContain('response.challenge !== process.env.SMOKE_CHALLENGE');
+    expect(smoke).toContain('response.mode !== process.env.SMOKE_MODE');
+    expect(smoke).toContain('response.processIdentifier !== Number(process.env.SMOKE_PROCESS_IDENTIFIER)');
+    expect(smoke).toContain("terminate_verified_process()");
+    expect(smoke).toContain(
+      'capture_process_start_identity "$pid" "$expected_executable"',
+    );
+    expect(smoke).toContain(
+      '[ "$rechecked_start_identity" != "$expected_start_identity" ]',
+    );
+    expect(smoke).toContain('"$KILL_EXECUTABLE" -TERM "$pid"');
+    expect(smoke).toContain('"$KILL_EXECUTABLE" -KILL "$pid"');
     expect(smoke).toContain('SMOKE_FOCUS_EVIDENCE="strict"');
     expect(smoke).toContain('SMOKE_FOCUS_EVIDENCE="ssh-unavailable"');
     expect(smoke).toContain('process.env.SMOKE_FOCUS_EVIDENCE !== "ssh-unavailable"');
     expect(smoke).toContain('event: "recordings_runtime_smoke_evidence"');
+    expect(app).toContain("runtimeSmokeAcknowledgementPath");
+    expect(app).toContain("runtimeSmokeCompletionPath");
+    expect(app).toContain("String(");
+    expect(app).toContain("contentsOfFile: acknowledgementPath");
+    expect(app).toContain("RuntimeSmokeCompletionResponse(");
+    expect(app).toContain("options: .atomic");
+    expect(app).toContain("Darwin._exit(0)");
     expect(app).toContain("DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15)");
     expect(app).toContain("Darwin._exit(124)");
   });

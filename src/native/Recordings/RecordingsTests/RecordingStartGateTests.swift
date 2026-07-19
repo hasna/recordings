@@ -36,11 +36,15 @@ struct RecordingStartGateTests {
     func runtimeSmokeLaunchPlans() {
         let normal = PermissionRequestLaunchPlan(arguments: [
             "Recordings", "--runtime-smoke", "normal", "--runtime-smoke-output", "/tmp/result.json",
+            "--runtime-smoke-ack", "/tmp/result.ack",
+            "--runtime-smoke-completion", "/tmp/result.completion.json",
         ])
         #expect(normal.isRuntimeSmoke)
         #expect(!normal.installsGlobalHandlers)
         #expect(normal.declaresMenuBar)
         #expect(normal.runtimeSmokeOutputPath == "/tmp/result.json")
+        #expect(normal.runtimeSmokeAcknowledgementPath == "/tmp/result.ack")
+        #expect(normal.runtimeSmokeCompletionPath == "/tmp/result.completion.json")
         #expect(!normal.requestsAccessibilityPrompt)
 
         let helper = PermissionRequestLaunchPlan(arguments: [

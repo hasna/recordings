@@ -32,6 +32,109 @@ function writeExecutable(path: string, body = "printf '%s\\n' '{\"Self\":{}}'\n"
   chmodSync(path, 0o755);
 }
 
+function createTrustedApp(root: string, body?: string): { app: string; cli: string } {
+  const app = join(root, "Tailscale.app");
+  const cli = join(app, "Contents", "MacOS", "Tailscale");
+  writeExecutable(
+    cli,
+    body ??
+      `printf '%s\\n' "$0" >> "$MARKER_DIRECTORY/status-path.log"\nprintf '%s\\n' '{"Self":{"Online":true,"HostName":"station06","ID":"node-1"}}'\n`,
+  );
+  writeFileSync(join(app, "signature-team"), "W5364U7YZB\n");
+  writeFileSync(join(app, "signature-identifier"), "io.tailscale.ipn.macsys\n");
+  return { app, cli };
+}
+
+function createCodesignStub(root: string): string {
+  const executable = join(root, "tools", "codesign");
+  writeExecutable(
+    executable,
+    `app="\${@: -1}"
+case "$app" in
+  */Contents/MacOS/Tailscale) app="\${app%/Contents/MacOS/Tailscale}" ;;
+esac
+team="$(/bin/cat "$app/signature-team")"
+identifier="$(/bin/cat "$app/signature-identifier")"
+if [[ " $* " == *" --verify "* ]]; then
+  [ "$team" = W5364U7YZB ] && [ "$identifier" = io.tailscale.ipn.macsys ] || exit 1
+fi
+if [[ " $* " == *" -d "* ]]; then
+  printf 'Identifier=%s\\nTeamIdentifier=%s\\n' "$identifier" "$team" >&2
+fi
+`,
+  );
+  return executable;
+}
+
+function createDittoStub(root: string, mutateSnapshot = false): string {
+  const executable = join(root, "tools", "ditto");
+  writeExecutable(
+    executable,
+    `source="$1"
+destination="$2"
+/bin/cp -R "$source" "$destination"
+${mutateSnapshot ? `printf 'ATTACKER1\\n' > "$destination/signature-team"` : ""}
+`,
+  );
+  return executable;
+}
+
+async function trustedSnapshotWith(options: {
+  team?: string;
+  identifier?: string;
+  mutateSnapshot?: boolean;
+  replaceSourceBeforeStatus?: boolean;
+}) {
+  const root = temporaryDirectory();
+  const markerDirectory = join(root, "markers");
+  const snapshotParent = join(root, "private-work");
+  mkdirSync(markerDirectory, { mode: 0o700 });
+  mkdirSync(snapshotParent, { mode: 0o700 });
+  const source = createTrustedApp(root);
+  if (options.team) writeFileSync(join(source.app, "signature-team"), `${options.team}\n`);
+  if (options.identifier) {
+    writeFileSync(join(source.app, "signature-identifier"), `${options.identifier}\n`);
+  }
+  const codesign = createCodesignStub(root);
+  const ditto = createDittoStub(root, options.mutateSnapshot);
+  const wrapper = join(root, "snapshot.sh");
+  writeFileSync(
+    wrapper,
+    `#!/bin/bash
+set -euo pipefail
+source "$RESOLVER"
+snapshot_cli="$(recordings_resolve_trusted_tailscale_app_cli "$SNAPSHOT_PARENT")"
+printf 'resolved=%s\\n' "$snapshot_cli"
+${
+  options.replaceSourceBeforeStatus
+    ? `printf '#!/bin/bash\\nprintf attacker\\n' > "$SOURCE_CLI"\n/bin/chmod 755 "$SOURCE_CLI"`
+    : ""
+}
+recordings_run_trusted_tailscale_status "$snapshot_cli" "$SNAPSHOT_PARENT"
+`,
+  );
+  chmodSync(wrapper, 0o755);
+  const process = Bun.spawn(["/bin/bash", wrapper], {
+    env: resolverChildEnvironment(Bun.env, {
+      RESOLVER: resolver,
+      SNAPSHOT_PARENT: snapshotParent,
+      SOURCE_CLI: source.cli,
+      MARKER_DIRECTORY: markerDirectory,
+      RECORDINGS_TEST_TRUSTED_TAILSCALE_APP: source.app,
+      RECORDINGS_TEST_TAILSCALE_CODESIGN_EXECUTABLE: codesign,
+      RECORDINGS_TEST_TAILSCALE_DITTO_EXECUTABLE: ditto,
+    }),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  return { root, markerDirectory, snapshotParent, source, exitCode, stdout, stderr };
+}
+
 function resolverChildEnvironment(
   inheritedEnvironment: Record<string, string | undefined>,
   overrides: Record<string, string | undefined>,
@@ -234,4 +337,62 @@ describe("Tailscale CLI resolution", () => {
       expect(existsSync(marker)).toBeFalse();
     },
   );
+
+  test("snapshots the complete authenticated official app and executes only the verified copy", async () => {
+    const result = await trustedSnapshotWith({ replaceSourceBeforeStatus: true });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const snapshotCli = join(
+      result.snapshotParent,
+      "tailscale-identity-snapshot",
+      "Tailscale.app",
+      "Contents",
+      "MacOS",
+      "Tailscale",
+    );
+    expect(result.stdout).toContain(`resolved=${snapshotCli}`);
+    expect(result.stdout).toContain('"Online":true');
+    expect(readFileSync(join(result.markerDirectory, "status-path.log"), "utf8").trim()).toBe(
+      snapshotCli,
+    );
+    expect(result.stdout).not.toContain("attacker");
+  });
+
+  test.each([
+    ["wrong team", { team: "ATTACKER1" }, "official TeamIdentifier"],
+    [
+      "wrong identifier",
+      { identifier: "io.attacker.fake" },
+      "official bundle identifier",
+    ],
+    ["post-copy signature swap", { mutateSnapshot: true }, "authenticated after copying"],
+  ] as const)("rejects a %s", async (_label, options, expectedError) => {
+    const result = await trustedSnapshotWith(options);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(expectedError);
+    expect(existsSync(join(result.markerDirectory, "status-path.log"))).toBeFalse();
+  });
+
+  test("keeps all test app and tool overrides after the real Darwin branch", () => {
+    const source = readFileSync(resolver, "utf8");
+    const resolverFunction = source.indexOf("recordings_resolve_trusted_tailscale_app_cli() {");
+    const darwinBranch = source.indexOf(
+      'if [ "$real_host_kernel" = "Darwin" ]; then',
+      resolverFunction,
+    );
+    const nonDarwinBranch = source.indexOf("else", darwinBranch);
+    expect(darwinBranch).toBeGreaterThan(-1);
+    expect(nonDarwinBranch).toBeGreaterThan(darwinBranch);
+    for (const override of [
+      "RECORDINGS_TEST_TRUSTED_TAILSCALE_APP",
+      "RECORDINGS_TEST_TAILSCALE_CODESIGN_EXECUTABLE",
+      "RECORDINGS_TEST_TAILSCALE_DITTO_EXECUTABLE",
+    ]) {
+      expect(source.indexOf(override, darwinBranch)).toBeGreaterThan(nonDarwinBranch);
+    }
+    const darwinSelection = source.slice(darwinBranch, nonDarwinBranch);
+    expect(darwinSelection).toContain('/Applications/Tailscale.app');
+    expect(darwinSelection).toContain('/usr/bin/codesign');
+    expect(darwinSelection).toContain('/usr/bin/ditto');
+    expect(darwinSelection).not.toContain("RECORDINGS_TEST_");
+  });
 });

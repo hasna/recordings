@@ -1,0 +1,4 @@
+scripts/native/prebuilds/**/.recordings-fs-guard-build*/
+scripts/native/prebuilds/**/arm64.node
+scripts/native/prebuilds/**/x86_64.node
+scripts/native/prebuilds/**/*.{o,obj}

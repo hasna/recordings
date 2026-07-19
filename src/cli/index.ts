@@ -3,7 +3,11 @@ import { Command } from "commander";
 import { registerEventsCommands } from "@hasna/events/commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
-import { existsSync, readFileSync, readdirSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+} from "fs";
 import { dirname, join as pathJoin } from "path";
 import { fileURLToPath } from "url";
 import { loadConfig, ensureDataDir } from "../lib/config.js";
@@ -24,6 +28,16 @@ import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
 import { runMacOSPermissionRequest } from "./macos-permissions.js";
 import { currentMachineId } from "../lib/machine.js";
 import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
+import {
+  createInstallerEnvironment,
+  resolveInstallBunExecutable,
+} from "../lib/bun-runtime.js";
+import {
+  assertExpectedReleaseHostname,
+  assertReleaseOnlyOptions,
+  parseLaunchTimeout,
+  prepareReleaseInstallInputs,
+} from "../lib/release-install-policy.js";
 
 const program = new Command();
 
@@ -733,10 +747,15 @@ appCommand
   .description("Install a release or explicitly approved local-only Recordings.app artifact")
   .requiredOption("--artifact <path>", "Finalized Recordings.app ZIP artifact")
   .requiredOption("--manifest <path>", "Artifact provenance manifest")
+  .option("--envelope <path>", "Signed release envelope (required for release artifacts)")
   .option("--expected-team-id <team>", "Required Developer ID TeamIdentifier for release artifacts")
   .requiredOption("--manifest-sha256 <sha256>", "Authenticated release-manifest SHA-256")
   .requiredOption("--expected-source-sha <sha>", "Exact approved 40-character source commit")
   .requiredOption("--expected-version <version>", "Exact approved release version")
+  .option(
+    "--expected-hostname <hostname>",
+    "Exact deployment hostname to verify before any install mutation",
+  )
   .option("--artifact-policy <policy>", "Artifact policy: release or local-only", "release")
   .option("--approved-target <station>", "Exact approved target; fleet for release artifacts", "fleet")
   .option(
@@ -759,14 +778,16 @@ appCommand
     "Allow one reviewed signer change that requires new macOS permission approval",
   )
   .option("--launch", "Launch and verify the canonical app after installation")
-  .option("--launch-timeout <seconds>", "Canonical process launch timeout", "10")
+  .option("--launch-timeout <seconds>", "Canonical process launch timeout")
   .action((opts: {
     artifact: string;
     manifest: string;
+    envelope?: string;
     expectedTeamId?: string;
     manifestSha256: string;
     expectedSourceSha: string;
     expectedVersion: string;
+    expectedHostname?: string;
     artifactPolicy: string;
     approvedTarget: string;
     approvedTargetIdentityKind?: string;
@@ -776,20 +797,111 @@ appCommand
     expectedNewIdentitySha256?: string;
     allowSigningIdentityMigration?: boolean;
     launch?: boolean;
-    launchTimeout: string;
+    launchTimeout?: string;
   }) => {
     if (process.platform !== "darwin") {
       console.error(chalk.red("Recordings.app installation is only supported on macOS"));
       process.exit(1);
     }
-    const status = getMacOSAppStatus();
-    if (!status.installer_available) {
-      console.error(chalk.red(`App installer missing from package: ${status.installer_path}`));
+    if (opts.artifactPolicy === "release") {
+      if (!opts.envelope) {
+        console.error(chalk.red("Release installation requires --envelope."));
+        process.exit(1);
+      }
+      let preparedInputs: ReturnType<typeof prepareReleaseInstallInputs>;
+      try {
+        assertReleaseOnlyOptions(opts);
+        if (opts.expectedHostname) {
+          const hostnameResult = spawnSync("/bin/hostname", ["-s"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            env: {
+              PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+              LC_ALL: "C",
+              LANG: "C",
+              TZ: "UTC0",
+            },
+          });
+          if (hostnameResult.error || hostnameResult.status !== 0) {
+            throw new Error("could not determine the install target hostname");
+          }
+          assertExpectedReleaseHostname(opts.expectedHostname, hostnameResult.stdout.trim());
+        }
+        preparedInputs = prepareReleaseInstallInputs({
+          artifactPath: opts.artifact,
+          manifestPath: opts.manifest,
+          envelopePath: opts.envelope,
+          manifestSha256: opts.manifestSha256,
+          expectedSourceSha: opts.expectedSourceSha,
+          expectedVersion: opts.expectedVersion,
+          expectedTeamId: opts.expectedTeamId,
+        });
+      } catch (error) {
+        console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+      const updateClientPath = "/Applications/Recordings.app/Contents/Helpers/recordings-update-client";
+      if (!existsSync(updateClientPath)) {
+        preparedInputs.cleanup();
+        console.error(chalk.red("Root-owned Recordings update broker client is not installed."));
+        process.exit(1);
+      }
+      const result = (() => {
+        try {
+          return spawnSync(updateClientPath, [
+            "install",
+            "--artifact",
+            opts.artifact,
+            "--manifest",
+            preparedInputs.manifestPath,
+            "--envelope",
+            preparedInputs.envelopePath,
+          ], {
+            stdio: "inherit",
+            env: {
+              HOME: process.env.HOME ?? "",
+              PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+              LC_ALL: "C",
+              LANG: "C",
+              TZ: "UTC0",
+            },
+          });
+        } finally {
+          preparedInputs.cleanup();
+        }
+      })();
+      if (result.error) {
+        console.error(chalk.red(result.error.message));
+        process.exit(1);
+      }
+      process.exit(result.status ?? 1);
+    }
+    if (opts.artifactPolicy !== "local-only" && opts.artifactPolicy !== "local_only") {
+      console.error(chalk.red("Artifact policy must be release or local-only."));
+      process.exit(1);
+    }
+    let launchTimeout: string;
+    try {
+      launchTimeout = parseLaunchTimeout(opts.launchTimeout);
+    } catch (error) {
+      console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+      process.exit(1);
+    }
+    let bunExecutable: string;
+    try {
+      bunExecutable = resolveInstallBunExecutable(process.env);
+    } catch (error) {
+      console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+      process.exit(1);
+    }
+    const installerPath = getMacOSInstallerPath();
+    if (!existsSync(installerPath)) {
+      console.error(chalk.red(`App installer missing from package: ${installerPath}`));
       process.exit(1);
     }
 
     const installerArgs = [
-      status.installer_path,
+      installerPath,
       "--artifact",
       opts.artifact,
       "--manifest",
@@ -805,8 +917,11 @@ appCommand
       "--approved-target",
       opts.approvedTarget,
       "--launch-timeout",
-      opts.launchTimeout,
+      launchTimeout,
     ];
+    if (opts.expectedHostname) {
+      installerArgs.push("--expected-hostname", opts.expectedHostname);
+    }
     if (opts.approvedTargetIdentityKind) {
       installerArgs.push("--approved-target-identity-kind", opts.approvedTargetIdentityKind);
     }
@@ -831,9 +946,11 @@ appCommand
     }
     if (opts.launch) installerArgs.push("--launch");
 
-    const result = spawnSync("bash", installerArgs, {
+    const installerEnvironment = createInstallerEnvironment(process.env, bunExecutable);
+
+    const result = spawnSync("/bin/bash", installerArgs, {
       stdio: "inherit",
-      env: process.env,
+      env: installerEnvironment,
     });
     if (result.error) {
       console.error(chalk.red(result.error.message));
@@ -1899,7 +2016,7 @@ function getMacOSAppStatus(): MacOSAppStatus {
   const installedAppPath = pathJoin(home, "Applications", "Recordings.app");
   const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
   const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
-  const installerPath = pathJoin(packageRoot, "scripts", "install_macos_app.sh");
+  const installerPath = getMacOSInstallerPath(packageRoot);
   const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
   const signingInfo = getCodeSigningInfo(installedAppPath);
   const legacyInstallPaths = findLegacyMacOSAppPaths(home, installedAppPath);
@@ -1980,7 +2097,7 @@ function getCodeSigningInfo(appPath: string): {
       authorities: [],
     };
   }
-  const result = spawnSync("codesign", ["-d", "-r-", "--verbose=4", appPath], {
+  const result = spawnSync("/usr/bin/codesign", ["-d", "-r-", "--verbose=4", appPath], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -2008,7 +2125,7 @@ function getTccPermission(service: string, home: string): string {
 
   for (const dbPath of dbPaths) {
     if (!existsSync(dbPath)) continue;
-    const result = spawnSync("sqlite3", [dbPath, sql], {
+    const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -2057,6 +2174,10 @@ function findPackageRoot(): string {
     }
     current = parent;
   }
+}
+
+function getMacOSInstallerPath(packageRoot = findPackageRoot()): string {
+  return pathJoin(packageRoot, "scripts", "install_macos_app.sh");
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────

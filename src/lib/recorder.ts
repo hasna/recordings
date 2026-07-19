@@ -3,6 +3,10 @@ import { join } from "path";
 import { existsSync } from "fs";
 import type { RecordingsConfig } from "../types/index.js";
 import { RecordingError } from "../types/index.js";
+import {
+  acquireLocalStoreReaderLease,
+  isGlobalRecordingsStatePath,
+} from "./install-maintenance.js";
 
 let _recordProcess: ChildProcess | null = null;
 let _currentFile: string | null = null;
@@ -51,10 +55,22 @@ export function startRecording(config: RecordingsConfig): string {
 
   // Build sox/rec command based on config
   const args = buildRecordArgs(filepath, config);
+  const releaseLease = isGlobalRecordingsStatePath(filepath)
+    ? acquireLocalStoreReaderLease()
+    : () => {};
+  let recordProcess: ChildProcess;
 
-  _recordProcess = spawn(args[0]!, args.slice(1), {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  try {
+    recordProcess = spawn(args[0]!, args.slice(1), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (error) {
+    releaseLease();
+    throw error;
+  }
+
+  _recordProcess = recordProcess;
+  _currentFile = filepath;
 
   // Set up automatic chunking if recording exceeds max duration
   if (config.max_recording_seconds > 0) {
@@ -66,16 +82,18 @@ export function startRecording(config: RecordingsConfig): string {
     }, config.max_recording_seconds * 1000);
   }
 
-  _currentFile = filepath;
-
-  _recordProcess.on("error", (err) => {
-    _recordProcess = null;
-    _currentFile = null;
+  recordProcess.on("error", (err) => {
+    if (_recordProcess === recordProcess) {
+      _recordProcess = null;
+      _currentFile = null;
+    }
+    releaseLease();
     throw new RecordingError(`Recording process error: ${err.message}`);
   });
 
-  _recordProcess.on("exit", () => {
-    _recordProcess = null;
+  recordProcess.on("exit", () => {
+    if (_recordProcess === recordProcess) _recordProcess = null;
+    releaseLease();
   });
 
   return filepath;
@@ -160,17 +178,25 @@ export async function recordDuration(
     seconds.toString(),
   ];
 
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const releaseLease = isGlobalRecordingsStatePath(filepath)
+    ? acquireLocalStoreReaderLease()
+    : () => {};
 
-  const exitCode = await proc.exited;
+  try {
+    const proc = Bun.spawn(args, {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
-  if (exitCode !== 0 && !existsSync(filepath)) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new RecordingError(`Recording failed (exit ${exitCode}): ${stderr}`);
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0 && !existsSync(filepath)) {
+      const stderr = await new Response(proc.stderr).text();
+      throw new RecordingError(`Recording failed (exit ${exitCode}): ${stderr}`);
+    }
+
+    return filepath;
+  } finally {
+    releaseLease();
   }
-
-  return filepath;
 }
