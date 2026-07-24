@@ -17,6 +17,16 @@ cd "$SCRIPT_DIR"
 # keychain, so the default postinstall path is self-contained AND works over a
 # headless SSH session — no out-of-band env and no unlocked login keychain
 # required.
+#
+# The signing material (keychain password + certificate + private key) is
+# persisted so the SAME identity — and therefore the same designated
+# requirement — is reused on every rebuild. Persistence uses the Hasna `secrets`
+# vault CLI WHEN IT IS PRESENT (shared, backed-up, host-scoped). When `secrets`
+# is ABSENT — e.g. a plain `npm i -g @hasna/recordings` on a Mac with no Hasna
+# infrastructure — we fall back to a local, per-user store under the signing dir
+# (files mode 600). So a PUBLIC install still gets a stable, certificate-based
+# identity headlessly instead of hard-failing. The vault is an optimization,
+# never a requirement.
 SIGNING_CN="Hasna Recordings Signing"
 SIGNING_DIR="${HOME}/.hasna/recordings/signing"
 # Dedicated code-signing keychain. We NEVER touch the login keychain: over SSH
@@ -43,23 +53,61 @@ vault_prefix() {
     printf 'hasna/machine/%s/recordings/signing' "$(signing_host)"
 }
 
-# Append the dedicated keychain to the USER search list (never replacing it) so
-# codesign / find-identity can see the identity while leaving login and other
-# keychains intact.
+# The Hasna `secrets` vault CLI is OPTIONAL. When present we persist signing
+# material to the vault; when absent we persist it to a local, per-user store
+# (files mode 600) so a plain public install still gets a stable identity.
+HAVE_SECRETS=0
+command -v secrets >/dev/null 2>&1 && HAVE_SECRETS=1
+
+# Read a persisted signing-material value by logical name (keychain_password,
+# certificate_pem_b64, private_key_pem_b64). Prints the value, or nothing when
+# absent. Uses the vault when available, else the local store.
+identity_get() {
+    local name="$1"
+    if [ "$HAVE_SECRETS" -eq 1 ]; then
+        secrets get "$(vault_prefix)/$name" 2>/dev/null || true
+    else
+        local f="${SIGNING_DIR}/${name}"
+        [ -f "$f" ] && cat "$f" || true
+    fi
+}
+
+# Persist a signing-material value by logical name. In the local store the file
+# is created mode 600 (secret material at rest). Returns non-zero on failure.
+identity_set() {
+    local name="$1" value="$2" type="$3" label="$4"
+    if [ "$HAVE_SECRETS" -eq 1 ]; then
+        secrets set "$(vault_prefix)/$name" "$value" --type "$type" --label "$label" >/dev/null 2>&1
+    else
+        local f="${SIGNING_DIR}/${name}"
+        ( umask 077; printf '%s' "$value" > "$f" ) && chmod 600 "$f" 2>/dev/null
+    fi
+}
+
+# Ensure the dedicated keychain is on the USER search list (keeping the login and
+# other keychains intact) so codesign / find-identity can see the identity.
+#
+# We ALSO prune any entry whose keychain file no longer exists: codesign iterates
+# the whole search list, and a dangling reference to a deleted keychain makes it
+# fail identity lookups with "<hash>: no identity found" even when the identity
+# is present in another listed keychain. Rebuilding the list from only the
+# existing keychains (plus our target) keeps the default path robust.
 add_signing_keychain_to_search_list() {
     local target="$SIGNING_KEYCHAIN"
-    local -a current=()
-    local line trimmed
+    local -a keep=()
+    local line trimmed have_target=0
     while IFS= read -r line; do
         # `security list-keychains` prints each path indented and quoted.
         trimmed="${line#"${line%%[![:space:]]*}"}"   # strip leading whitespace
         trimmed="${trimmed%\"}"; trimmed="${trimmed#\"}"
         [ -n "$trimmed" ] || continue
-        [ "$trimmed" = "$target" ] && return 0        # already in the list
-        current+=("$trimmed")
+        [ -f "$trimmed" ] || continue                 # drop stale/missing keychains
+        [ "$trimmed" = "$target" ] && have_target=1
+        keep+=("$trimmed")
     done < <("$SECURITY" list-keychains -d user 2>/dev/null)
-    "$SECURITY" list-keychains -d user -s "$target" ${current[@]+"${current[@]}"} >/dev/null 2>&1 \
-        || echo "WARN: could not add $target to the keychain search list" >&2
+    [ "$have_target" -eq 1 ] || keep+=("$target")
+    "$SECURITY" list-keychains -d user -s ${keep[@]+"${keep[@]}"} >/dev/null 2>&1 \
+        || echo "WARN: could not update the keychain search list for $target" >&2
 }
 
 # Create/reuse the "Hasna Recordings Signing" identity inside the DEDICATED
@@ -70,42 +118,43 @@ add_signing_keychain_to_search_list() {
 ensure_local_signing_identity() {
     command -v "$SECURITY" >/dev/null 2>&1 || { echo "ERROR: 'security' not found" >&2; return 1; }
     command -v openssl  >/dev/null 2>&1 || { echo "ERROR: 'openssl' not found" >&2; return 1; }
-    # The dedicated keychain's password lives in the vault; without the vault CLI
-    # we cannot manage it non-interactively, so fail closed rather than fall back
-    # to the (headless-hostile) login keychain.
-    command -v secrets  >/dev/null 2>&1 || { echo "ERROR: 'secrets' vault CLI not found; cannot manage the dedicated signing keychain password" >&2; return 1; }
-
-    local prefix pw_key cert_key key_key
-    prefix="$(vault_prefix)"
-    pw_key="${prefix}/keychain_password"
-    cert_key="${prefix}/certificate_pem_b64"
-    key_key="${prefix}/private_key_pem_b64"
+    # NOTE: the Hasna `secrets` vault CLI is OPTIONAL (see HAVE_SECRETS /
+    # identity_get / identity_set). When it is absent we persist the signing
+    # material to a local per-user store, so this path is fully self-contained on
+    # a plain public install and never hard-fails for lack of Hasna infra.
 
     mkdir -p "$SIGNING_DIR" && chmod 700 "$SIGNING_DIR" 2>/dev/null || true
 
-    # 1. Known keychain password: generate once, persist in the vault, reuse.
+    local store_desc
+    if [ "$HAVE_SECRETS" -eq 1 ]; then store_desc="vault"; else store_desc="local store ($SIGNING_DIR)"; fi
+
+    # 1. Known keychain password: generate once, persist, reuse. The password is
+    #    fed to `security` via STDIN everywhere below (never on argv) so it is not
+    #    transiently visible via `ps`.
     local kc_pw
-    kc_pw="$(secrets get "$pw_key" 2>/dev/null || true)"
+    kc_pw="$(identity_get keychain_password)"
     if [ -z "$kc_pw" ]; then
         kc_pw="$(openssl rand -base64 24 | tr -d '\n')"
-        if ! secrets set "$pw_key" "$kc_pw" --type password \
-                --label "Recordings signing keychain password ($(signing_host))" >/dev/null 2>&1; then
-            echo "ERROR: failed to store signing keychain password in the vault ($pw_key)" >&2
+        if ! identity_set keychain_password "$kc_pw" password \
+                "Recordings signing keychain password ($(signing_host))"; then
+            echo "ERROR: failed to persist signing keychain password ($store_desc)" >&2
             return 1
         fi
-        echo "Generated dedicated signing keychain password (stored in vault: $pw_key)."
+        echo "Generated dedicated signing keychain password (persisted: $store_desc)."
     fi
 
     # 2. Create the dedicated keychain if missing; ALWAYS unlock it with the
     #    known password. Disable auto-lock so the key stays reachable headless.
+    #    The password is piped via STDIN — `create-keychain` prompts for it twice
+    #    (password + confirmation) when `-p` is omitted, so we send it twice.
     if [ ! -f "$SIGNING_KEYCHAIN" ]; then
         echo "Creating dedicated code-signing keychain: $SIGNING_KEYCHAIN"
-        if ! "$SECURITY" create-keychain -p "$kc_pw" "$SIGNING_KEYCHAIN" >/dev/null 2>&1; then
+        if ! printf '%s\n%s\n' "$kc_pw" "$kc_pw" | "$SECURITY" create-keychain "$SIGNING_KEYCHAIN" >/dev/null 2>&1; then
             echo "ERROR: failed to create dedicated signing keychain" >&2; return 1
         fi
     fi
-    if ! "$SECURITY" unlock-keychain -p "$kc_pw" "$SIGNING_KEYCHAIN" >/dev/null 2>&1; then
-        echo "ERROR: failed to unlock dedicated signing keychain (stale vault password?)" >&2; return 1
+    if ! printf '%s\n' "$kc_pw" | "$SECURITY" unlock-keychain "$SIGNING_KEYCHAIN" >/dev/null 2>&1; then
+        echo "ERROR: failed to unlock dedicated signing keychain (stale password?)" >&2; return 1
     fi
     # No timeout / no lock-on-sleep: keep it usable across a headless build.
     "$SECURITY" set-keychain-settings "$SIGNING_KEYCHAIN" >/dev/null 2>&1 || true
@@ -122,24 +171,24 @@ ensure_local_signing_identity() {
     #    certificate's common name).
     SIGNING_IDENTITY="$("$SECURITY" find-identity -p codesigning "$SIGNING_KEYCHAIN" 2>/dev/null | grep -oE '[0-9A-F]{40}' | head -1)"
     if [ -n "$SIGNING_IDENTITY" ]; then
-        # Re-assert non-interactive key access with the KNOWN password.
-        "$SECURITY" set-key-partition-list -S apple-tool:,apple: -k "$kc_pw" "$SIGNING_KEYCHAIN" >/dev/null 2>&1 || true
+        # Re-assert non-interactive key access with the KNOWN password (via STDIN).
+        printf '%s\n' "$kc_pw" | "$SECURITY" set-key-partition-list -S apple-tool:,apple: "$SIGNING_KEYCHAIN" >/dev/null 2>&1 || true
         return 0
     fi
 
-    # 5. Materialize cert+key: reuse the vault copy if present (keeps the DR — and
-    #    the TCC grants bound to it — stable even if the keychain is recreated),
-    #    otherwise mint a new self-signed identity and persist it to the vault.
-    local work key crt p12 vault_cert_b64 vault_key_b64
+    # 5. Materialize cert+key: reuse the persisted copy if present (keeps the DR —
+    #    and the TCC grants bound to it — stable even if the keychain is
+    #    recreated), otherwise mint a new self-signed identity and persist it.
+    local work key crt p12 stored_cert_b64 stored_key_b64
     work="$(mktemp -d)" || return 1
     key="$work/key.pem"; crt="$work/cert.pem"; p12="$work/identity.p12"
 
-    vault_cert_b64="$(secrets get "$cert_key" 2>/dev/null || true)"
-    vault_key_b64="$(secrets get "$key_key" 2>/dev/null || true)"
-    if [ -n "$vault_cert_b64" ] && [ -n "$vault_key_b64" ]; then
-        printf '%s' "$vault_cert_b64" | openssl base64 -d -A > "$crt" 2>/dev/null || true
-        printf '%s' "$vault_key_b64"  | openssl base64 -d -A > "$key" 2>/dev/null || true
-        [ -s "$crt" ] && [ -s "$key" ] && echo "Reusing signing certificate from vault ($cert_key)."
+    stored_cert_b64="$(identity_get certificate_pem_b64)"
+    stored_key_b64="$(identity_get private_key_pem_b64)"
+    if [ -n "$stored_cert_b64" ] && [ -n "$stored_key_b64" ]; then
+        printf '%s' "$stored_cert_b64" | openssl base64 -d -A > "$crt" 2>/dev/null || true
+        printf '%s' "$stored_key_b64"  | openssl base64 -d -A > "$key" 2>/dev/null || true
+        [ -s "$crt" ] && [ -s "$key" ] && echo "Reusing signing certificate from $store_desc."
     fi
     if [ ! -s "$crt" ] || [ ! -s "$key" ]; then
         echo "Minting new self-signed code-signing certificate \"$SIGNING_CN\" (one-time)..."
@@ -161,37 +210,54 @@ EOF
         fi
         # Persist so future rebuilds — even after keychain re-creation or machine
         # re-provisioning — reuse the SAME identity and keep the DR stable.
-        secrets set "$cert_key" "$(openssl base64 -A -in "$crt")" --type certificate \
-            --label "Recordings signing cert ($(signing_host))" >/dev/null 2>&1 \
-            || echo "WARN: could not persist signing certificate to vault ($cert_key)" >&2
-        secrets set "$key_key" "$(openssl base64 -A -in "$key")" --type private_key \
-            --label "Recordings signing key ($(signing_host))" >/dev/null 2>&1 \
-            || echo "WARN: could not persist signing key to vault ($key_key)" >&2
+        identity_set certificate_pem_b64 "$(openssl base64 -A -in "$crt")" certificate \
+            "Recordings signing cert ($(signing_host))" \
+            || echo "WARN: could not persist signing certificate ($store_desc)" >&2
+        identity_set private_key_pem_b64 "$(openssl base64 -A -in "$key")" private_key \
+            "Recordings signing key ($(signing_host))" \
+            || echo "WARN: could not persist signing key ($store_desc)" >&2
     fi
+
+    # EPHEMERAL PKCS#12 transport passphrase for the export->import handoff ONLY.
+    # It is deliberately NOT the keychain password and is never persisted: the
+    # p12 file is deleted immediately after import, and this whole branch only
+    # runs once (first-time identity creation; later builds reuse the keychain
+    # identity via step 4). openssl reads it via `-passout stdin`; `security
+    # import` needs `-P` because it does NOT reliably read the passphrase from
+    # STDIN headlessly ("User interaction is not allowed" over SSH). Using a
+    # throwaway value for `-P` keeps the PERSISTENT keychain password off argv.
+    local p12_pw
+    p12_pw="$(openssl rand -base64 18 | tr -d '\n')"
 
     # Package as PKCS#12 for `security import`. macOS's Security framework cannot
     # read the PBKDF2/AES encoding OpenSSL 3 emits by default, so prefer -legacy
     # (RC2/3DES + SHA1 MAC) and fall back for OpenSSL builds without it. Use a
-    # non-empty transport passphrase (the keychain password): an empty p12
-    # password trips "MAC verification failed" on macOS import.
-    if ! openssl pkcs12 -export -legacy -inkey "$key" -in "$crt" -name "$SIGNING_CN" \
-            -out "$p12" -passout pass:"$kc_pw" >/dev/null 2>&1; then
-        if ! openssl pkcs12 -export -inkey "$key" -in "$crt" -name "$SIGNING_CN" \
-                -out "$p12" -passout pass:"$kc_pw" >/dev/null 2>&1; then
+    # non-empty transport passphrase: an empty p12 password trips "MAC
+    # verification failed" on macOS import. Fed to openssl via `-passout stdin`.
+    if ! printf '%s\n' "$p12_pw" | openssl pkcs12 -export -legacy -inkey "$key" -in "$crt" -name "$SIGNING_CN" \
+            -out "$p12" -passout stdin >/dev/null 2>&1; then
+        if ! printf '%s\n' "$p12_pw" | openssl pkcs12 -export -inkey "$key" -in "$crt" -name "$SIGNING_CN" \
+                -out "$p12" -passout stdin >/dev/null 2>&1; then
             rm -rf "$work"; echo "ERROR: failed to package signing identity as PKCS#12" >&2; return 1
         fi
     fi
     # Import into the DEDICATED keychain (never the login keychain), allowlisting
-    # codesign so it may use the private key.
-    if ! "$SECURITY" import "$p12" -k "$SIGNING_KEYCHAIN" -P "$kc_pw" -T /usr/bin/codesign >/dev/null 2>&1; then
+    # codesign so it may use the private key. `-P` carries the EPHEMERAL p12
+    # passphrase (not the keychain password); the keychain itself was unlocked
+    # via STDIN in step 2.
+    if ! "$SECURITY" import "$p12" -k "$SIGNING_KEYCHAIN" -P "$p12_pw" -T /usr/bin/codesign >/dev/null 2>&1; then
         rm -rf "$work"; echo "ERROR: failed to import signing identity into $SIGNING_KEYCHAIN" >&2; return 1
     fi
-    # Trust the self-signed root for code signing so `codesign --verify` passes.
-    "$SECURITY" add-trusted-cert -r trustRoot -p codeSign -k "$SIGNING_KEYCHAIN" "$crt" >/dev/null 2>&1 || true
+    # NOTE: we deliberately do NOT trust the self-signed root in the keychain.
+    # Trusting it requires an authorization that can prompt (and be DENIED) over
+    # SSH, and it is unnecessary: this build only SIGNS the app (it never runs
+    # `codesign --verify`), and codesign signs fine with an untrusted self-signed
+    # identity located by hash. Omitting it keeps the default path prompt-free.
+    #
     # THE headless fix: grant codesign non-interactive access to the imported key
     # using the KNOWN keychain password (never an empty password, never the login
-    # keychain), so signing works over SSH with no interactive allow prompt.
-    if ! "$SECURITY" set-key-partition-list -S apple-tool:,apple: -k "$kc_pw" "$SIGNING_KEYCHAIN" >/dev/null 2>&1; then
+    # keychain) via STDIN, so signing works over SSH with no interactive prompt.
+    if ! printf '%s\n' "$kc_pw" | "$SECURITY" set-key-partition-list -S apple-tool:,apple: "$SIGNING_KEYCHAIN" >/dev/null 2>&1; then
         echo "WARN: set-key-partition-list did not complete; codesign may prompt for key access" >&2
     fi
     rm -rf "$work"

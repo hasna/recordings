@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -49,7 +49,41 @@ describe("install_macos_app.sh / build.sh source contract", () => {
     // and a non-empty transport passphrase (never -P "").
     expect(buildScript).toContain("openssl pkcs12 -export -legacy");
     expect(buildScript).not.toContain('-P ""');
-    expect(buildScript).toContain('-P "$kc_pw"');
+    // openssl reads the transport passphrase via STDIN.
+    expect(buildScript).toContain("-passout stdin");
+    // `security import` needs `-P` (it does not read the passphrase from STDIN
+    // headlessly), but it must carry an EPHEMERAL throwaway passphrase — NEVER
+    // the persistent keychain password — so the keychain password stays off argv.
+    expect(buildScript).not.toContain('-P "$kc_pw"');
+    expect(buildScript).toContain("p12_pw");
+    expect(buildScript).toContain('-P "$p12_pw"');
+  });
+
+  test("secrets vault CLI is optional; public installs fall back to a local store", () => {
+    // A plain `npm i -g @hasna/recordings` on a Mac with no Hasna infra must NOT
+    // hard-require the vault CLI. It falls back to a local, per-user store so the
+    // default path still gets a stable, certificate-based identity headlessly.
+    expect(buildScript).not.toContain("'secrets' vault CLI not found");
+    expect(buildScript).toContain("HAVE_SECRETS");
+    expect(buildScript).toContain("identity_get");
+    expect(buildScript).toContain("identity_set");
+    // The local fallback writes the material mode 600 under the signing dir.
+    expect(buildScript).toContain("chmod 600");
+  });
+
+  test("the auth-gated add-trusted-cert call is removed", () => {
+    // `security add-trusted-cert` needs an authorization that can prompt/deny
+    // over SSH and is unnecessary (the build only signs, never verifies).
+    expect(buildScript).not.toContain("add-trusted-cert");
+  });
+
+  test("the keychain password is fed via STDIN, never on argv", () => {
+    // The known keychain password must not appear on any argv (`-p`/`-k`),
+    // so it is not transiently visible via `ps`.
+    expect(buildScript).not.toContain('-p "$kc_pw"');
+    expect(buildScript).not.toContain('-k "$kc_pw"');
+    expect(buildScript).toMatch(/printf '%s\\n' "\$kc_pw" \| "\$SECURITY" unlock-keychain/);
+    expect(buildScript).toMatch(/printf '%s\\n%s\\n' "\$kc_pw" "\$kc_pw" \| "\$SECURITY" create-keychain/);
   });
 
   test("signing identity is located by hash without the valid-only filter", () => {
@@ -81,9 +115,13 @@ describe("install_macos_app.sh / build.sh source contract", () => {
     expect(buildScript).toContain("recordings-signing.keychain-db");
     expect(buildScript).toContain('"$SECURITY" create-keychain');
     expect(buildScript).toContain('"$SECURITY" unlock-keychain');
-    // Non-interactive key access uses the KNOWN keychain password variable.
+    // Non-interactive key access uses the KNOWN keychain password, fed via STDIN
+    // (never `-k` on argv).
     expect(buildScript).toContain(
-      'set-key-partition-list -S apple-tool:,apple: -k "$kc_pw"',
+      "set-key-partition-list -S apple-tool:,apple:",
+    );
+    expect(buildScript).toMatch(
+      /printf '%s\\n' "\$kc_pw" \| "\$SECURITY" set-key-partition-list/,
     );
     // The dedicated keychain is added to the search list for signing.
     expect(buildScript).toContain("add_signing_keychain_to_search_list");
@@ -368,6 +406,57 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
     // The DR is NOT an ad-hoc cdhash.
     expect(state).not.toContain("Signature=adhoc");
     expect(state).not.toContain("cdhash");
+  });
+
+  // A PATH that has the stub tools + core system tools but NOT the real Hasna
+  // `secrets` CLI (which lives in ~/.bun/bin), so removing the stub genuinely
+  // simulates a Mac with no Hasna vault installed.
+  const SECRETSLESS_PATH = `${"__STUBBIN__"}:/usr/bin:/bin:/usr/sbin:/sbin`;
+
+  test("secrets-absent public install falls back to a local store and still signs cert-based", () => {
+    // Simulate a plain public install with no Hasna vault: remove the `secrets`
+    // stub AND drop ~/.bun/bin from PATH so build.sh cannot find any `secrets`.
+    rmSync(join(stubBin, "secrets"));
+
+    const result = runInstaller({ PATH: SECRETSLESS_PATH.replace("__STUBBIN__", stubBin) });
+    expect(result.status).toBe(0);
+    // Still signed with a real per-machine certificate, not ad-hoc.
+    expect(markerCount("cert-created")).toBe(1);
+    expect(lastSignIdentity()).toMatch(/^[0-9A-F]{40}$/);
+    const state = installedSignatureState();
+    expect(state).toContain("certificate leaf");
+    expect(state).not.toContain("Signature=adhoc");
+    expect(state).not.toContain("cdhash");
+
+    // Signing material was persisted to the LOCAL store, NOT the vault.
+    const signingDir = join(home, ".hasna", "recordings", "signing");
+    expect(existsSync(join(signingDir, "keychain_password"))).toBeTrue();
+    expect(existsSync(join(signingDir, "certificate_pem_b64"))).toBeTrue();
+    expect(existsSync(join(signingDir, "private_key_pem_b64"))).toBeTrue();
+    // Local files carry the material and the vault dir stays empty.
+    expect(readFileSync(join(signingDir, "keychain_password"), "utf8").length).toBeGreaterThan(0);
+    expect(readdirSync(vault).length).toBe(0);
+  });
+
+  test("secrets-absent: the same local identity is reused on a rebuild (DR persists)", () => {
+    rmSync(join(stubBin, "secrets"));
+    const secretslessPath = SECRETSLESS_PATH.replace("__STUBBIN__", stubBin);
+    const first = runInstaller({ PATH: secretslessPath });
+    expect(first.status).toBe(0);
+    expect(markerCount("cert-created")).toBe(1);
+    const drBefore = installedSignatureState();
+    expect(drBefore).toContain("certificate leaf");
+
+    // Genuine update: change a native source file so the hash changes.
+    writeFileSync(join(nativeDir, "RecordingsLib", "Info.plist"), "<plist>updated build</plist>\n");
+
+    const second = runInstaller({ PATH: secretslessPath });
+    expect(second.status).toBe(0);
+    expect(markerCount("swift-count")).toBe(2);
+    // Reused the SAME locally-persisted certificate (not minted again)...
+    expect(markerCount("cert-created")).toBe(1);
+    // ...so the certificate-based DR is identical -> the TCC grant persists.
+    expect(installedSignatureState()).toBe(drBefore);
   });
 
   test("unchanged source -> no rebuild, grant untouched", () => {

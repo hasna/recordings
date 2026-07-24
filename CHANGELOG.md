@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.12 (2026-07-24) — headless code-signing hardening (0.2.10 maintenance lineage)
+
+Follow-up hardening for the 0.2.11 stable-signing path in
+`src/native/Recordings/build.sh`. 0.2.11 made the signing identity stable but
+still assumed Hasna infrastructure and could prompt or fail over SSH.
+
+- **The Hasna `secrets` vault CLI is now optional.** 0.2.11 hard-failed the
+  build when `secrets` was absent, which broke a plain `npm i -g
+  @hasna/recordings` on a Mac with no Hasna infrastructure. Signing material
+  (keychain password, certificate, private key) is now read/written through
+  `identity_get` / `identity_set`, which use the vault when it is present and
+  otherwise fall back to a per-user local store under
+  `~/.hasna/recordings/signing` with files created mode 600. A public install
+  still gets a stable, certificate-based identity headlessly; the vault is an
+  optimization, never a requirement.
+- **The keychain password never appears on argv.** `create-keychain`,
+  `unlock-keychain`, and `set-key-partition-list` now receive it on STDIN
+  instead of `-p` / `-k`, so it is not transiently visible via `ps`.
+- **Ephemeral PKCS#12 transport passphrase.** The export→import handoff uses a
+  throwaway random passphrase (`-passout stdin` for openssl, `-P` for `security
+  import`, which does not read STDIN headlessly) instead of reusing the
+  persistent keychain password.
+- **Removed the auth-gated `security add-trusted-cert` call.** Trusting the
+  self-signed root requires an authorization that can prompt — and be denied —
+  over SSH, and it is unnecessary: the build only signs (it never runs
+  `codesign --verify`), and codesign signs fine with an untrusted self-signed
+  identity located by hash.
+- **Stale keychain entries are pruned from the search list.** `codesign`
+  iterates the whole user search list, and a dangling reference to a deleted
+  keychain makes identity lookup fail with "no identity found" even when the
+  identity exists in another listed keychain. The list is now rebuilt from the
+  keychains that actually exist on disk, plus the dedicated signing keychain.
+- Tests: source-contract assertions for the STDIN password handling, the
+  ephemeral p12 passphrase, the removed `add-trusted-cert`, and the optional
+  vault; plus two stubbed-toolchain installer tests that run with no `secrets`
+  on `PATH` and assert the local store is used and the same identity (and
+  therefore the same designated requirement) is reused across a rebuild.
+
 ## 0.2.11 (2026-07-24) — maintenance backport for the published 0.2.10 lineage
 
 Fixes the macOS Accessibility/Microphone permission re-prompt loop caused by
