@@ -14,8 +14,20 @@ PACKAGE_ROOT="$(cd "$(/usr/bin/dirname "$0")/.." && /bin/pwd -P)"
 SOURCE="$PACKAGE_ROOT/scripts/native/recordings_fs_guard.c"
 OUTPUT="${1:-$PACKAGE_ROOT/scripts/native/prebuilds/darwin-universal/recordings_fs_guard.node}"
 HEADERS="${2:-$PACKAGE_ROOT/node_modules/node-api-headers/include}"
-CLANG="$(/usr/bin/xcrun --find clang)"
+CLANG="$(/usr/bin/xcrun --sdk macosx --find clang)"
+SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 
+[ -n "$SDK_PATH" ] && [ -d "$SDK_PATH" ] || {
+  echo "Could not resolve a usable macOS SDK with pinned /usr/bin/xcrun." >&2
+  exit 1
+}
+# The published SDK path is a symlink (MacOSX.sdk -> MacOSX<version>.sdk), so
+# canonicalize it and require the resolved sysroot to expose libc headers.
+SDK_PATH="$(cd "$SDK_PATH" && /bin/pwd -P)"
+[ -f "$SDK_PATH/usr/include/dirent.h" ] || {
+  echo "Resolved macOS SDK at ${SDK_PATH} does not provide system headers." >&2
+  exit 1
+}
 [ -f "$SOURCE" ] && [ ! -L "$SOURCE" ] || {
   echo "Native filesystem guard source is missing or unsafe." >&2
   exit 1
@@ -41,6 +53,7 @@ COMMON=(
   -DNAPI_VERSION=9
   -DNODE_GYP_MODULE_NAME=recordings_fs_guard
   -I "$HEADERS"
+  -isysroot "$SDK_PATH"
   -mmacosx-version-min=13.0
 )
 
@@ -50,7 +63,7 @@ COMMON=(
   -output "$WORK_DIR/recordings_fs_guard.node"
 /bin/chmod 0644 "$WORK_DIR/recordings_fs_guard.node"
 /bin/mv "$WORK_DIR/recordings_fs_guard.node" "$OUTPUT"
-/usr/bin/lipo -verify_arch arm64 x86_64 "$OUTPUT"
+/usr/bin/lipo "$OUTPUT" -verify_arch arm64 x86_64
 [ ! -e "$OUTPUT_PARENT/.recordings-fs-guard-build" ] || {
   echo "Native filesystem guard build intermediates escaped the private build directory." >&2
   exit 1

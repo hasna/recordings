@@ -418,7 +418,7 @@ generate_and_verify_native_fs_guard() {
         TMPDIR="$BUILD_WORK_DIR" \
         "$BASH_EXECUTABLE" "$SOURCE_PACKAGE_ROOT/scripts/build_native_fs_guard.sh" \
         "$addon" "$dependency_root/node_modules/node-api-headers/include"
-    /usr/bin/lipo -verify_arch arm64 x86_64 "$addon"
+    /usr/bin/lipo "$addon" -verify_arch arm64 x86_64
     if [ "$MODE" = "release" ]; then
         run_codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp "$addon"
     else
