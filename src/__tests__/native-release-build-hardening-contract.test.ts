@@ -54,7 +54,7 @@ describe("native release build hardening contract", () => {
     );
     expect(packageJson.scripts.prepack).toStartWith("bun run build:native-fs-guard &&");
     expect(nativeGuardBuild).toContain('[ "$(/usr/bin/uname -s)" = "Darwin" ]');
-    expect(nativeGuardBuild).toContain("/usr/bin/lipo -verify_arch arm64 x86_64");
+    expect(nativeGuardBuild).toContain('/usr/bin/lipo "$OUTPUT" -verify_arch arm64 x86_64');
     expect(nativeGuardBuild).toContain("node_modules/node-api-headers/include");
     expect(nativeGuardBuild).not.toContain("npm install");
     expect(nativeGuardBuild).not.toContain("bun install");
@@ -80,7 +80,7 @@ describe("native release build hardening contract", () => {
     expect(buildScript).toContain('run_bun pm pack --destination "$pack_root" --ignore-scripts');
     expect(buildScript).toContain("Native filesystem guard exports are incompatible");
     expect(buildScript).toContain("Object.getOwnPropertyNames(addon).sort()");
-    expect(buildScript).toContain("/usr/bin/lipo -verify_arch arm64 x86_64");
+    expect(buildScript).toContain('/usr/bin/lipo "$addon" -verify_arch arm64 x86_64');
     expect(buildScript).toContain('run_codesign --verify --strict --all-architectures');
     expect(buildScript).toContain(
       "package/scripts/native/prebuilds/darwin-universal/recordings_fs_guard.node",

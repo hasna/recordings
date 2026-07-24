@@ -50,7 +50,7 @@ COMMON=(
   -output "$WORK_DIR/recordings_fs_guard.node"
 /bin/chmod 0644 "$WORK_DIR/recordings_fs_guard.node"
 /bin/mv "$WORK_DIR/recordings_fs_guard.node" "$OUTPUT"
-/usr/bin/lipo -verify_arch arm64 x86_64 "$OUTPUT"
+/usr/bin/lipo "$OUTPUT" -verify_arch arm64 x86_64
 [ ! -e "$OUTPUT_PARENT/.recordings-fs-guard-build" ] || {
   echo "Native filesystem guard build intermediates escaped the private build directory." >&2
   exit 1
