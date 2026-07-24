@@ -8,6 +8,12 @@ MODE="${1:-release}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# A stable certificate identity (e.g. a station signing certificate or a
+# Developer ID) keeps the app's TCC designated requirement constant across
+# rebuilds so macOS permission grants persist. Ad-hoc ("-") pins the identity
+# to this exact binary's CDHash and forces re-authorization after every build.
+CODESIGN_IDENTITY="${RECORDINGS_CODESIGN_IDENTITY:--}"
+
 echo "Building Recordings.app ($MODE)..."
 swift build -c "$MODE" --product App
 
@@ -34,9 +40,15 @@ for bundle in "$BUILD_DIR"/*.resources "$BUILD_DIR"/*.bundle .build/*/"$MODE"/*.
     ditto "$bundle" "$RESOURCES/$(basename "$bundle")"
 done
 
-# Copy entitlements (for codesigning)
+# Sign with entitlements. When an explicit certificate identity is requested,
+# a signing failure must fail the build: silently falling back to ad-hoc would
+# reintroduce identity churn and invalidate existing TCC grants.
 if [ -f RecordingsLib/Recordings.entitlements ]; then
-    codesign --force --sign - --entitlements RecordingsLib/Recordings.entitlements "$APP_DIR" 2>/dev/null || true
+    if [ "$CODESIGN_IDENTITY" = "-" ]; then
+        codesign --force --sign - --entitlements RecordingsLib/Recordings.entitlements "$APP_DIR" 2>/dev/null || true
+    else
+        codesign --force --sign "$CODESIGN_IDENTITY" --entitlements RecordingsLib/Recordings.entitlements "$APP_DIR"
+    fi
 fi
 
 echo "✓ Built $APP_DIR"

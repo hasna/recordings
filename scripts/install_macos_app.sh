@@ -52,6 +52,31 @@ warn_or_fail() {
   exit 1
 }
 
+# A Recordings.app signed with a real certificate (not ad-hoc) has a stable
+# code-signing identity: its TCC designated requirement is certificate-based,
+# so macOS Microphone/Accessibility grants survive app updates. Rebuilding it
+# here would replace that identity with a fresh ad-hoc CDHash and invalidate
+# the user's grants. Preserve it unless a rebuild is explicitly forced.
+app_signature_is_stable() {
+  local app="$1"
+  command -v codesign >/dev/null 2>&1 || return 1
+  local info
+  info="$(codesign -d --verbose=4 "$app" 2>&1)" || return 1
+  printf '%s\n' "$info" | grep -q '^Identifier=com\.hasna\.recordings$' || return 1
+  if printf '%s\n' "$info" | grep -q '^Signature=adhoc$'; then
+    return 1
+  fi
+  codesign --verify "$app" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+if [ -d "$APP_DEST" ] && [ "${RECORDINGS_FORCE_APP_REINSTALL:-0}" != "1" ] && \
+   app_signature_is_stable "$APP_DEST"; then
+  echo "Recordings.app at ${APP_DEST} is signed with a stable certificate identity; skipping rebuild to preserve macOS permission grants."
+  echo "Set RECORDINGS_FORCE_APP_REINSTALL=1 to force a rebuild (macOS may require re-granting Microphone and Accessibility)."
+  exit 0
+fi
+
 if ! command -v swift >/dev/null 2>&1; then
   warn_or_fail "Swift toolchain not found"
 fi
@@ -73,37 +98,9 @@ rm -rf "$APP_DEST"
 mkdir -p "$DATA_DIR"
 cp -R "$APP_SOURCE" "$APP_DEST" || warn_or_fail "failed to copy app bundle"
 
-current_cdhash() {
-  codesign -d --verbose=4 "$1" 2>&1 | awk -F= '/^CDHash=/ { print toupper($2); exit }'
-}
-
-tcc_csreq_hex() {
-  local db_path="$1"
-  local service="$2"
-  if [ ! -r "$db_path" ] || ! command -v sqlite3 >/dev/null 2>&1; then
-    return 0
-  fi
-  sqlite3 "$db_path" \
-    "SELECT hex(csreq) FROM access WHERE service = '${service}' AND client = 'com.hasna.recordings' ORDER BY last_modified DESC LIMIT 1;" \
-    2>/dev/null || true
-}
-
-reset_stale_permission() {
-  local service="$1"
-  local tcc_service="$2"
-  local db_path="$3"
-  local cdhash="$4"
-  local csreq_hex
-  csreq_hex="$(tcc_csreq_hex "$db_path" "$tcc_service" | tr '[:lower:]' '[:upper:]')"
-  if [ -n "$cdhash" ] && [ -n "$csreq_hex" ] && [[ "$csreq_hex" != *"$cdhash"* ]]; then
-    tccutil reset "$service" com.hasna.recordings >/dev/null 2>&1 || true
-    echo "Reset stale ${service} permission for the newly installed Recordings.app."
-  fi
-}
-
-APP_CDHASH="$(current_cdhash "$APP_DEST" || true)"
-reset_stale_permission "Microphone" "kTCCServiceMicrophone" "${HOME}/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
-reset_stale_permission "Accessibility" "kTCCServiceAccessibility" "/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
+# NOTE: this installer must never modify TCC permission state. Automatically
+# resetting "stale" grants deleted the user's Microphone/Accessibility
+# approvals on every update; users must always keep their existing decisions.
 
 # A second copy in ~/Applications splits TCC permissions and leaves users running
 # stale builds. Keep that launch point but always point it at the fresh build.
