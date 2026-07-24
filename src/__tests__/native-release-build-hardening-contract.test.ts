@@ -26,6 +26,17 @@ const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
   devDependencies: Record<string, string>;
 };
 
+// Walk a source root for shell scripts, pruning build artifacts and vendored trees
+// (.build, .git, node_modules) so the scan only sees scripts this repository owns.
+function collectShellScripts(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") return [];
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) return collectShellScripts(path);
+    return entry.isFile() && entry.name.endsWith(".sh") ? [path] : [];
+  });
+}
+
 function writeExecutable(path: string, source: string): void {
   writeFileSync(path, source);
   chmodSync(path, 0o755);
@@ -112,9 +123,7 @@ describe("native release build hardening contract", () => {
     // architecture and always exits non-zero: it breaks `prepack` (so `npm pack` and
     // `npm publish` fail) while never actually verifying anything.
     const shellScripts = ["scripts", "packaging", "src/native"].flatMap((root) =>
-      readdirSync(root, { recursive: true, encoding: "utf8" })
-        .filter((entry) => entry.endsWith(".sh"))
-        .map((entry) => join(root, entry)),
+      collectShellScripts(root),
     );
     expect(shellScripts).toContain("scripts/build_native_fs_guard.sh");
     expect(shellScripts).toContain(join("src/native", "Recordings", "build.sh"));
