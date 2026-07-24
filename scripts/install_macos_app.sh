@@ -52,6 +52,67 @@ warn_or_fail() {
   exit 1
 }
 
+# Deterministic, source-freshness-based rebuild skip.
+#
+# We rebuild only when the app SOURCES or the package VERSION actually changed.
+# The decision is a hash of the native app source tree plus the package version
+# — NOT the app's signature. This is deliberate:
+#   * Identical reinstall (same source/version): keep the already-installed,
+#     already-granted app untouched, so macOS permission grants survive.
+#   * Genuine app update (source or version changed): rebuild and re-sign with
+#     the same stable per-machine certificate. Its certificate-based designated
+#     requirement is unchanged, so the grants survive the update too — no
+#     update-starvation and no force flag needed.
+STAMP_FILE="${DATA_DIR}/.recordings-source-hash"
+
+# Keep the ~/Applications launch point pointed at the current build and restart
+# a running instance. A second, stale copy in ~/Applications splits TCC
+# permissions and leaves users on an old build, so we refresh it from the
+# canonical app on EVERY path — including the skip-rebuild path, where the
+# canonical app is the already-installed APP_DEST.
+refresh_alt_copy_and_restart() {
+  local source_app="$1"
+  [ -d "$source_app" ] || return 0
+
+  local alt_copy="${HOME}/Applications/Recordings.app"
+  if [ -d "$alt_copy" ]; then
+    rm -rf "$alt_copy"
+    cp -R "$source_app" "$alt_copy" || true
+    echo "Updated stale copy at ${alt_copy} to the current app."
+  fi
+
+  # If an old instance is running, restart it on the current build.
+  if pgrep -x Recordings >/dev/null 2>&1; then
+    pkill -x Recordings || true
+    sleep 1
+    open "$APP_DEST" || true
+    echo "Restarted Recordings.app on the current build."
+  fi
+}
+
+compute_source_hash() {
+  command -v shasum >/dev/null 2>&1 || return 1
+  [ -d "$NATIVE_DIR" ] || return 1
+  {
+    # Version-aware: the package version line participates in the hash.
+    grep '"version"' "${PACKAGE_ROOT}/package.json" 2>/dev/null
+    # Source-aware: hash every native source file (relative paths, so the hash
+    # is independent of the install location), excluding build artifacts.
+    ( cd "$NATIVE_DIR" && find . -type f ! -path './.build/*' -exec shasum {} + 2>/dev/null | sort )
+  } | shasum | awk '{print $1}'
+}
+
+SOURCE_HASH="$(compute_source_hash)"
+
+if [ -d "$APP_DEST" ] && [ "${RECORDINGS_FORCE_APP_REINSTALL:-0}" != "1" ] && \
+   [ -n "$SOURCE_HASH" ] && [ -f "$STAMP_FILE" ] && \
+   [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$SOURCE_HASH" ]; then
+  echo "Recordings.app at ${APP_DEST} is already built from the current sources; skipping rebuild to preserve macOS permission grants."
+  echo "Set RECORDINGS_FORCE_APP_REINSTALL=1 to force a rebuild."
+  refresh_alt_copy_and_restart "$APP_DEST"
+  exit 0
+fi
+
 if ! command -v swift >/dev/null 2>&1; then
   warn_or_fail "Swift toolchain not found"
 fi
@@ -73,53 +134,16 @@ rm -rf "$APP_DEST"
 mkdir -p "$DATA_DIR"
 cp -R "$APP_SOURCE" "$APP_DEST" || warn_or_fail "failed to copy app bundle"
 
-current_cdhash() {
-  codesign -d --verbose=4 "$1" 2>&1 | awk -F= '/^CDHash=/ { print toupper($2); exit }'
-}
-
-tcc_csreq_hex() {
-  local db_path="$1"
-  local service="$2"
-  if [ ! -r "$db_path" ] || ! command -v sqlite3 >/dev/null 2>&1; then
-    return 0
-  fi
-  sqlite3 "$db_path" \
-    "SELECT hex(csreq) FROM access WHERE service = '${service}' AND client = 'com.hasna.recordings' ORDER BY last_modified DESC LIMIT 1;" \
-    2>/dev/null || true
-}
-
-reset_stale_permission() {
-  local service="$1"
-  local tcc_service="$2"
-  local db_path="$3"
-  local cdhash="$4"
-  local csreq_hex
-  csreq_hex="$(tcc_csreq_hex "$db_path" "$tcc_service" | tr '[:lower:]' '[:upper:]')"
-  if [ -n "$cdhash" ] && [ -n "$csreq_hex" ] && [[ "$csreq_hex" != *"$cdhash"* ]]; then
-    tccutil reset "$service" com.hasna.recordings >/dev/null 2>&1 || true
-    echo "Reset stale ${service} permission for the newly installed Recordings.app."
-  fi
-}
-
-APP_CDHASH="$(current_cdhash "$APP_DEST" || true)"
-reset_stale_permission "Microphone" "kTCCServiceMicrophone" "${HOME}/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
-reset_stale_permission "Accessibility" "kTCCServiceAccessibility" "/Library/Application Support/com.apple.TCC/TCC.db" "$APP_CDHASH"
-
-# A second copy in ~/Applications splits TCC permissions and leaves users running
-# stale builds. Keep that launch point but always point it at the fresh build.
-ALT_COPY="${HOME}/Applications/Recordings.app"
-if [ -d "$ALT_COPY" ]; then
-  rm -rf "$ALT_COPY"
-  cp -R "$APP_SOURCE" "$ALT_COPY" || true
-  echo "Updated stale copy at ${ALT_COPY} to the freshly built app."
+# Record the source/version hash this build was produced from so an identical
+# future reinstall is skipped (see the rebuild-skip guard above).
+if [ -n "$SOURCE_HASH" ]; then
+  printf '%s\n' "$SOURCE_HASH" > "$STAMP_FILE"
 fi
 
-# If an old instance is running, restart it on the new build.
-if pgrep -x Recordings >/dev/null 2>&1; then
-  pkill -x Recordings || true
-  sleep 1
-  open "$APP_DEST" || true
-  echo "Restarted Recordings.app on the new build."
-fi
+# NOTE: this installer must never modify TCC permission state. Automatically
+# resetting "stale" grants deleted the user's Microphone/Accessibility
+# approvals on every update; users must always keep their existing decisions.
+
+refresh_alt_copy_and_restart "$APP_DEST"
 
 echo "Installed Recordings.app from package: ${APP_DEST}"
