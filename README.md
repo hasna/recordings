@@ -22,12 +22,22 @@ across updates or macOS re-prompts on every install.
 - **Stable signing by default — no configuration needed.** If
   `RECORDINGS_CODESIGN_IDENTITY` is set (e.g. a Developer ID or a station signing
   certificate), it is used. Otherwise the build creates, once, a per-machine
-  self-signed code-signing certificate named **"Hasna Recordings Signing"** in
-  your login keychain and reuses it for every subsequent build. Because the same
-  certificate is reused, the designated requirement is certificate-based and
-  constant across rebuilds, so your Microphone/Accessibility grants survive
-  updates. The build never falls back to ad-hoc signing (which would change the
-  requirement on every rebuild and force re-authorization).
+  self-signed code-signing certificate named **"Hasna Recordings Signing"** and
+  reuses it for every subsequent build. Because the same certificate is reused,
+  the designated requirement is certificate-based and constant across rebuilds,
+  so your Microphone/Accessibility grants survive updates. The build never falls
+  back to ad-hoc signing (which would change the requirement on every rebuild and
+  force re-authorization).
+- **Works headless (over SSH).** The signing identity lives in a **dedicated**
+  keychain (`~/.hasna/recordings/signing/recordings-signing.keychain-db`) whose
+  password is generated once and stored in the secrets vault
+  (`hasna/machine/<host>/recordings/signing/keychain_password`). The build
+  unlocks that keychain with the known password and runs
+  `security set-key-partition-list -S apple-tool:,apple:` so `codesign` gets
+  non-interactive key access with no prompt — it never depends on the login
+  keychain being unlocked. Requires the `secrets` vault CLI on the machine.
+- **Fails closed without entitlements.** If `RecordingsLib/Recordings.entitlements`
+  is missing the build aborts rather than shipping an unsigned/unentitled app.
 - **Rebuild only on real changes.** Reinstalling the same version does not
   rebuild the app: the installer compares a hash of the native sources plus the
   package version (recorded at `~/.hasna/recordings/.recordings-source-hash`) and

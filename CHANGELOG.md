@@ -23,12 +23,30 @@ Changes:
   `RECORDINGS_CODESIGN_IDENTITY` is provided it is honored (and a signing
   failure fails the build — no silent ad-hoc fallback). Otherwise the build
   creates, once, a per-machine self-signed code-signing certificate named
-  **"Hasna Recordings Signing"** in the login keychain and reuses it on every
-  subsequent build. Because the same certificate is reused, the app's TCC
-  designated requirement is certificate-based and constant across rebuilds, so
-  Microphone/Accessibility grants survive app updates. The build **never**
-  defaults to ad-hoc (`--sign -`); if it cannot obtain a stable identity it
-  fails rather than churning the identity.
+  **"Hasna Recordings Signing"** and reuses it on every subsequent build.
+  Because the same certificate is reused, the app's TCC designated requirement
+  is certificate-based and constant across rebuilds, so Microphone/Accessibility
+  grants survive app updates. The build **never** defaults to ad-hoc
+  (`--sign -`); if it cannot obtain a stable identity it fails rather than
+  churning the identity.
+- **Headless (SSH) code-signing.** `build.sh` no longer uses the login keychain
+  or `security set-key-partition-list -k ""`. Over SSH the login keychain is
+  locked and codesign blocks on an interactive unlock/allow prompt. The build
+  now creates/reuses a **dedicated** code-signing keychain at
+  `~/.hasna/recordings/signing/recordings-signing.keychain-db` whose password is
+  generated once and stored in the secrets vault under
+  `hasna/machine/<host>/recordings/signing/keychain_password`. It
+  `create-keychain`/`unlock-keychain`s with that known password, imports the
+  self-signed identity with `-T /usr/bin/codesign`, adds the keychain to the
+  user search list, and runs
+  `security set-key-partition-list -S apple-tool:,apple: -k <known-password>`
+  so codesign has **non-interactive** key access with no prompt. The signing
+  certificate and private key are also persisted (base64) in the vault
+  (`.../certificate_pem_b64`, `.../private_key_pem_b64`) so the designated
+  requirement stays stable even if the keychain is recreated.
+- **Fail-closed on missing entitlements.** `build.sh` now aborts the build if
+  `RecordingsLib/Recordings.entitlements` is absent, instead of silently
+  skipping signing and shipping an unsigned/unentitled app.
 - **Deterministic, version-aware rebuild skip.** The installer decides whether
   to rebuild by comparing a hash of the native app sources plus the package
   version (stored at `~/.hasna/recordings/.recordings-source-hash`) — NOT the

@@ -35,10 +35,80 @@ describe("install_macos_app.sh / build.sh source contract", () => {
     expect(buildScript).not.toContain("--sign -");
     // An explicit identity must not silently fall back to ad-hoc on failure.
     expect(buildScript).toMatch(
-      /codesign --force --sign "\$RECORDINGS_CODESIGN_IDENTITY" --entitlements [^|]*$/m,
+      /"\$CODESIGN" --force --sign "\$RECORDINGS_CODESIGN_IDENTITY" --entitlements [^|]*$/m,
     );
+    // The default path signs against the DEDICATED keychain, by the identity's
+    // resolved SHA-1 hash (decoupled from the certificate common name).
     expect(buildScript).toMatch(
-      /codesign --force --sign "\$SIGNING_CN" --entitlements [^|]*$/m,
+      /"\$CODESIGN" --force --keychain "\$SIGNING_KEYCHAIN" --sign "\$SIGNING_IDENTITY" --entitlements [^|]*$/m,
+    );
+  });
+
+  test("p12 import is macOS-compatible and non-interactive", () => {
+    // OpenSSL 3's default p12 encoding fails macOS `security import`; use -legacy
+    // and a non-empty transport passphrase (never -P "").
+    expect(buildScript).toContain("openssl pkcs12 -export -legacy");
+    expect(buildScript).not.toContain('-P ""');
+    expect(buildScript).toContain('-P "$kc_pw"');
+  });
+
+  test("signing identity is located by hash without the valid-only filter", () => {
+    // A self-signed identity is untrusted (CSSMERR_TP_NOT_TRUSTED) and invisible
+    // to `find-identity -v`; marking it trusted needs GUI auth unavailable over
+    // SSH. So we must NOT use -v, and locate the identity by its SHA-1 hash.
+    expect(buildScript).not.toContain("find-identity -v -p");
+    expect(buildScript).toContain("find-identity -p codesigning");
+    expect(buildScript).toMatch(/grep -oE '\[0-9A-F\]\{40\}'/);
+  });
+
+  test("keychain tools are invoked by absolute path (shim-proof)", () => {
+    // A same-named `security` shim earlier on PATH must not shadow the real
+    // macOS keychain tool, so build.sh resolves /usr/bin/security by absolute
+    // path (falling back to PATH only where the absolute path is absent).
+    expect(buildScript).toContain('SECURITY="/usr/bin/security"');
+    expect(buildScript).toContain('CODESIGN="/usr/bin/codesign"');
+    // The keychain commands go through the resolved binary, not bare `security`.
+    expect(buildScript).toMatch(/"\$SECURITY" (create-keychain|unlock-keychain|find-identity|import|set-key-partition-list)/);
+  });
+
+  test("headless keychain auth: dedicated keychain, known password, never -k \"\"", () => {
+    // THE blocker regression guard: codesign key access over SSH must never be
+    // granted with an empty keychain password, and must never rely on the login
+    // keychain being unlocked.
+    expect(buildScript).not.toContain('-k ""');
+    expect(buildScript).not.toContain("login.keychain");
+    // A dedicated signing keychain under the recordings data dir is used.
+    expect(buildScript).toContain("recordings-signing.keychain-db");
+    expect(buildScript).toContain('"$SECURITY" create-keychain');
+    expect(buildScript).toContain('"$SECURITY" unlock-keychain');
+    // Non-interactive key access uses the KNOWN keychain password variable.
+    expect(buildScript).toContain(
+      'set-key-partition-list -S apple-tool:,apple: -k "$kc_pw"',
+    );
+    // The dedicated keychain is added to the search list for signing.
+    expect(buildScript).toContain("add_signing_keychain_to_search_list");
+    expect(buildScript).toContain('"$SECURITY" list-keychains');
+  });
+
+  test("keychain password is sourced from the vault by host-scoped name", () => {
+    // Password (a secret) is never inlined; it is read/written via the vault
+    // under a host-scoped key. Never a literal secret value in the script.
+    expect(buildScript).toContain("hasna/machine/");
+    expect(buildScript).toContain("recordings/signing");
+    expect(buildScript).toContain("keychain_password");
+    expect(buildScript).toContain("secrets get");
+    expect(buildScript).toContain("secrets set");
+  });
+
+  test("build FAILS CLOSED when the entitlements file is absent", () => {
+    // Missing entitlements must abort the build, not skip signing (which would
+    // ship an unsigned/unentitled app).
+    expect(buildScript).toMatch(
+      /if \[ ! -f RecordingsLib\/Recordings\.entitlements \]; then/,
+    );
+    // The old "sign only if entitlements exist, else silently skip" shape is gone.
+    expect(buildScript).not.toMatch(
+      /if \[ -f RecordingsLib\/Recordings\.entitlements \]; then/,
     );
   });
 });
@@ -55,7 +125,7 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
   let stubBin: string;
   let home: string;
   let markers: string;
-  let keychain: string;
+  let vault: string;
   let nativeDir: string;
   let appDest: string;
 
@@ -72,7 +142,7 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
         PATH: `${stubBin}:${process.env.PATH ?? ""}`,
         HOME: home,
         MARKERS: markers,
-        KEYCHAIN: keychain,
+        VAULT: vault,
         ...extraEnv,
       },
     });
@@ -101,10 +171,11 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
     stubBin = join(fixture, "stub-bin");
     home = join(fixture, "home");
     markers = join(fixture, "markers");
-    keychain = join(fixture, "keychain-state");
+    vault = join(fixture, "vault");
     mkdirSync(stubBin, { recursive: true });
     mkdirSync(home, { recursive: true });
     mkdirSync(markers, { recursive: true });
+    mkdirSync(vault, { recursive: true });
 
     // Fixture package layout. The installer derives PACKAGE_ROOT from its path.
     mkdirSync(join(fixture, "scripts"), { recursive: true });
@@ -143,44 +214,103 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
       ].join("\n"),
     );
 
-    // security stub: models a login-keychain code-signing identity that is
-    // created once (recording a stable per-machine serial) and reused.
+    // secrets stub: models the local vault. `get` prints the stored value (exit
+    // 1 when absent); `set` persists it. Keys are host-scoped in build.sh; the
+    // password and cert/key material are keyed by name only — never inlined.
     writeStub(
-      "security",
+      "secrets",
       [
         'cmd="$1"; shift || true',
+        'key="$1"; shift || true',
+        `safe="$(printf '%s' "$key" | tr '/ ' '__')"`,
+        'f="$VAULT/$safe"',
         'case "$cmd" in',
-        "  find-identity)",
-        '    if [ -f "$KEYCHAIN" ]; then echo "  1) ABCDEF1234 \\"Hasna Recordings Signing\\""; fi',
-        "    exit 0 ;;",
-        "  import)",
-        '    if [ ! -f "$KEYCHAIN" ]; then',
-        `      printf 'CN=Hasna Recordings Signing\\nSERIAL=%s\\n' "$$-$RANDOM-$RANDOM" > "$KEYCHAIN"`,
-        '      echo x >> "$MARKERS/cert-created"',
-        "    fi",
-        "    exit 0 ;;",
-        "  add-trusted-cert|set-key-partition-list) exit 0 ;;",
+        "  get)",
+        '    if [ -f "$f" ]; then cat "$f"; exit 0; else echo "Not found: $key" >&2; exit 1; fi ;;',
+        "  set)",
+        '    val="$1"',
+        '    mkdir -p "$VAULT"',
+        `    printf '%s' "$val" > "$f"; exit 0 ;;`,
         "  *) exit 0 ;;",
         "esac",
       ].join("\n"),
     );
 
-    // openssl stub: satisfies build.sh by creating the requested output files.
+    // security stub: models a DEDICATED signing keychain. `create-keychain`
+    // makes the keychain file; `import` records the identity + a stable serial
+    // taken from the (vault-persisted) certificate; `find-identity` reports the
+    // identity when present in the given keychain. Unlock/settings/search-list/
+    // partition-list are no-ops that succeed non-interactively.
     writeStub(
-      "openssl",
+      "security",
       [
-        'prev=""',
-        'for a in "$@"; do',
-        '  case "$prev" in -out|-keyout) : > "$a" 2>/dev/null || true ;; esac',
-        '  prev="$a"',
-        "done",
-        "exit 0",
+        'cmd="$1"; shift || true',
+        'case "$cmd" in',
+        "  create-keychain)",
+        '    kc="${@: -1}"; : > "$kc"; echo x >> "$MARKERS/keychain-created"; exit 0 ;;',
+        "  unlock-keychain|set-keychain-settings|list-keychains|add-trusted-cert)",
+        "    exit 0 ;;",
+        "  set-key-partition-list)",
+        '    printf "%s\\n" "$*" >> "$MARKERS/set-key-partition-list"; exit 0 ;;',
+        "  find-identity)",
+        '    kc="${@: -1}"',
+        '    if [ -f "$kc" ] && grep -q "^CN=Hasna Recordings Signing" "$kc" 2>/dev/null; then',
+        // The identity's 40-hex SHA-1 is derived from the reused serial, so it is
+        // stable across rebuilds (mirroring a real certificate identity). No -v:
+        // the stub lists the (untrusted) identity regardless of validity.
+        `      serial="$(grep '^SERIAL=' "$kc" 2>/dev/null | head -1 | cut -d= -f2)"`,
+        `      h="$(printf '%s' "$serial" | shasum | awk '{print $1}' | tr 'a-f' 'A-F' | cut -c1-40)"`,
+        '      echo "  1) $h \\"Hasna Recordings Signing\\""',
+        "    fi",
+        "    exit 0 ;;",
+        "  import)",
+        '    p12="$1"; shift',
+        '    kc=""; prev=""',
+        '    for a in "$@"; do case "$prev" in -k) kc="$a" ;; esac; prev="$a"; done',
+        `    serial="$(grep -o 'SERIAL=[^ ]*' "$p12" 2>/dev/null | head -1 | cut -d= -f2)"`,
+        `    printf 'CN=Hasna Recordings Signing\\nSERIAL=%s\\n' "$serial" > "$kc"`,
+        '    echo x >> "$MARKERS/cert-created"',
+        "    exit 0 ;;",
+        "  *) exit 0 ;;",
+        "esac",
       ].join("\n"),
     );
 
-    // codesign stub: --sign <cert> writes a certificate-based DR derived from
-    // the reused serial (stable across rebuilds); --sign - writes a cdhash DR
-    // (changes with the binary). Records the identity used.
+    // openssl stub: `req` mints a cert/key pair sharing a stable serial; `pkcs12`
+    // carries that serial into the p12; `base64` is an identity passthrough (so
+    // vault round-tripping preserves the serial); `rand` yields a password.
+    writeStub(
+      "openssl",
+      [
+        'cmd="$1"; shift || true',
+        'case "$cmd" in',
+        "  req)",
+        '    key=""; crt=""; prev=""',
+        '    for a in "$@"; do case "$prev" in -keyout) key="$a" ;; -out) crt="$a" ;; esac; prev="$a"; done',
+        '    serial="$$-$RANDOM-$RANDOM"',
+        `    [ -n "$key" ] && printf 'KEY SERIAL=%s\\n' "$serial" > "$key"`,
+        `    [ -n "$crt" ] && printf 'CERT SERIAL=%s\\n' "$serial" > "$crt"`,
+        "    exit 0 ;;",
+        "  pkcs12)",
+        '    in=""; out=""; prev=""',
+        '    for a in "$@"; do case "$prev" in -in) in="$a" ;; -out) out="$a" ;; esac; prev="$a"; done',
+        '    [ -n "$out" ] && cat "$in" > "$out" 2>/dev/null || true',
+        "    exit 0 ;;",
+        "  base64)",
+        '    infile=""; prev=""',
+        '    for a in "$@"; do case "$prev" in -in) infile="$a" ;; esac; prev="$a"; done',
+        '    if [ -n "$infile" ]; then cat "$infile"; else cat; fi',
+        "    exit 0 ;;",
+        "  rand)",
+        '    echo "stubkcpw$$-$RANDOM"; exit 0 ;;',
+        "  *) exit 0 ;;",
+        "esac",
+      ].join("\n"),
+    );
+
+    // codesign stub: --sign <cert> --keychain <kc> writes a certificate-based DR
+    // derived from the keychain's reused serial (stable across rebuilds);
+    // --sign - writes a cdhash DR (changes with the binary). Records the identity.
     writeStub(
       "codesign",
       [
@@ -191,10 +321,11 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
         '  [ -f "$app/Contents/signature-state" ] && cat "$app/Contents/signature-state" >&2',
         "  exit 0",
         "fi",
-        'id=""; app=""',
+        'id=""; app=""; kc=""',
         'while [ "$#" -gt 0 ]; do',
         "  case \"$1\" in",
         '    --sign) id="$2"; shift 2 ;;',
+        '    --keychain) kc="$2"; shift 2 ;;',
         "    --entitlements) shift 2 ;;",
         "    --force) shift ;;",
         '    *) app="$1"; shift ;;',
@@ -206,9 +337,13 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
         '  cdh="$(shasum "$app/Contents/MacOS/Recordings" 2>/dev/null | awk "{print \\$1}")"',
         `  printf 'Identifier=com.hasna.recordings\\nSignature=adhoc\\ndesignated => cdhash H"%s"\\n' "$cdh" > "$app/Contents/signature-state"`,
         "else",
-        `  serial="$(grep '^SERIAL=' "$KEYCHAIN" 2>/dev/null | head -1 | cut -d= -f2)"`,
+        // Signed by the identity's hash; the Authority (cert CN) and the
+        // certificate-based DR are read from the keychain's reused serial, so
+        // they are stable across rebuilds.
+        `  serial="$(grep '^SERIAL=' "$kc" 2>/dev/null | head -1 | cut -d= -f2)"`,
+        `  cn="$(grep '^CN=' "$kc" 2>/dev/null | head -1 | cut -d= -f2-)"`,
         '  dr="$(printf "%s" "$serial" | shasum | awk "{print \\$1}")"',
-        `  printf 'Identifier=com.hasna.recordings\\nAuthority=%s\\ndesignated => identifier "com.hasna.recordings" and certificate leaf = H"%s"\\n' "$id" "$dr" > "$app/Contents/signature-state"`,
+        `  printf 'Identifier=com.hasna.recordings\\nAuthority=%s\\ndesignated => identifier "com.hasna.recordings" and certificate leaf = H"%s"\\n' "$cn" "$dr" > "$app/Contents/signature-state"`,
         "fi",
         "exit 0",
       ].join("\n"),
@@ -224,7 +359,8 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
     expect(result.status).toBe(0);
     // A per-machine signing certificate was created once and used to sign.
     expect(markerCount("cert-created")).toBe(1);
-    expect(lastSignIdentity()).toBe("Hasna Recordings Signing");
+    // codesign is invoked with the identity's SHA-1 hash, not a name.
+    expect(lastSignIdentity()).toMatch(/^[0-9A-F]{40}$/);
 
     const state = installedSignatureState();
     expect(state).toContain("certificate leaf");
@@ -268,7 +404,7 @@ describe("install_macos_app.sh behavior (stubbed macOS toolchain)", () => {
     expect(markerCount("swift-count")).toBe(2);
     // ...that reused the SAME certificate (not created again)...
     expect(markerCount("cert-created")).toBe(1);
-    expect(lastSignIdentity()).toBe("Hasna Recordings Signing");
+    expect(lastSignIdentity()).toMatch(/^[0-9A-F]{40}$/);
     // ...so the certificate-based DR is identical -> the TCC grant persists.
     const drAfter = installedSignatureState();
     expect(drAfter).toContain("certificate leaf");
