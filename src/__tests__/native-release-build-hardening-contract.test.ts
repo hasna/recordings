@@ -5,6 +5,7 @@ import {
   linkSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -102,6 +103,52 @@ describe("native release build hardening contract", () => {
     expect(result.stderr.toString()).toContain(
       "production filesystem guard prebuild must be built on macOS",
     );
+  });
+
+  test("never verifies architectures with lipo's file-last argument form", () => {
+    // `lipo` is documented as `lipo <input_file> <command> ...` and `-verify_arch`
+    // consumes every remaining argument as an architecture. The file-last form
+    // (`lipo -verify_arch arm64 x86_64 "$file"`) therefore parses the path as an
+    // architecture and always exits non-zero: it breaks `prepack` (so `npm pack` and
+    // `npm publish` fail) while never actually verifying anything.
+    const shellScripts = ["scripts", "packaging", "src/native"].flatMap((root) =>
+      readdirSync(root, { recursive: true, encoding: "utf8" })
+        .filter((entry) => entry.endsWith(".sh"))
+        .map((entry) => join(root, entry)),
+    );
+    expect(shellScripts).toContain("scripts/build_native_fs_guard.sh");
+    expect(shellScripts).toContain(join("src/native", "Recordings", "build.sh"));
+
+    const fileLastVerifyArch = shellScripts.flatMap((path) =>
+      readFileSync(path, "utf8")
+        // join escaped line continuations so a wrapped invocation is still one logical line
+        .replace(/\\\n\s*/g, " ")
+        .split("\n")
+        .filter((line) => /\blipo"?\s+(-[A-Za-z0-9_]+\s+)*-verify_arch\b/.test(line))
+        .map((line) => `${path}: ${line.trim()}`),
+    );
+    expect(fileLastVerifyArch).toEqual([]);
+  });
+
+  test("pins a validated macOS SDK sysroot before compiling the descriptor guard", () => {
+    // `xcrun --find clang` only resolves the compiler; the returned binary is then run
+    // directly under a sanitized env, so it never inherits xcrun's SDKROOT injection and
+    // fails with `'dirent.h' file not found` on a Command Line Tools-only host.
+    expect(nativeGuardBuild).toContain(
+      'SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"',
+    );
+    expect(nativeGuardBuild).toContain('-isysroot "$SDK_PATH"');
+    expect(nativeGuardBuild).toContain('[ -f "$SDK_PATH/usr/include/dirent.h" ]');
+
+    const firstCompile = nativeGuardBuild.indexOf('"$CLANG" "${COMMON[@]}" -arch arm64');
+    expect(firstCompile).toBeGreaterThan(-1);
+    for (const guard of [
+      'SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"',
+      '[ -f "$SDK_PATH/usr/include/dirent.h" ]',
+      '-isysroot "$SDK_PATH"',
+    ]) {
+      expect(nativeGuardBuild.indexOf(guard)).toBeLessThan(firstCompile);
+    }
   });
 
   test("builds and verifies the exact universal release executable cohort", () => {
