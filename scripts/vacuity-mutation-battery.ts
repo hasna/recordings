@@ -129,8 +129,22 @@ function mutate(row: Row, original: string): string | undefined {
   return undefined;
 }
 
+/**
+ * `bun test -t` takes a REGEX, not a substring.
+ *
+ * A test named `rendering RecordingEngine.logResolvedTrigger()'s format string parses as expected`
+ * contains `()`, which as a pattern is an empty capture group, so the literal parentheses in the
+ * name are never matched and bun reports `matched 0 tests` and exits 1. Unescaped, that presented as
+ * RED-ON-CLEAN — a refusal to conclude rather than a false pass, but still two sites left unproven
+ * for a reason that had nothing to do with them.
+ */
+function escapeForTestFilter(name: string): string {
+  return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function runTest(testFile: string, testName: string): { code: number; output: string } {
-  const result = spawnSync("bun", ["test", testFile, "-t", testName, "--timeout", "120000"], {
+  const filter = escapeForTestFilter(testName);
+  const result = spawnSync("bun", ["test", testFile, "-t", filter, "--timeout", "120000"], {
     encoding: "utf8",
     env: { ...process.env, NO_COLOR: "1" },
     maxBuffer: 64 * 1024 * 1024,
