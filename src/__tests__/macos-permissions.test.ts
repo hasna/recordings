@@ -29,8 +29,12 @@ function probeReturning(
   options: { presentDatabases?: string[] } = {},
 ): TccPermissionProbe {
   return {
-    databaseExists: (dbPath) =>
-      options.presentDatabases ? options.presentDatabases.includes(dbPath) : true,
+    databasePresence: (dbPath) =>
+      options.presentDatabases
+        ? options.presentDatabases.includes(dbPath)
+          ? "present"
+          : "absent"
+        : "present",
     readAccessRow: () => (row ? { kind: "row", row } : { kind: "absent" }),
     verifyStoredRequirement: () => verification,
   };
@@ -130,7 +134,7 @@ describe("TCC grant identity verification", () => {
   test("non-allowed decisions are returned without consulting the signature", () => {
     let verifyCalls = 0;
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: () => ({
         kind: "row",
         row: { authValue: "0", csreqHex: STATION_CSREQ_HEX },
@@ -174,7 +178,7 @@ describe("TCC grant identity verification", () => {
     const [userDatabase, systemDatabase] = tccDatabasePaths("/Users/tester");
     const consulted: string[] = [];
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: (dbPath) => {
         consulted.push(dbPath);
         return dbPath === systemDatabase
@@ -206,7 +210,7 @@ describe("TCC grant identity verification", () => {
   /// when in fact the answer was simply unread — the failure this suite exists to prevent.
   test("an unreadable database is reported as undetermined, never as not_determined", () => {
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: () => ({ kind: "unreadable", detail: "unable to open database file" }),
       verifyStoredRequirement: () => "satisfied",
     };
@@ -225,7 +229,7 @@ describe("TCC grant identity verification", () => {
   test("an unreadable user database does not mask a real grant in the system database", () => {
     const [userDatabase, systemDatabase] = tccDatabasePaths("/Users/tester");
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: (dbPath) =>
         dbPath === userDatabase
           ? { kind: "unreadable", detail: "permission denied" }
@@ -356,7 +360,7 @@ describe("grant durability comes from the stored requirement", () => {
 
   function grantProbe(storedRequirement: string | null): TccPermissionProbe {
     return {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: () => ({
         kind: "row",
         row: { authValue: "2", csreqHex: STATION_CSREQ_HEX },
@@ -405,7 +409,7 @@ describe("grant durability comes from the stored requirement", () => {
 
   test("durability is per service, so one app can hold one durable and one fragile grant", () => {
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: (_dbPath, service) => ({
         kind: "row",
         row: { authValue: "2", csreqHex: STATION_CSREQ_HEX, service } as TccAccessRow,
@@ -447,7 +451,7 @@ describe("grant durability comes from the stored requirement", () => {
 describe("TCC database read failures", () => {
   function probeWithSqliteFailure(detail: string): TccPermissionProbe {
     return {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: () =>
         /no such table/i.test(detail) ? { kind: "absent" } : { kind: "unreadable", detail },
       verifyStoredRequirement: () => "satisfied",
