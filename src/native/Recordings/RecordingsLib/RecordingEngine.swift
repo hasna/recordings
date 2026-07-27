@@ -1005,10 +1005,36 @@ public final class RecordingEngine: ObservableObject {
             // more, so it must not replace it. The residual race — secure input taken and
             // released entirely inside the posting window — is unobservable from here and stays
             // unobservable; this closes the case where it is still held.
+            //
+            // This reading does NOT change the return value, and that is the whole design of it.
+            // Returning `.refusedSecureInput` here would be wrong twice over. The coordinator
+            // answers that case with `failNow`, which settles immediately and never builds the
+            // `PendingDelivery` — so the read-back, the ONLY evidence that can say whether the
+            // keystroke actually landed, would be discarded at precisely the moment it is needed.
+            // And a post-post `.active` reading cannot distinguish the two cases it spans: secure
+            // input taken between `up.post()` and this probe leaves the events already dispatched
+            // and probably delivered, while secure input taken during the posts drops them.
+            // Calling that a refusal would tell the owner "transcript copied, press Cmd-V" for a
+            // paste that already succeeded, and Cmd-V would paste it a second time — a worse
+            // failure than the missing disclosure it was meant to fix. It would also make the log
+            // say `not_posted_secure_input` for events that WERE posted, trading one false
+            // statement for another. `.refusedSecureInput` means "nothing was posted"; it must
+            // keep meaning that.
+            //
+            // So the read-back stays the arbiter (#28's ruling) and this probe makes the LOG
+            // honest: `PasteDeliveryReport` now carries the post-post reading, where it previously
+            // carried the pre-post one and recorded `secure_input=inactive` for a paste secure
+            // input may have eaten — asserting the opposite of what happened rather than merely
+            // omitting it.
+            //
+            // NOT restored, and deliberately: attribution strong enough to reach the persistence
+            // and visibility path. Making a non-confirming read-back settle as
+            // `.secureInputActive` needs a new keystroke-attempt case threaded through
+            // `PasteAttempt`, or the log token lies about whether events were posted. That
+            // widening is a design change, left for review rather than smuggled in here.
             let secureInputAfterPost = SecureInputProbe.current()
-            if case .active(let holder) = secureInputAfterPost {
+            if case .active = secureInputAfterPost {
                 self?.lastPasteSecureInputProbe = secureInputAfterPost
-                return .refusedSecureInput(holder)
             }
             // Constructed and posted. Nothing here observes delivery, which is why this
             // returns `.posted` and not a success.

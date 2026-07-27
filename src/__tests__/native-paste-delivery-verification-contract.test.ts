@@ -395,17 +395,25 @@ describe("native paste delivery verification contract", () => {
       expect(at).toBeLessThan(secondProbe);
     }
 
-    // The later reading refuses the delivery AND becomes what the log reports, or the report still
-    // says `secureInput=inactive` for the paste it just lost.
+    // The later reading becomes what the log reports, or `PasteDeliveryReport` keeps carrying the
+    // pre-post one and states `secure_input=inactive` for a paste secure input may have eaten.
     const afterPost = poster.slice(secondProbe);
-    expect(afterPost).toMatch(/if case \.active\(let holder\) = secureInputAfterPost/);
+    expect(afterPost).toMatch(/if case \.active = secureInputAfterPost/);
     expect(afterPost).toContain("lastPasteSecureInputProbe = secureInputAfterPost");
-    expect(afterPost).toContain("return .refusedSecureInput(holder)");
 
-    // And `.refusedSecureInput` is still the route to the outcome that persists a reason, so the
-    // recheck actually reaches a surface rather than only the log.
-    expect(engine).toContain(".secureInputActive(holder)");
-    expect(engine).toContain("Self.isSecureInputOutcome(outcome) ? message : nil");
+    // And it must NOT become a refusal. `.refusedSecureInput` is answered by `failNow`, which
+    // settles immediately and never builds the `PendingDelivery` — so refusing here would discard
+    // the read-back, the only evidence that can say whether the keystroke landed, and would tell
+    // the owner to press Cmd-V for a paste that may already have succeeded, pasting it twice.
+    expect(afterPost).not.toContain("return .refusedSecureInput");
+    expect(afterPost).not.toContain("failNow");
+
+    // `.refusedSecureInput` therefore keeps meaning "nothing was posted": it may only be returned
+    // BEFORE the events are posted, which is what its `not_posted_secure_input` token asserts.
+    const refusals = [...poster.matchAll(/return \.refusedSecureInput\(/g)].map((m) => m.index ?? -1);
+    expect(refusals.length).toBe(1);
+    expect(refusals[0]).toBeLessThan(poster.indexOf("down.post(tap: .cgSessionEventTap)"));
+    expect(verificationSource()).toContain('case .refusedSecureInput: "not_posted_secure_input"');
   });
 
   test("the Swift regression tests that pin the defect are part of the test target", () => {
