@@ -742,6 +742,16 @@ public final class RecordingEngine: ObservableObject {
     /// source was written last: a reason that reorders itself between renders reads as two
     /// different problems.
     enum BlockedReasonSource: Int, CaseIterable, Comparable, Sendable {
+        /// The last delivery could not reach the target app and the transcript is sitting on
+        /// the clipboard waiting for the user. Cleared by the next recording, not by the next
+        /// status write.
+        ///
+        /// FIRST deliberately. This is the only reason that tells the owner their transcript is
+        /// still recoverable ("press Cmd-V"), and it used to sort LAST — so with a blocked
+        /// trigger as well it landed at the tail of a `.font(.caption)` `Text` in a 260-pt
+        /// popover, behind two reasons about key bindings. Data-recovery advice leads; the
+        /// trigger reasons are about a next press, which can wait.
+        case delivery
         /// The keyboard shortcut collides with an enabled system shortcut.
         case hotkey
         /// The fn monitor cannot run (Accessibility).
@@ -749,12 +759,58 @@ public final class RecordingEngine: ObservableObject {
         /// A trigger fired but the press was consumed before recording could start — the
         /// permission-prompt case. Transient, and cleared by the next start.
         case pressConsumed
-        /// The last delivery could not reach the target app and the transcript is sitting on
-        /// the clipboard waiting for the user. Cleared by the next recording, not by the next
-        /// status write.
-        case delivery
 
         static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+
+        /// Whether this source describes trigger *health* — the subject of the Settings
+        /// "Recording Shortcut" section. Exhaustive so a new source has to make the decision
+        /// rather than defaulting into a section whose remedy does not fit it.
+        var isTriggerHealth: Bool {
+            switch self {
+            case .hotkey, .fnKey: true
+            case .delivery, .pressConsumed: false
+            }
+        }
+
+        /// The action that actually fixes this cause, so a surface offering a *button* keys it to
+        /// the cause instead of to whatever text happened to be composed.
+        var remedy: BlockedReasonEntry.Remedy {
+            switch self {
+            case .fnKey: .openAccessibilitySettings
+            // A chord collision is not a permissions problem; the Accessibility pane does
+            // nothing for it and the shortcut recorder is already on screen.
+            case .hotkey: .chooseAnotherShortcut
+            // Both say what to do in the message itself — "press Cmd-V", "press and hold
+            // again" — so a button would be a second, competing instruction.
+            case .delivery, .pressConsumed: .messageOnly
+            }
+        }
+    }
+
+    /// One source's reason together with the remedy that fixes it.
+    ///
+    /// The composed `blockedReason` string is what the menu bar renders, and it is enough there
+    /// because that surface only reports. A Settings section that offers a *button* needs to know
+    /// WHICH problem it is offering to fix: rendering the composed string under "Recording
+    /// Shortcut" next to "Open Accessibility Settings" meant a secure-input paste failure showed
+    /// "transcript copied, press Cmd-V" beside a button that opens the Accessibility pane — the
+    /// wrong remedy, in the wrong section, for the wrong cause.
+    public struct BlockedReasonEntry: Identifiable, Equatable, Sendable {
+        public enum Remedy: Equatable, Sendable {
+            /// Grant Accessibility — what the fn monitor needs before its tap can be created.
+            case openAccessibilitySettings
+            /// Pick a different chord; the recorder that does it is in the same section.
+            case chooseAnotherShortcut
+            /// The message is the whole remedy. No button.
+            case messageOnly
+        }
+
+        let source: BlockedReasonSource
+        public let message: String
+        public var remedy: Remedy { source.remedy }
+        /// Whether this belongs in the Settings trigger section.
+        public var isTriggerHealth: Bool { source.isTriggerHealth }
+        public var id: Int { source.rawValue }
     }
 
     /// Why the app currently cannot record or deliver, when the reason outlives one status
@@ -766,9 +822,20 @@ public final class RecordingEngine: ObservableObject {
     /// cannot do the thing you asked" is two places for a view to forget to read, and the
     /// menu bar forgot to read either of them. One field, one writer.
     @Published public private(set) var blockedReason: String?
+    /// The same reasons, per source and in precedence order. `blockedReason` is composed from
+    /// exactly this array, in the same call, so the two cannot disagree — this is the structured
+    /// form of one field, not a second field describing the same thing.
+    @Published public private(set) var blockedReasonEntries: [BlockedReasonEntry] = []
     /// The ONLY writer of `blockedReason` is `setBlockedReason(_:for:)`. Do not assign the
     /// published property anywhere else; `macos-shortcut-contract.test.ts` asserts that.
     private var blockedReasons: [BlockedReasonSource: String] = [:]
+    /// The recording generation the `.delivery` reason was written for, or nil when none is held.
+    ///
+    /// The `.delivery` reason is the only one that is a claim about a *specific* recording:
+    /// "press Cmd-V" is true of the clipboard that recording wrote, and stops being true once the
+    /// generation moves on. Tracked so `updateStatus()` can expire it structurally instead of
+    /// relying on someone having enumerated every path that ought to clear it.
+    private var deliveryBlockedReasonGeneration: UInt64?
     /// Advanced fallback policy (Settings only): when off, every recording is dictated
     /// literally and the classifier is never consulted.
     @Published public var intentDetectionEnabled: Bool = true {
@@ -917,6 +984,32 @@ public final class RecordingEngine: ObservableObject {
             up.flags = .maskCommand
             down.post(tap: .cgSessionEventTap)
             up.post(tap: .cgSessionEventTap)
+            // Probed AGAIN, after posting, because the pre-post reading cannot cover the case
+            // that matters: a password field takes secure input between that probe and the
+            // keystroke. The window server then drops both events, and the read-back — which
+            // compares two AX reads of the focused field — can say "the text did not land" but
+            // never "secure input ate it". Its vocabulary tops out at
+            // `.notObservedFocusedValueUnchanged` / `.unverified(.readBackUnreadable)`, so the
+            // outcome falls to `.deliveryNotObserved` or `.deliveredUnverified`, neither of which
+            // is an `isSecureInputOutcome` — deliberately — so NOTHING is persisted: no warning
+            // icon, no VoiceOver "blocked" label, and no "press Cmd-V", which is the only thing
+            // telling the owner the transcript is still recoverable.
+            //
+            // And the log was not merely silent about the cause, it stated the opposite:
+            // `lastPasteSecureInputProbe` still held the pre-post reading, so
+            // `PasteDeliveryReport.logLine` recorded `secureInput=inactive` for a paste secure
+            // input had actually eaten.
+            //
+            // Only an `.active` reading overwrites the stored probe. A post-post `.unknown` after
+            // a definite pre-post `.inactive` is less informative about the posting turn, not
+            // more, so it must not replace it. The residual race — secure input taken and
+            // released entirely inside the posting window — is unobservable from here and stays
+            // unobservable; this closes the case where it is still held.
+            let secureInputAfterPost = SecureInputProbe.current()
+            if case .active(let holder) = secureInputAfterPost {
+                self?.lastPasteSecureInputProbe = secureInputAfterPost
+                return .refusedSecureInput(holder)
+            }
             // Constructed and posted. Nothing here observes delivery, which is why this
             // returns `.posted` and not a success.
             return .posted
@@ -1300,15 +1393,34 @@ public final class RecordingEngine: ObservableObject {
 
     /// Record or clear one source's reason and recompute the published value. Each source owns
     /// its own slot; this is the **only** writer of `blockedReason`.
-    private func setBlockedReason(_ reason: String?, for source: BlockedReasonSource) {
+    ///
+    /// - Parameter generation: the recording generation a `.delivery` reason belongs to. Passed
+    ///   explicitly by the paste completion because that closure can run *after*
+    ///   `recordingGeneration` has already moved on — binding to the current value there would
+    ///   stamp a superseded reason as fresh, which is the whole failure this parameter closes.
+    ///   Ignored for every other source, none of which is recording-scoped.
+    private func setBlockedReason(
+        _ reason: String?,
+        for source: BlockedReasonSource,
+        generation: UInt64? = nil
+    ) {
         if let reason, !reason.isEmpty {
             blockedReasons[source] = reason
+            if source == .delivery {
+                deliveryBlockedReasonGeneration = generation ?? recordingGeneration
+            }
         } else {
             blockedReasons.removeValue(forKey: source)
+            if source == .delivery {
+                deliveryBlockedReasonGeneration = nil
+            }
         }
-        let composed = blockedReasons
+        let entries = blockedReasons
             .sorted { $0.key < $1.key }
-            .map(\.value)
+            .map { BlockedReasonEntry(source: $0.key, message: $0.value) }
+        blockedReasonEntries = entries
+        let composed = entries
+            .map(\.message)
             .joined(separator: " · ")
         blockedReason = composed.isEmpty ? nil : composed
     }
@@ -1380,6 +1492,7 @@ public final class RecordingEngine: ObservableObject {
 
     public func updateStatus() {
         if isRecording || isTranscribing || deliveryIsPending { return }
+        expireStaleDeliveryBlockedReason()
         // A blocked trigger outlives one status write. `init` and every `useFnKey` change
         // called `updateFnMonitor()` and then `updateStatus()`, so the fn permission
         // warning was overwritten with "Ready" before it could ever be read — an enabled
@@ -1392,6 +1505,29 @@ public final class RecordingEngine: ObservableObject {
         }
         statusMessage = "Ready"
         flowPhase = .idle
+    }
+
+    /// Drop a `.delivery` reason that belongs to a superseded recording, before anything renders
+    /// it as the current state of the app.
+    ///
+    /// This is the structural half of the delivery reason's lifetime, and it exists because the
+    /// two halves are asymmetric: `updateDeliveryStatus` refuses to write a *status* for a
+    /// superseded generation and clears nothing on that path, while the paste completion's
+    /// `setBlockedReason(…, for: .delivery)` is ungated. A suppressed completion therefore
+    /// withholds the status line and persists "press Cmd-V" anyway — pointing at a clipboard that
+    /// has moved on, on the app's own instruction.
+    ///
+    /// A generation check here rather than a fifth enumerated clear site: the four existing clear
+    /// sites cover the paths someone thought of, and the paths that matter are the ones nobody
+    /// did. `cancelIntentProcessing()` is already one of them — it bumps `recordingGeneration`
+    /// without clearing — and `PasteTransactionCoordinator.failNow` releases the pending fence
+    /// *before* running the completion closure, so the interleaving is one inserted `await` away
+    /// from being reachable rather than latent.
+    private func expireStaleDeliveryBlockedReason() {
+        guard let generation = deliveryBlockedReasonGeneration,
+              generation != recordingGeneration else { return }
+        log("delivery blocked reason expired generation=\(generation) current=\(recordingGeneration)")
+        setBlockedReason(nil, for: .delivery)
     }
 
     // MARK: - Toggle
@@ -3838,9 +3974,13 @@ public final class RecordingEngine: ObservableObject {
                 kind: Self.deliveryStatusKind(for: outcome),
                 pipelineGeneration: transaction.generation
             )
+            // Stamped with the delivery's OWN generation, not the engine's current one: this
+            // closure can run after `recordingGeneration` has advanced, and binding to the
+            // current value would mark a superseded reason fresh. `updateStatus()` expires it.
             self.setBlockedReason(
                 Self.isSecureInputOutcome(outcome) ? message : nil,
-                for: .delivery
+                for: .delivery,
+                generation: transaction.generation
             )
         } settlement: { transaction, outcome in
             let pasteboard = NSPasteboard.general

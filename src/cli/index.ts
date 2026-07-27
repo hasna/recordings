@@ -42,6 +42,7 @@ import {
   describeActiveStore,
   localStoreIsBehindSchema,
   probeRecordingPersistence,
+  renderPersistenceMarker,
   type PersistenceProbeResult,
 } from "../lib/persistence-probe.js";
 import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
@@ -1491,12 +1492,15 @@ program
       // Three states, three markers. A green ✓ on the word SKIPPED is what made this check report
       // PASS while writing, reading and deleting nothing — and on a machine pointed at a shared
       // API store that was the DEFAULT path, so the round-trip was never proved there.
-      const persistenceMarker =
-        persistence.outcome === "proved"
-          ? chalk.green("✓")
-          : persistence.outcome === "skipped"
-            ? chalk.yellow("?")
-            : chalk.red("✗");
+      //
+      // The mapping lives in the lib beside the outcome it renders, because as an inline ternary
+      // here it was unreachable from any test: flipping the `skipped` arm to green survived the
+      // full suite with a byte-identical failure set. Only the palette stays local.
+      const persistenceMarker = renderPersistenceMarker(persistence.outcome, {
+        pass: chalk.green,
+        warn: chalk.yellow,
+        fail: chalk.red,
+      });
       console.log(persistenceMarker + ` Persistence round-trip: ${persistence.message}`);
     }
 

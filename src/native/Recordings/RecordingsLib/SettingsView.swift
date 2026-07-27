@@ -78,11 +78,20 @@ public struct SettingsView: View {
                 // A trigger that is switched on but cannot arm must say so next to its own
                 // switch. Silence here is what made 51 recorded hotkey presses look like a
                 // working trigger while nothing was delivered.
-                if let blocked = engine.blockedReason {
-                    Label(blocked, systemImage: "exclamationmark.triangle.fill")
+                //
+                // Scoped to the trigger sources, and the button keyed to each reason's own
+                // remedy. Rendering the composed `engine.blockedReason` here instead meant a
+                // secure-input paste failure showed "transcript copied, press Cmd-V" under
+                // Recording Shortcut beside an "Open Accessibility Settings" button — wrong
+                // remedy, wrong section, wrong cause. A hotkey collision took that button too,
+                // and the Accessibility pane does nothing for a chord clash either.
+                ForEach(engine.blockedReasonEntries.filter(\.isTriggerHealth)) { entry in
+                    Label(entry.message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Button("Open Accessibility Settings") {
-                        engine.openAccessibilitySettings()
+                    if entry.remedy == .openAccessibilitySettings {
+                        Button("Open Accessibility Settings") {
+                            engine.openAccessibilitySettings()
+                        }
                     }
                 }
             }
