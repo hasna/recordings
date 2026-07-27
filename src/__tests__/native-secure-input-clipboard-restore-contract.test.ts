@@ -178,7 +178,7 @@ function restoresPreviousClipboard(outcome: string, env: Record<string, boolean>
  * the original defect did: negating `if shouldRestore` passed every test in this file at exit 0.
  * A table nobody obeys is not a safeguard.
  *
- * Structural rather than textual: find the single restore call, then the innermost `if` that
+ * Structural rather than textual: find every restore call, then the innermost `if` that
  * encloses it with no intervening block. Throws if the call is unguarded or duplicated, because
  * both are ways for the decision to stop being consulted.
  */
@@ -201,32 +201,6 @@ function restoreGuardConditions(): string[] {
     throw new Error("no previousClipboard.restore call found at all — this test lost its subject");
   }
   return conditions;
-}
-
-/**
- * The settlement restore's condition: the one governed by the decision table.
- *
- * Found by which guard consults the decision rather than by position or count, because there is
- * a second, legitimate restore in `writeClipboardPreservingOnFailure` — a failed clipboard write
- * restoring what it just clobbered, guarded by its own change-count check. Replacing the
- * settlement guard with a constant makes this throw rather than quietly pass, which is the point.
- */
-function settlementRestoreCondition(): string {
-  const settlement = restoreGuardConditions().filter((condition) =>
-    condition.includes("shouldRestore"),
-  );
-  if (settlement.length !== 1) {
-    throw new Error(
-      `expected exactly one restore guarded by the shouldRestore decision, found ` +
-        `${settlement.length} — the decision is no longer what gates the settlement restore`,
-    );
-  }
-  return settlement[0]!;
-}
-
-/** Whether the settlement restore is reached, for a given value of the decision. */
-function restoreIsPerformedWhen(shouldRestore: boolean): boolean {
-  return decides(settlementRestoreCondition(), { shouldRestore });
 }
 
 /** The user-facing status switch, evaluated for a given `restoreClipboard` value. */
@@ -330,26 +304,31 @@ describe("secure input must never cost the user their transcript", () => {
     }
   });
 
-  test("the code obeys the decision instead of inverting or ignoring it", () => {
-    // Two-sided, because each direction is a distinct real defect. Inverted, a refusal
-    // restores and the transcript is destroyed -- the original bug, verbatim. Hardcoded true,
-    // every refusal destroys it. Hardcoded false, no successful dictation ever gets the user's
-    // clipboard back.
-    expect(restoreIsPerformedWhen(true)).toBe(true);
-    expect(restoreIsPerformedWhen(false)).toBe(false);
-  });
-
-  test("a refused paste keeps the transcript once the decision is actually applied", () => {
-    // The whole defect end to end: table plus consumer, composed. This is the assertion that
-    // fails if EITHER half regresses, which neither half's own tests can claim alone.
-    const decision = restoresPreviousClipboard("secureInputActive", REFUSAL_SCENARIO);
-    expect(decision).toBe(false);
-    expect(restoreIsPerformedWhen(decision)).toBe(false);
-
-    // And the converse, so this is not satisfied by a permanently-false guard.
-    const pasted = restoresPreviousClipboard("pasted", REFUSAL_SCENARIO);
-    expect(pasted).toBe(true);
-    expect(restoreIsPerformedWhen(pasted)).toBe(true);
+  test("no clipboard restore in the engine is reached without a condition", () => {
+    // This is what survives of this PR, and it is deliberately narrow.
+    //
+    // The consumer half this PR was written for — "the guard is `shouldRestore`, not `!shouldRestore`
+    // and not `true`" — is now covered by #42, and covered more strictly: it slices the settlement
+    // closure, asserts `restores.length === 1` inside it, and asserts the captured condition is
+    // EXACTLY `shouldRestore`, so an inversion, a constant or an added disjunct all fail on text
+    // without needing an evaluator. Keeping a second, weaker copy of that here would only add a
+    // second thing to update.
+    //
+    // What #42 does NOT cover is the OTHER restore. Its scope comment says so outright: it excludes
+    // `writeClipboardPreservingOnFailure`, which legitimately restores what its own failed write
+    // clobbered, gated by `pasteboard.changeCount == result.ownershipChangeCount`. Deleting that
+    // gate makes the restore unconditional — clobbering whoever took the pasteboard after our failed
+    // write — and it survived at EXIT 0 across every test file that reads RecordingEngine.swift
+    // (130 pass / 0 fail on main c11bc3d). `restoreGuardConditions` throws on exactly that shape.
+    const conditions = restoreGuardConditions();
+    // A count, so a THIRD restore call has to be argued for here rather than appearing quietly.
+    expect(conditions.length).toBe(2);
+    // Named, not positional: reordering the two sites is a refactor, losing either condition is not.
+    expect(conditions).toContain("shouldRestore");
+    expect(
+      conditions.filter((condition) => condition.includes("changeCount")),
+      "the failed-write restore must stay gated on the change count it owns",
+    ).toHaveLength(1);
   });
 
   test("the restore decision stays exhaustive over every outcome, with no default arm", () => {
