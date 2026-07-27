@@ -1,5 +1,7 @@
 import AVFoundation
 @preconcurrency import ApplicationServices
+// CopySymbolicHotKeys lives in Carbon's HIToolbox.
+import Carbon.HIToolbox
 import Darwin
 import SwiftUI
 @preconcurrency import KeyboardShortcuts
@@ -620,9 +622,18 @@ public final class RecordingEngine: ObservableObject {
         didSet {
             UserDefaults.standard.set(useFnKey, forKey: "useFnKey")
             updateFnMonitor()
-            updateStatus()
+            refreshTriggerDiagnostics()
         }
     }
+    /// Why a trigger cannot currently fire. Held separately from `statusMessage` because
+    /// `updateStatus()` rewrites that on every return to idle; see `updateStatus()`.
+    ///
+    /// Composed from two independent sources rather than written directly: fn and the hotkey
+    /// block for different reasons and can block at the same time, so a single writer would
+    /// let whichever ran last erase the other.
+    @Published public private(set) var triggerBlockedReason: String?
+    private var fnBlockedReason: String?
+    private var hotkeyBlockedReason: String?
     /// Advanced fallback policy (Settings only): when off, every recording is dictated
     /// literally and the classifier is never consulted.
     @Published public var intentDetectionEnabled: Bool = true {
@@ -844,18 +855,24 @@ public final class RecordingEngine: ObservableObject {
         if KeyboardShortcuts.getShortcut(for: .toggleRecording) == nil {
             KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
         }
+        refreshHotkeyDiagnostics()
+        logResolvedTrigger()
 
         // Set up fn key monitor — hold fn to record, release to stop (like WisprFlow)
         fnMonitor.onFnKeyDown = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fnKeyIsDown = true
-                guard self.useFnKey, Self.canBeginRecording(
+                guard self.useFnKey else { return }
+                guard Self.canBeginRecording(
                     isRecording: self.isRecording,
                     isTranscribing: self.isTranscribing,
                     isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse,
                     isDeliveryPending: self.deliveryIsPending
-                ) else { return }
+                ) else {
+                    self.logIgnoredTrigger(.fnKey)
+                    return
+                }
                 self.startRecording(trigger: .fnKey)
             }
         }
@@ -884,7 +901,10 @@ public final class RecordingEngine: ObservableObject {
                     isTranscribing: self.isTranscribing,
                     isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse,
                     isDeliveryPending: self.deliveryIsPending
-                ) else { return }
+                ) else {
+                    self.logIgnoredTrigger(.keyboardShortcut)
+                    return
+                }
                 self.startRecording(trigger: .keyboardShortcut)
             }
         }
@@ -907,9 +927,7 @@ public final class RecordingEngine: ObservableObject {
         // so retry until permissions arrive instead of requiring a relaunch.
         permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.useFnKey, !self.fnMonitor.isRunning, AXIsProcessTrusted() else { return }
-                self.log("accessibility granted — retrying fn monitor")
-                self.updateFnMonitor()
+                self?.refreshFnMonitorHealth()
             }
         }
 
@@ -972,24 +990,184 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    /// Record which trigger is actually bound, at launch and whenever it changes.
+    ///
+    /// The log already showed `startRecording trigger=keyboardShortcut`, but never which
+    /// key was registered — so a hotkey silently rebound to a key the keyboard cannot send
+    /// was indistinguishable from a working one. Log the resolved binding so "is the
+    /// trigger armed, and to what" is answerable from the log alone.
+    public func logResolvedTrigger() {
+        let stored = KeyboardShortcuts.getShortcut(for: .toggleRecording)
+        let bound = stored
+            .map { "carbonKeyCode=\($0.carbonKeyCode) carbonModifiers=\($0.carbonModifiers)" }
+            ?? "none"
+        // `getShortcut` is a UserDefaults read, so it says what is *configured*, never what
+        // is *armed*: KeyboardShortcuts 1.12.0 discards RegisterEventHotKey's OSStatus, so a
+        // chord already owned by another app is indistinguishable from a working one here.
+        // Say "unknown" rather than let a stored value read as a live binding.
+        let systemReserved = stored.map {
+            Self.systemReservedShortcuts().contains([$0.carbonKeyCode, $0.carbonModifiers])
+        }
+        // The permission labels belong on the same line: a press that fires but delivers
+        // nothing is a permission problem, and correlating two log lines by timestamp was
+        // the only way to tell that apart from a trigger that never fired.
+        log(
+            "trigger bindings: shortcutStored=\(bound) "
+                + "shortcutArmed=unknown(carbon-registration-status-not-exposed) "
+                + "shortcutSystemReserved=\(systemReserved.map(String.init(describing:)) ?? "n/a") "
+                + "useFnKey=\(useFnKey) fnMonitorRunning=\(fnMonitor.isRunning) "
+                + "microphone=\(microphonePermissionLabel) accessibility=\(accessibilityPermissionLabel) "
+                + "blocked=\(triggerBlockedReason ?? "none")"
+        )
+    }
+
+    /// Both global triggers used to `return` silently when the engine was busy, so a press
+    /// that produced nothing left no trace at all — indistinguishable from a trigger that
+    /// never fired. Name the refusal instead.
+    private func logIgnoredTrigger(_ trigger: RecordingTrigger) {
+        log(
+            "trigger ignored trigger=\(trigger) isRecording=\(isRecording) "
+                + "isTranscribing=\(isTranscribing) deliveryPending=\(deliveryIsPending) "
+                + "awaitingMicrophonePermission=\(microphonePermissionStartGate.isAwaitingResponse)"
+        )
+    }
+
+    /// Accessibility is the gate in practice: `FnKeyMonitor` creates an *active* tap
+    /// (`options: .defaultTap`, and it returns nil to swallow fn), and an event-modifying
+    /// tap requires Accessibility. Only a listen-only tap would fall under Input
+    /// Monitoring, so naming both grants sent people to the wrong pane.
+    static let fnAccessibilityBlockedMessage =
+        "fn needs Accessibility: System Settings > Privacy & Security > Accessibility"
+
+    /// Periodic reconciliation of the fn tap against reality.
+    ///
+    /// Two failures this closes. Granting Accessibility does not revive a tap that failed to
+    /// create, so it has to be retried — and the retry used to run `updateFnMonitor()`
+    /// without `updateStatus()`, so the stale "fn needs Accessibility" line survived the
+    /// grant. And a tap can die *after* creation (Accessibility revoked at runtime), which
+    /// no creation-time check can see; `FnKeyMonitor.isRunning` now reflects whether the tap
+    /// is actually enabled, so that case is detected here instead of reading as "Ready".
+    private func refreshFnMonitorHealth() {
+        guard useFnKey else { return }
+        if fnMonitor.isRunning {
+            if fnBlockedReason != nil {
+                fnBlockedReason = nil
+                recomputeTriggerBlockedReason()
+                updateStatus()
+            }
+            return
+        }
+        if AXIsProcessTrusted() {
+            log("fn monitor not running while trusted — retrying")
+            updateFnMonitor()
+        } else {
+            fnBlockedReason = Self.fnAccessibilityBlockedMessage
+            recomputeTriggerBlockedReason()
+        }
+        updateStatus()
+    }
+
     private func updateFnMonitor(allowAutomaticPrompt: Bool = true) {
         if useFnKey {
             let ok = fnMonitor.start()
             log("fn monitor start ok=\(ok)")
-            if !ok {
+            if ok {
+                fnBlockedReason = nil
+            } else {
                 if allowAutomaticPrompt {
                     let result = accessibilityPromptGate.trustForProtectedOperation()
                     log("fn monitor accessibility trusted=\(result.trusted) prompted=\(result.didPrompt)")
                 }
-                statusMessage = "fn needs Input Monitoring / Accessibility permission, and Globe must be set to Do Nothing"
+                fnBlockedReason = Self.fnAccessibilityBlockedMessage
+                log("trigger blocked: \(Self.fnAccessibilityBlockedMessage)")
             }
         } else {
             fnMonitor.stop()
+            fnBlockedReason = nil
         }
+        recomputeTriggerBlockedReason()
+    }
+
+    /// The hotkey and fn each own one half of the reason; this is the only writer of the
+    /// published value.
+    private func recomputeTriggerBlockedReason() {
+        let reasons = [hotkeyBlockedReason, fnBlockedReason].compactMap { $0 }
+        triggerBlockedReason = reasons.isEmpty ? nil : reasons.joined(separator: " · ")
+    }
+
+    /// Enabled system-reserved shortcuts, read straight from Carbon.
+    ///
+    /// KeyboardShortcuts has an equivalent `Shortcut.isTakenBySystem`, but it sits in a
+    /// plain (internal) extension in the pinned 1.12.0 source, so it cannot be reached from
+    /// here. Only shortcuts flagged enabled count: a disabled system binding does not
+    /// contend for the key.
+    static func systemReservedShortcuts() -> Set<[Int]> {
+        var unmanaged: Unmanaged<CFArray>?
+        guard
+            CopySymbolicHotKeys(&unmanaged) == noErr,
+            let entries = unmanaged?.takeRetainedValue() as? [[String: Any]]
+        else {
+            return []
+        }
+        var reserved: Set<[Int]> = []
+        for entry in entries {
+            guard
+                (entry[kHISymbolicHotKeyEnabled] as? Bool) == true,
+                let code = entry[kHISymbolicHotKeyCode] as? Int,
+                let modifiers = entry[kHISymbolicHotKeyModifiers] as? Int
+            else {
+                continue
+            }
+            reserved.insert([code, modifiers])
+        }
+        return reserved
+    }
+
+    /// Re-evaluate whether the stored hotkey can plausibly arm.
+    ///
+    /// This is the honest half of a hard limit. `RegisterEventHotKey`'s `OSStatus` is
+    /// swallowed inside KeyboardShortcuts 1.12.0 (`CarbonKeyboardShortcuts.register` guards
+    /// on `registerError == noErr` and returns Void), so a hotkey stolen by *another
+    /// application* is not observable from here at all. A collision with an enabled
+    /// *system* shortcut is observable, and it is the case that silently wins, so it gets a
+    /// real blocked reason instead of a "Ready" that is not true.
+    /// Re-evaluate every trigger's health, push it to the UI, and record it. The one entry
+    /// point callers should use after anything changes a binding.
+    public func refreshTriggerDiagnostics() {
+        refreshHotkeyDiagnostics()
+        updateStatus()
+        logResolvedTrigger()
+    }
+
+    private func refreshHotkeyDiagnostics() {
+        guard let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) else {
+            hotkeyBlockedReason = nil
+            recomputeTriggerBlockedReason()
+            return
+        }
+        let key = [shortcut.carbonKeyCode, shortcut.carbonModifiers]
+        if Self.systemReservedShortcuts().contains(key) {
+            hotkeyBlockedReason =
+                "macOS already reserves this shortcut — pick another in Settings > Recording Shortcut"
+            log("trigger blocked: hotkey collides with an enabled system shortcut \(key)")
+        } else {
+            hotkeyBlockedReason = nil
+        }
+        recomputeTriggerBlockedReason()
     }
 
     public func updateStatus() {
         if isRecording || isTranscribing || deliveryIsPending { return }
+        // A blocked trigger outlives one status write. `init` and every `useFnKey` change
+        // called `updateFnMonitor()` and then `updateStatus()`, so the fn permission
+        // warning was overwritten with "Ready" before it could ever be read — an enabled
+        // trigger that could not arm looked exactly like a working one. Idle now carries
+        // the reason until the blocker clears.
+        if let triggerBlockedReason {
+            statusMessage = triggerBlockedReason
+            flowPhase = .idle
+            return
+        }
         statusMessage = "Ready"
         flowPhase = .idle
     }

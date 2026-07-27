@@ -12,15 +12,31 @@ final class FnKeyMonitor: @unchecked Sendable {
     private var healthCheckTimer: Timer?
     private var fnIsDown = false
 
-    var isRunning: Bool { eventTap != nil }
+    /// Whether the tap exists *and* is still enabled.
+    ///
+    /// `eventTap != nil` was not enough: macOS disables a tap when Accessibility is revoked
+    /// at runtime, and only `stop()` ever cleared the handle — so a dead tap reported itself
+    /// as running, the engine saw no blocker, and the `!isRunning` retry guard prevented
+    /// recovery. Ask the tap, not the handle.
+    var isRunning: Bool {
+        guard let eventTap else { return false }
+        return CGEvent.tapIsEnabled(tap: eventTap)
+    }
 
     private static let fnKeyCode: UInt16 = 63
 
     /// Start monitoring. Returns true if successful.
     func start() -> Bool {
-        guard eventTap == nil else {
-            fputs("[FnKeyMonitor] Already running\n", stderr)
-            return true
+        if eventTap != nil {
+            guard !isRunning else {
+                fputs("[FnKeyMonitor] Already running\n", stderr)
+                return true
+            }
+            // A handle we still hold but that the system has disabled cannot be revived by
+            // re-enabling it here — the grant that backed it is gone. Tear it down so the
+            // code below can build a fresh one once trust returns.
+            fputs("[FnKeyMonitor] Existing tap is disabled — discarding it before retry\n", stderr)
+            stop()
         }
 
         let eventMask: CGEventMask = 1 << CGEventType.flagsChanged.rawValue
@@ -63,6 +79,13 @@ final class FnKeyMonitor: @unchecked Sendable {
                 if !CGEvent.tapIsEnabled(tap: tap) {
                     fputs("[FnKeyMonitor] Tap was disabled, re-enabling\n", stderr)
                     CGEvent.tapEnable(tap: tap, enable: true)
+                    // If it will not come back, the permission behind it is gone. Drop the
+                    // tap so `isRunning` turns false and the engine can report a blocker and
+                    // rebuild, instead of polling a corpse every three seconds forever.
+                    if !CGEvent.tapIsEnabled(tap: tap) {
+                        fputs("[FnKeyMonitor] Re-enable failed — tearing down\n", stderr)
+                        self.stop()
+                    }
                 }
             }
 

@@ -19,13 +19,63 @@ import {
   checkRecordingDeps,
   recordDuration,
 } from "../lib/recorder.js";
-import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
+import {
+  transcribeAudio,
+  transcribeAudioStream,
+  verifyTranscriptionCredential,
+  type CredentialProbeResult,
+} from "../lib/transcriber.js";
+import {
+  probeMicrophoneCapture,
+  captureProbeSubject,
+  microphoneGrantInstruction,
+  classifyPermissionState,
+  // RECORDINGS_BUNDLE_IDENTIFIER is imported from ./macos-permissions.js below, which is the
+  // ruled canonical name. capture-probe.js re-exports the same symbol from lib/macos-bundle.ts;
+  // importing it from both is a duplicate identifier, not a second constant.
+  DEFAULT_PROBE_SECONDS,
+  MAX_PROBE_SECONDS,
+  TCC_UNREADABLE_STATE,
+  type CaptureProbeResult,
+} from "../lib/capture-probe.js";
+import {
+  describeActiveStore,
+  localStoreIsBehindSchema,
+  probeRecordingPersistence,
+  type PersistenceProbeResult,
+} from "../lib/persistence-probe.js";
 import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
-import { runMacOSPermissionRequest } from "./macos-permissions.js";
+import {
+  describeTccAuthorizationSubject,
+  RECORDINGS_BUNDLE_IDENTIFIER,
+  resolveTccGrant,
+  runMacOSPermissionRequest,
+  type TccGrantDurability,
+  type TccGrantReport,
+} from "./macos-permissions.js";
+// Blocker 3 resolved here: `RECORDINGS_BUNDLE_ID` is deliberately NOT imported from
+// `macos-shortcut.js`. It was a second definition of `RECORDINGS_BUNDLE_IDENTIFIER`, which this
+// branch could not depend on before because the constant arrives with #24 — importing it then
+// would have left the branch uncompilable rather than merely duplicated. That base now exists, so
+// the TODO(rebase) is discharged rather than carried.
+import {
+  DEFAULT_TOGGLE_RECORDING_CHORD,
+  ShortcutParseError,
+  TOGGLE_RECORDING_DEFAULTS_KEY,
+  TRIGGER_GRANT_REQUIREMENTS,
+  USE_FN_KEY_DEFAULTS_KEY,
+  formatShortcut,
+  listBindableKeys,
+  parseShortcutChord,
+  readTriggerState,
+  runningAppBundlePaths,
+  writeShortcut,
+  writeUseFnKey,
+} from "./macos-shortcut.js";
 import { currentMachineId } from "../lib/machine.js";
 import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 import {
@@ -1004,9 +1054,14 @@ appCommand
     const status = getMacOSAppStatus();
     const permissions = {
       platform: status.platform,
-      bundle_id: "com.hasna.recordings",
+      bundle_id: RECORDINGS_BUNDLE_IDENTIFIER,
       installed_app_path: status.installed_app_path,
+      // A machine consumer needs the same caveats the text output prints, or it reads the
+      // states below as describing installed code that may not exist.
+      installed: status.installed,
       legacy_install_paths: status.legacy_install_paths,
+      // The grants below belong to this bundle, not to the terminal running this command.
+      permission_subject: describeTccAuthorizationSubject(status.installed_app_path),
       microphone: status.microphone_permission,
       accessibility: status.accessibility_permission,
       app_code_hash: status.app_code_hash,
@@ -1014,14 +1069,28 @@ appCommand
       signing_identifier: status.signing_identifier,
       team_identifier: status.team_identifier,
       designated_requirement: status.designated_requirement,
+      // Durability is per service because each service stores its own requirement.
+      microphone_grant_durability: status.microphone_grant_durability,
+      accessibility_grant_durability: status.accessibility_grant_durability,
+      microphone_stored_requirement: status.microphone_stored_requirement,
+      accessibility_stored_requirement: status.accessibility_stored_requirement,
+      ambiguous_installations: status.ambiguous_installations,
+      // The same conditions the text output warns about, as data rather than prose.
+      warnings: buildPermissionWarnings(status),
       log_path: status.log_path,
     };
     if (program.opts().json) {
       console.log(JSON.stringify(permissions, null, 2));
       return;
     }
-    console.log(`Microphone: ${permissions.microphone}`);
-    console.log(`Accessibility: ${permissions.accessibility}`);
+    console.log(`Subject: ${permissions.permission_subject}`);
+    console.log(`Microphone: ${permissions.microphone} (${permissions.microphone_grant_durability})`);
+    console.log(
+      `Accessibility: ${permissions.accessibility} (${permissions.accessibility_grant_durability})`,
+    );
+    for (const warning of permissions.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
     console.log(`Log: ${permissions.log_path}`);
   });
 
@@ -1111,14 +1180,106 @@ appCommand
 
 program
   .command("check")
-  .description("Check system dependencies (sox, API keys)")
-  .action(async () => {
+  .description(
+    "Check system dependencies (sox, API keys) and macOS capture permissions. " +
+      "Use --probe to exercise the microphone and credential for real."
+  )
+  .option(
+    "--probe",
+    "Prove capability instead of reporting presence: record a short sample and assert signal, and make one authenticated API request"
+  )
+  .option(
+    "--probe-seconds <seconds>",
+    `Length of the capture probe in seconds (1-${MAX_PROBE_SECONDS})`,
+    String(DEFAULT_PROBE_SECONDS)
+  )
+  .option(
+    "--probe-store-write",
+    "Allow the persistence probe to write a marker recording to a SHARED API store. Off by default: that store is production for every machine pointed at it"
+  )
+  .action(async (opts) => {
     const config = loadConfig();
     const parentOpts = program.opts();
 
     // Check recording deps
     const deps = await checkRecordingDeps();
     const enhKey = config.enhancement_api_key || config.openai_api_key;
+    // Two distinct roles with distinct models AND distinct keys. Probing one
+    // with the other's credential produces a red tick on a working machine, and
+    // a green one on a machine whose transcription model is unavailable.
+    const transcriberModel = resolveTranscriberModel(config);
+    const transcriptionModel = config.transcription_model;
+
+    // macOS capture permissions are part of "can this machine record at all".
+    // Omitting them is why a fully-green `check` could coexist with an app that
+    // had no Microphone grant and captured nothing but silence.
+    const macStatus = process.platform === "darwin" ? getMacOSAppStatus() : null;
+
+    // A transcript only counts as recorded once it is stored, and this package
+    // has two stores behind one interface. Which one is live is decided by env
+    // vars whose mere presence flips the transport, so `check` has to name it:
+    // auditing the wrong store is what made two separate reviews conclude that
+    // persistence had broken when it had only moved.
+    const activeStore = describeActiveStore(config);
+    // Sampled here, before any probe runs, so it reflects the store as found.
+    const localStoreWasLegacy = localStoreIsBehindSchema(config.db_path);
+
+    let capture: CaptureProbeResult | null = null;
+    let credential: CredentialProbeResult | null = null;
+    let enhancementCredential: CredentialProbeResult | null = null;
+    let persistence: PersistenceProbeResult | null = null;
+
+    if (opts.probe) {
+      const parsedSeconds = Number.parseInt(String(opts.probeSeconds), 10);
+      // Bounded: an unbounded --probe-seconds blocked the command for as long as
+      // the operator mistyped, with no output.
+      const seconds = Number.isFinite(parsedSeconds) && parsedSeconds > 0
+        ? Math.min(parsedSeconds, MAX_PROBE_SECONDS)
+        : DEFAULT_PROBE_SECONDS;
+
+      capture = deps.available
+        ? probeMicrophoneCapture(config, { seconds })
+        : {
+            ok: false,
+            tool: null,
+            seconds,
+            samples: 0,
+            peak: 0,
+            // The recording tool is not even installed, so nothing was captured and no amplitude
+            // was measured. `true` here would report digital silence for a probe that never ran.
+            silent: null,
+            message: deps.message,
+          };
+      credential = await verifyTranscriptionCredential(config, transcriptionModel, {
+        apiKey: config.openai_api_key,
+        role: "transcription",
+      });
+      enhancementCredential = enhKey
+        ? await verifyTranscriptionCredential(config, transcriberModel, {
+            apiKey: enhKey,
+            role: "enhancement",
+          })
+        : null;
+      persistence = await probeRecordingPersistence({
+        allowRemoteWrite: Boolean(opts.probeStoreWrite),
+        allowLocalMigration: Boolean(opts.probeStoreWrite),
+        localStoreExistedBefore: activeStore.local_db_present,
+        // Read before anything in this command could have created the file.
+        localStoreIsLegacy: localStoreWasLegacy,
+      });
+    }
+
+    // `persistence.outcome === "failed"`, NOT `!persistence.ok`. `ok` is now false for a skip as
+    // well as for a failure — a deliberate refusal to write to a production store must not turn
+    // `check --probe` red, but it must also not be reported as a pass. The exit code answers "did
+    // anything actively fail"; the rendered marker answers "was it proved".
+    const probeFailed = Boolean(
+      opts.probe &&
+        ((capture && !capture.ok) ||
+          (credential && !credential.ok) ||
+          (enhancementCredential && !enhancementCredential.ok) ||
+          (persistence && persistence.outcome === "failed"))
+    );
 
     if (parentOpts.json) {
       console.log(JSON.stringify({
@@ -1130,14 +1291,30 @@ program
         openai_api_key_configured: Boolean(config.openai_api_key),
         enhancement_api_key_configured: Boolean(enhKey),
         enhancement_model: config.enhancement_model,
-        transcriber_model: resolveTranscriberModel(config),
+        transcriber_model: transcriberModel,
         realtime_session_model: config.realtime_session_model,
         realtime_transcription_model: config.realtime_transcription_model,
         post_processing_mode: config.post_processing_mode,
         transcription_prompt_configured: Boolean(config.transcription_prompt?.trim()),
         transcriber_prompt_configured: Boolean(config.transcriber_prompt?.trim()),
         config_warnings: config.config_warnings ?? [],
+        microphone_permission: macStatus?.microphone_permission ?? "unsupported",
+        accessibility_permission: macStatus?.accessibility_permission ?? "unsupported",
+        active_store: activeStore,
+        capture_probe: capture,
+        capture_probe_subject: captureProbeSubject(),
+        microphone_grant_instruction: macStatus
+          ? microphoneGrantInstruction({
+              installedAppPath: macStatus.installed_app_path,
+              otherAppPaths: macStatus.legacy_install_paths,
+              requestState: classifyPermissionState(macStatus.microphone_permission),
+            })
+          : null,
+        credential_probe: credential,
+        enhancement_credential_probe: enhancementCredential,
+        persistence_probe: persistence,
       }, null, 2));
+      if (probeFailed) process.exitCode = 1;
       return;
     }
 
@@ -1147,10 +1324,12 @@ program
       console.log(chalk.red(`✗ ${deps.message}`));
     }
 
-    // Check API key
+    // Key presence is NOT key validity. Say which one this line means, so the
+    // reader does not take it as proof the credential works.
     if (config.openai_api_key) {
       console.log(
-        chalk.green(`✓ OpenAI API key configured`)
+        chalk.green(`✓ OpenAI API key present`) +
+          chalk.dim(opts.probe ? "" : " (presence only — run 'recordings check --probe' to verify it is accepted)")
       );
     } else {
       console.log(
@@ -1163,13 +1342,165 @@ program
     // Check enhancement key
     if (enhKey) {
       console.log(
-        chalk.green(`✓ Enhancement API key configured (model: ${resolveTranscriberModel(config)})`)
+        chalk.green(`✓ Enhancement API key present (model: ${transcriberModel})`) +
+          chalk.dim(opts.probe ? "" : " (presence only — 'recordings check --probe' verifies it is accepted)")
       );
     } else {
       console.log(
         chalk.yellow(`⚠ Enhancement API key not configured — enhancement disabled`)
       );
     }
+
+    // Where a transcript will actually land. Named unconditionally: the failure
+    // this prevents is a human reading the wrong dataset, which no probe catches.
+    console.log(
+      chalk.green("✓") +
+        ` Active store: ${activeStore.transport}` +
+        (activeStore.base_url ? ` → ${activeStore.base_url}` : ` → ${activeStore.local_db_path}`) +
+        chalk.dim(` (selected by ${activeStore.mode_source})`)
+    );
+    if (activeStore.divergent) {
+      console.log(
+        chalk.yellow("⚠") +
+          ` Two datasets present: ${activeStore.local_db_recordings} recordings sit in ` +
+          `${activeStore.local_db_path}, which is NOT the live store.`
+      );
+    }
+    if (activeStore.warning) {
+      console.log(chalk.dim(`  ${activeStore.warning}`));
+    }
+
+    if (macStatus) {
+      const micState = macStatus.microphone_permission;
+      // `startsWith("allowed")` covers exactly two of #24's states — `allowed` (stored
+      // requirement re-validated against the installed bundle) and `allowed_identity_unverified`
+      // (row says allowed, binding undecidable). It deliberately does NOT cover
+      // `stale_allowed_for_previous_app_build` or `unverified_no_installed_bundle`, which #24
+      // named so that a `grep allowed` or a human skim cannot read them as a pass.
+      const micOk = micState.startsWith("allowed");
+      const micVerified = micState === "allowed";
+      const micStaleGrant = micState === "stale_allowed_for_previous_app_build";
+      const micUnreadable = micState === TCC_UNREADABLE_STATE;
+      // Three outcomes, three markers. A refused database read is not a denial,
+      // and rendering it red-with-instructions told operators to grant a
+      // permission that was already granted.
+      console.log(
+        (micOk ? chalk.green("✓") : micUnreadable ? chalk.yellow("?") : chalk.red("✗")) +
+          ` Microphone permission: ${micState}`
+      );
+      if (micOk) {
+        // Rebase note (#24 x #25): this note used to be unconditional for any `allowed*` state
+        // and asserted the requirement "was NOT verified". Under #24 that is false for the
+        // `allowed` state, which reaches this branch precisely BECAUSE codesign re-validated the
+        // grant's stored requirement against the installed bundle. Printing "not verified" over
+        // a verified result is the same class of false statement this queue exists to remove, so
+        // the two cases now say what actually happened.
+        console.log(
+          chalk.dim(
+            micVerified
+              ? `  Note: this is the TCC row for bundle id ${RECORDINGS_BUNDLE_IDENTIFIER}, and its ` +
+                  "stored code-signing requirement still validates against the installed bundle — " +
+                  "so the grant binds to the app that is installed, not to a previous build."
+              : `  Note: this is the TCC row for bundle id ${RECORDINGS_BUNDLE_IDENTIFIER}. The row's ` +
+                  "code-signing requirement was NOT verified against the installed bundle, so a " +
+                  "bundle re-signed with a different identity can still be denied at runtime. " +
+                  "Confirm in the app's log."
+          )
+        );
+      }
+      if (micStaleGrant) {
+        // A grant exists and reads "allowed", and it is dead: codesign says the stored
+        // requirement does not match the installed bundle, so macOS will refuse at runtime while
+        // System Settings still shows the toggle on. Without this line the operator sees a red
+        // cross plus "grant it" instructions and flips a switch that is already flipped.
+        console.log(
+          chalk.dim(
+            "  The TCC row says allowed, but its stored code-signing requirement does NOT match " +
+              "the installed bundle — the grant belongs to a previous build and macOS will deny " +
+              "at runtime. Toggling it in System Settings will not fix it; the row must be reset " +
+              "(`recordings app reset-permissions`) and re-granted so it binds to the bundle " +
+              "that is installed now."
+          )
+        );
+      }
+      if (micUnreadable) {
+        console.log(
+          chalk.dim(
+            "  Could not read the TCC database. This is NOT a denial and NOT proof the app never " +
+              "asked. Reading it needs Full Disk Access, which is held by the session's " +
+              "RESPONSIBLE process and inherited by its children — not granted per-tool: on " +
+              "a fleet Mac `bun` is explicitly denied and still reads the database over SSH, " +
+              "because it inherits sshd's grant. So re-run from a plain ssh shell rather than " +
+              "granting Full Disk Access to tmux or bun, and not under sudo, which changes the " +
+              "responsible process. A missing sqlite3, a locked database or a corrupt file " +
+              "produce this same state, so the cause is not established either."
+          )
+        );
+      }
+      if (!micOk && !micUnreadable) {
+        console.log(
+          chalk.dim(
+            "  Recordings.app cannot capture audio without this. macOS does not error when it is " +
+              "missing — it delivers silent audio. This grant CANNOT be set remotely; it needs a " +
+              "human at the keyboard:"
+          )
+        );
+        const instruction = microphoneGrantInstruction({
+          installedAppPath: macStatus.installed_app_path,
+          otherAppPaths: macStatus.legacy_install_paths,
+          requestState: classifyPermissionState(macStatus.microphone_permission),
+        });
+        for (const [index, step] of instruction.steps.entries()) {
+          console.log(chalk.dim(`  ${index + 1}. ${step}`));
+        }
+      }
+      console.log(
+        (macStatus.accessibility_permission.startsWith("allowed")
+          ? chalk.green("✓")
+          : chalk.yellow("⚠")) +
+          ` Accessibility permission: ${macStatus.accessibility_permission}`
+      );
+    }
+
+    if (capture) {
+      console.log(
+        (capture.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Microphone capture probe: ${capture.message}`
+      );
+      // Whose grant this exercised. Without it a green tick here reads as
+      // "the app can record", which it never proves.
+      const subject = captureProbeSubject();
+      console.log(
+        chalk.dim(`  subject: ${subject.note}`) +
+          (subject.subject_known ? "" : chalk.yellow(" [subject unidentified — inconclusive]"))
+      );
+    }
+    if (credential) {
+      console.log(
+        (credential.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Transcription credential (${credential.model}): ${credential.message}`
+      );
+    }
+    if (enhancementCredential) {
+      console.log(
+        (enhancementCredential.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Enhancement credential (${enhancementCredential.model}): ${enhancementCredential.message}`
+      );
+    }
+    if (persistence) {
+      // Three states, three markers. A green ✓ on the word SKIPPED is what made this check report
+      // PASS while writing, reading and deleting nothing — and on a machine pointed at a shared
+      // API store that was the DEFAULT path, so the round-trip was never proved there.
+      const persistenceMarker =
+        persistence.outcome === "proved"
+          ? chalk.green("✓")
+          : persistence.outcome === "skipped"
+            ? chalk.yellow("?")
+            : chalk.red("✗");
+      console.log(persistenceMarker + ` Persistence round-trip: ${persistence.message}`);
+    }
+
+    if (probeFailed) process.exitCode = 1;
   });
 
 // ── listen ───────────────────────────────────────────────────────────────────
@@ -1332,29 +1663,276 @@ program
 
 program
   .command("shortcut")
-  .description("Set up a global keyboard shortcut for recording (macOS)")
-  .option("--raycast", "Generate Raycast script command")
-  .option("--karabiner", "Set up Fn key via Karabiner-Elements")
-  .option("--skhd", "Generate skhd hotkey config")
-  .option("--hammerspoon", "Generate Hammerspoon config")
-  .option("--script", "Just output the shell script path")
+  .description("Show or change the global recording trigger (macOS)")
+  .option("--set <chord>", 'Set the app hotkey, e.g. "f13" or "ctrl+opt+r"')
+  .option("--reset", "Reset the app hotkey to the app's built-in default")
+  .option("--fn <state>", "Use fn/Globe as push-to-talk: on|off")
+  .option("--keys", "List the key names accepted by --set")
+  .option("--script", "Write the app-less toggle script and print its path")
+  .option("--raycast", "Generate a Raycast script command (requires Raycast)")
+  .option("--karabiner", "Generate a Karabiner-Elements rule (requires Karabiner-Elements)")
+  .option("--skhd", "Print an skhd hotkey config (requires skhd)")
+  .option("--hammerspoon", "Print a Hammerspoon config (requires Hammerspoon)")
   .action((opts) => {
-    const { writeFileSync, mkdirSync, chmodSync } = require("node:fs") as typeof import("node:fs");
+    const { writeFileSync, mkdirSync, chmodSync, existsSync } = require("node:fs") as typeof import("node:fs");
     const { join: pathJoin } = require("node:path") as typeof import("node:path");
     const { homedir: getHome } = require("node:os") as typeof import("node:os");
+    const { spawnSync: runSync } = require("node:child_process") as typeof import("node:child_process");
     const home = getHome();
 
     const scriptDir = pathJoin(home, ".hasna", "recordings");
-    mkdirSync(scriptDir, { recursive: true });
-
     const scriptPath = pathJoin(scriptDir, "record-toggle.sh");
     const pidFile = pathJoin(scriptDir, ".recording.pid");
     const recordingsBin = pathJoin(home, ".bun", "bin", "recordings");
+    const audioDir = pathJoin(scriptDir, "audio");
 
-    // Write the toggle script
-    const script = `#!/bin/bash
+    if (opts.keys) {
+      console.log(chalk.bold("Keys accepted by --set (combine with cmd/ctrl/opt/shift):\n"));
+      console.log(listBindableKeys().join(" "));
+      // fn is deliberately absent above: it has no Carbon key code, so it cannot be part
+      // of a chord. Say where it lives instead of leaving its absence to be guessed.
+      console.log(
+        chalk.dim("\n  fn/Globe is not in this list — it is a separate trigger, not a chord:\n") +
+          "    recordings shortcut --fn on",
+      );
+      return;
+    }
+
+    const isMacOS = process.platform === "darwin";
+
+    /**
+     * The app's own trigger lives in its UserDefaults, so it can be read and written
+     * without launching the app or rebuilding the bundle. Everything below that talks
+     * to a third-party launcher is a fallback for people who want a different launcher,
+     * not a prerequisite.
+     */
+    function requireMacOS(what: string): boolean {
+      if (isMacOS) return true;
+      console.error(chalk.red(`${what} is only available on macOS`));
+      process.exitCode = 1;
+      return false;
+    }
+
+    /**
+     * Bundles a TCC grant would have to be given to: the running instance if there is one,
+     * otherwise whatever is installed. A grant keys to a bundle, so naming none at all is
+     * useless precisely when it matters most — while telling someone to enable a permission.
+     */
+    function grantTargetPaths(): { paths: string[]; running: boolean } {
+      const running = runningAppBundlePaths();
+      if (running.length > 0) return { paths: running, running: true };
+      const status = getMacOSAppStatus();
+      return {
+        paths: [...(status.installed ? [status.installed_app_path] : []), ...status.legacy_install_paths],
+        running: false,
+      };
+    }
+
+    function showState(): void {
+      const state = readTriggerState();
+      console.log(chalk.bold("Recording trigger\n"));
+
+      if (state.shortcut) {
+        console.log(`  Hotkey          ${chalk.cyan(formatShortcut(state.shortcut))}`);
+      } else if (state.rawShortcut) {
+        console.log(`  Hotkey          ${chalk.yellow(`unreadable (${state.rawShortcut})`)}`);
+      } else {
+        console.log(
+          `  Hotkey          ${chalk.dim("not set — the app writes its default")} ` +
+            `${chalk.cyan(DEFAULT_TOGGLE_RECORDING_CHORD.toUpperCase())} ${chalk.dim("on next launch")}`,
+        );
+      }
+      console.log(`  fn/Globe key    ${state.useFnKey ? chalk.cyan("on") : chalk.dim("off")}`);
+      console.log();
+
+      /**
+       * Name the bundle every grant below applies to, and refuse to imply anything about
+       * this process. A CLI launched from a terminal inherits the *terminal's* TCC grants,
+       * so "Accessibility is allowed" measured here would describe Ghostty or Terminal, not
+       * Recordings.app. Only the bundle that actually runs can hold the app's grant.
+       */
+      function showGrantTargets(): void {
+        const running = runningAppBundlePaths();
+        const status = getMacOSAppStatus();
+        const installed = [
+          ...(status.installed ? [status.installed_app_path] : []),
+          ...status.legacy_install_paths,
+        ];
+
+        console.log(chalk.bold("Which bundle the grants apply to\n"));
+        if (running.length === 1) {
+          console.log(`  Running         ${chalk.cyan(running[0]!)}`);
+        } else if (running.length > 1) {
+          console.log(`  Running         ${chalk.red(`${running.length} instances — grants are ambiguous`)}`);
+          for (const path of running) console.log(`                  ${path}`);
+        } else {
+          console.log(`  Running         ${chalk.yellow("not running")}`);
+        }
+        if (installed.length > 0) {
+          console.log(`  Installed       ${installed.join("\n                  ")}`);
+        }
+        if (installed.length > 1) {
+          console.log(
+            chalk.yellow("  More than one installed copy — a grant given to one does not cover the others."),
+          );
+        }
+        console.log(
+          chalk.dim(
+            "\n  This command reports the app's stored trigger, not its permission state:\n" +
+              "  a CLI inherits the terminal's grants, so it cannot measure the app's.\n" +
+              "  Use 'recordings app permissions' for the bundle's actual grants.",
+          ),
+        );
+        console.log();
+      }
+
+      showGrantTargets();
+
+      console.log(chalk.bold("Permissions each trigger needs\n"));
+      for (const requirement of TRIGGER_GRANT_REQUIREMENTS) {
+        const grant = requirement.tccService
+          ? chalk.yellow(requirement.tccService.replace(/^kTCCService/, ""))
+          : chalk.green("none");
+        console.log(`  ${requirement.label.padEnd(15)} ${grant} — ${requirement.mechanism}`);
+        if (requirement.settingsPath) {
+          console.log(`  ${" ".repeat(15)} ${requirement.settingsPath} > enable Recordings`);
+        }
+      }
+      console.log();
+
+      console.log(chalk.bold("Change it\n"));
+      console.log(`  recordings shortcut --set f13`);
+      console.log(`  recordings shortcut --set "ctrl+opt+r"`);
+      console.log(`  recordings shortcut --fn on`);
+      console.log(`  recordings shortcut --reset`);
+      console.log(chalk.dim("\n  Or in the app: Settings > Recording Shortcut."));
+      console.log(
+        chalk.dim("  A changed hotkey is picked up the next time the app launches."),
+      );
+    }
+
+    /**
+     * A write to UserDefaults changes what the *next* launch registers. The running
+     * instance keeps the binding it registered with, and its own Settings toggle writes the
+     * same keys back — so "it did not work" after a CLI change is nearly always a live
+     * instance still holding the old trigger. Say which instance, by path.
+     */
+    function reportPickup(): void {
+      const running = runningAppBundlePaths();
+      if (running.length === 0) {
+        console.log(chalk.dim("  Recordings.app is not running; it will register this on next launch."));
+        return;
+      }
+      console.log(
+        chalk.yellow("  Recordings.app is running and still holds the previous trigger.") +
+          "\n  Quit and reopen it to arm this one:",
+      );
+      for (const path of running) console.log(chalk.dim(`    ${path}`));
+    }
+
+    if (opts.set !== undefined) {
+      if (!requireMacOS("Setting the app hotkey")) return;
+      let shortcut;
+      try {
+        shortcut = parseShortcutChord(String(opts.set));
+      } catch (error) {
+        if (error instanceof ShortcutParseError) {
+          console.error(chalk.red(error.message));
+          process.exitCode = 1;
+          return;
+        }
+        throw error;
+      }
+      writeShortcut(shortcut);
+      console.log(chalk.green(`Hotkey set to ${formatShortcut(shortcut)}`));
+      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_IDENTIFIER} ${TOGGLE_RECORDING_DEFAULTS_KEY}`));
+      reportPickup();
+      return;
+    }
+
+    if (opts.reset) {
+      if (!requireMacOS("Resetting the app hotkey")) return;
+      const shortcut = parseShortcutChord(DEFAULT_TOGGLE_RECORDING_CHORD);
+      writeShortcut(shortcut);
+      console.log(chalk.green(`Hotkey reset to ${formatShortcut(shortcut)}`));
+      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_IDENTIFIER} ${TOGGLE_RECORDING_DEFAULTS_KEY}`));
+      reportPickup();
+      return;
+    }
+
+    if (opts.fn !== undefined) {
+      if (!requireMacOS("Changing the fn/Globe trigger")) return;
+      const raw = String(opts.fn).toLowerCase();
+      const enable = raw === "on" || raw === "true" || raw === "yes" || raw === "1";
+      const disable = raw === "off" || raw === "false" || raw === "no" || raw === "0";
+      if (!enable && !disable) {
+        console.error(chalk.red(`--fn expects on or off, got "${opts.fn}"`));
+        process.exitCode = 1;
+        return;
+      }
+      writeUseFnKey(enable);
+      console.log(chalk.green(`fn/Globe trigger ${enable ? "enabled" : "disabled"}`));
+      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_IDENTIFIER} ${USE_FN_KEY_DEFAULTS_KEY}`));
+      if (enable) {
+        const fnGrant = TRIGGER_GRANT_REQUIREMENTS.find((entry) => entry.id === "fn");
+        if (fnGrant?.settingsPath) {
+          console.log(
+            `\n  fn is a ${fnGrant.mechanism}, so it needs ` +
+              `${fnGrant.tccService?.replace(/^kTCCService/, "") ?? "no"} permission:\n` +
+              `    ${fnGrant.settingsPath} > enable Recordings`,
+          );
+          // The grant keys to a bundle, so name the one that has to appear in that list.
+          const target = grantTargetPaths();
+          if (target.paths.length === 0) {
+            console.log(chalk.dim("    (no installed Recordings.app found to grant it to)"));
+          }
+          for (const path of target.paths) {
+            console.log(
+              chalk.dim(`    grant it to: ${path}${target.running ? "" : " (not running — installed copy)"}`),
+            );
+          }
+        }
+        console.log(
+          chalk.dim(
+            "\n  While enabled the app swallows fn, so fn stops reaching other apps\n" +
+              "  (emoji picker, input-source switching). Turn it off with --fn off.",
+          ),
+        );
+      }
+      console.log();
+      reportPickup();
+      return;
+    }
+
+    const wantsExternalLauncher =
+      Boolean(opts.script) ||
+      Boolean(opts.raycast) ||
+      Boolean(opts.karabiner) ||
+      Boolean(opts.skhd) ||
+      Boolean(opts.hammerspoon);
+
+    if (!wantsExternalLauncher) {
+      if (!requireMacOS("Reading the app hotkey")) return;
+      showState();
+      return;
+    }
+
+    /**
+     * The toggle script is a deliberately app-less path: it shells out to `rec` and the
+     * `recordings` CLI, so it works for people driving Recordings from a third-party
+     * launcher instead of the menu bar app. It is only written when one of those
+     * launchers is actually being configured — reading the trigger must not have side
+     * effects, and it records into the same audio directory as the app.
+     */
+    function writeToggleScript(): void {
+      mkdirSync(scriptDir, { recursive: true });
+      const script = `#!/bin/bash
 # Toggle recording on/off. Run this from a global hotkey.
 # Each press toggles: start recording -> stop + transcribe + copy to clipboard
+#
+# This is the app-less path. If Recordings.app is running, prefer its own hotkey
+# ("recordings shortcut --set ..."): the app streams transcription and pastes into
+# the focused field, which this script cannot do.
 set -e
 
 PID_FILE="${pidFile}"
@@ -1367,7 +1945,7 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 
   # Find the most recent audio file
-  AUDIO_DIR="${pathJoin(scriptDir, "audio")}"
+  AUDIO_DIR="${audioDir}"
   LATEST=$(ls -t "$AUDIO_DIR"/*.wav 2>/dev/null | head -1)
 
   if [ -n "$LATEST" ]; then
@@ -1379,8 +1957,6 @@ if [ -f "$PID_FILE" ]; then
     fi
     if [ -n "$TEXT" ]; then
       echo -n "$TEXT" | pbcopy
-      # Optional: paste into frontmost app
-      # osascript -e 'delay 0.1' -e 'tell application "System Events" to keystroke "v" using command down'
     fi
   fi
 
@@ -1388,20 +1964,57 @@ if [ -f "$PID_FILE" ]; then
   osascript -e 'display notification "Recording saved and copied to clipboard" with title "Recordings"' 2>/dev/null || true
 else
   # Start recording in background
-  mkdir -p "${pathJoin(scriptDir, "audio")}"
-  rec -r 16000 -c 1 -b 16 "${pathJoin(scriptDir, "audio")}/recording-$(date +%Y%m%dT%H%M%S).wav" trim 0 300 &
+  mkdir -p "${audioDir}"
+  rec -r 16000 -c 1 -b 16 "${audioDir}/recording-$(date +%Y%m%dT%H%M%S).wav" trim 0 300 &
   echo $! > "$PID_FILE"
 
   # Notification
   osascript -e 'display notification "Recording started..." with title "Recordings"' 2>/dev/null || true
 fi
 `;
-    writeFileSync(scriptPath, script, "utf-8");
-    chmodSync(scriptPath, 0o755);
+      writeFileSync(scriptPath, script, "utf-8");
+      chmodSync(scriptPath, 0o755);
+    }
+
+    /**
+     * Refuse rather than emit a config for a launcher that is not installed. A generated
+     * file for an absent launcher reads like success but can never fire a hotkey.
+     */
+    function launcherMissing(label: string, present: boolean, install: string): boolean {
+      if (present) return false;
+      console.error(chalk.red(`${label} is not installed — nothing would fire this hotkey.`));
+      console.error(chalk.dim(`  Install it with: ${install}`));
+      console.error(
+        chalk.dim(
+          "  Or use the app's own hotkey, which needs no extra software:\n" +
+            "    recordings shortcut --set f13",
+        ),
+      );
+      process.exitCode = 1;
+      return true;
+    }
 
     if (opts.karabiner) {
+      if (!requireMacOS("Karabiner-Elements setup")) return;
+      // The app has a native fn path (`--fn on`) that needs no driver. Karabiner installs
+      // a virtual-HID system extension that sits in the input stream for every app and
+      // needs a reboot, so it is never the cheap answer for fn.
+      console.log(
+        chalk.yellow("The app can use fn/Globe natively — no driver, no reboot:") +
+          "\n  recordings shortcut --fn on\n",
+      );
+      if (
+        launcherMissing(
+          "Karabiner-Elements",
+          existsSync("/Applications/Karabiner-Elements.app"),
+          "brew install --cask karabiner-elements",
+        )
+      ) {
+        return;
+      }
       const karabinerDir = pathJoin(home, ".config", "karabiner", "assets", "complex_modifications");
       mkdirSync(karabinerDir, { recursive: true });
+      writeToggleScript();
 
       const rule = {
         title: "Recordings — Fn key to toggle recording",
@@ -1429,18 +2042,24 @@ fi
       const karabinerPath = pathJoin(karabinerDir, "recordings-fn.json");
       writeFileSync(karabinerPath, JSON.stringify(rule, null, 2) + "\n", "utf-8");
 
-      console.log(chalk.green("Karabiner-Elements rule created!"));
+      console.log(chalk.green("Karabiner-Elements rule written:"));
       console.log(chalk.dim(`  ${karabinerPath}\n`));
-      console.log("To activate:");
+      console.log("It does nothing until you enable it:");
       console.log("  1. Open Karabiner-Elements");
       console.log("  2. Go to Complex Modifications tab");
       console.log("  3. Click Add Predefined Rule");
       console.log('  4. Enable "Fn key toggles speech recording"');
-      console.log(chalk.dim("\n  Press Fn to start recording, Fn again to stop + copy to clipboard"));
       return;
     }
 
     if (opts.raycast) {
+      if (!requireMacOS("Raycast setup")) return;
+      if (
+        launcherMissing("Raycast", existsSync("/Applications/Raycast.app"), "brew install --cask raycast")
+      ) {
+        return;
+      }
+      writeToggleScript();
       const raycastDir = pathJoin(home, ".config", "raycast", "script-commands");
       mkdirSync(raycastDir, { recursive: true });
       const raycastScript = `#!/bin/bash
@@ -1459,14 +2078,17 @@ ${scriptPath}
       const raycastPath = pathJoin(raycastDir, "toggle-recording.sh");
       writeFileSync(raycastPath, raycastScript, "utf-8");
       chmodSync(raycastPath, 0o755);
-      console.log(chalk.green("Raycast script command created!"));
+      console.log(chalk.green("Raycast script command written:"));
       console.log(chalk.dim(`  ${raycastPath}`));
-      console.log(chalk.dim("  Open Raycast > Script Commands > reload to see it"));
-      console.log(chalk.dim("  Then assign a hotkey in Raycast preferences"));
+      console.log(chalk.dim("  Raycast > Script Commands > reload, then assign a hotkey."));
       return;
     }
 
     if (opts.skhd) {
+      if (!requireMacOS("skhd setup")) return;
+      const skhdPresent = runSync("/usr/bin/env", ["which", "skhd"], { encoding: "utf8" }).status === 0;
+      if (launcherMissing("skhd", skhdPresent, "brew install koekeishiya/formulae/skhd")) return;
+      writeToggleScript();
       console.log(chalk.bold("Add to ~/.skhdrc:\n"));
       console.log(chalk.cyan(`  fn - space : ${scriptPath}`));
       console.log(chalk.dim("\n  Then reload: skhd --restart-service"));
@@ -1474,6 +2096,17 @@ ${scriptPath}
     }
 
     if (opts.hammerspoon) {
+      if (!requireMacOS("Hammerspoon setup")) return;
+      if (
+        launcherMissing(
+          "Hammerspoon",
+          existsSync("/Applications/Hammerspoon.app"),
+          "brew install --cask hammerspoon",
+        )
+      ) {
+        return;
+      }
+      writeToggleScript();
       console.log(chalk.bold("Add to ~/.hammerspoon/init.lua:\n"));
       console.log(chalk.cyan(`  hs.hotkey.bind({"ctrl"}, "space", function()
     hs.execute("${scriptPath}")
@@ -1482,34 +2115,9 @@ ${scriptPath}
       return;
     }
 
-    // Default: show all options
-    console.log(chalk.bold("Global shortcut script created:"));
-    console.log(chalk.cyan(`  ${scriptPath}\n`));
-    console.log("Bind it to a hotkey using any of these:\n");
-
-    console.log(chalk.bold("  Karabiner-Elements") + chalk.dim(" (for Fn key specifically)"));
-    console.log(`    brew install --cask karabiner-elements`);
-    console.log(`    recordings shortcut --karabiner\n`);
-
-    console.log(chalk.bold("  Raycast"));
-    console.log(`    recordings shortcut --raycast\n`);
-
-    console.log(chalk.bold("  skhd"));
-    console.log(`    recordings shortcut --skhd\n`);
-
-    console.log(chalk.bold("  Hammerspoon"));
-    console.log(`    recordings shortcut --hammerspoon\n`);
-
-    console.log(chalk.bold("  macOS Automator"));
-    console.log(`    1. Open Automator > Quick Action`);
-    console.log(`    2. Add "Run Shell Script" action`);
-    console.log(`    3. Paste: ${scriptPath}`);
-    console.log(`    4. Save as "Toggle Recording"`);
-    console.log(`    5. System Settings > Keyboard > Shortcuts > Services`);
-    console.log(`    6. Assign a shortcut to "Toggle Recording"\n`);
-
-    console.log(chalk.bold("  Alfred"));
-    console.log(`    Create a workflow with a Hotkey trigger → Run Script: ${scriptPath}\n`);
+    // --script: write the app-less toggle script and print where it landed.
+    writeToggleScript();
+    console.log(scriptPath);
   });
 
 // ── Transcription metadata ──────────────────────────────────────────────────
@@ -2007,22 +2615,44 @@ type MacOSAppStatus = {
   signature_authorities: string[];
   microphone_permission: string;
   accessibility_permission: string;
+  ambiguous_installations: boolean;
+  microphone_grant_durability: TccGrantDurability;
+  accessibility_grant_durability: TccGrantDurability;
+  microphone_stored_requirement: string | null;
+  accessibility_stored_requirement: string | null;
   log_path: string;
 };
 
 function getMacOSAppStatus(): MacOSAppStatus {
   const packageRoot = findPackageRoot();
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  const installedAppPath = pathJoin(home, "Applications", "Recordings.app");
+  const canonicalAppPath = pathJoin(home, "Applications", "Recordings.app");
+  const legacyInstallPaths = findLegacyMacOSAppPaths(home, canonicalAppPath);
+  // Report on the bundle that is actually on disk. Pinning the canonical path meant that on a
+  // machine where the app lives anywhere else, every permission answer described a bundle that
+  // did not exist — so the grants of the bundle actually holding them were never examined.
+  const installedAppPath = resolveInstalledAppPath(home, canonicalAppPath, legacyInstallPaths);
+  // A grant belongs to a bundle, so a state can only be reported for one that exists. Passing
+  // a path that is not there produced `allowed_identity_unverified` — an "allowed" string for
+  // a machine with nothing installed.
+  const installedAppPathForGrants = existsSync(installedAppPath) ? installedAppPath : null;
   const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
   const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
   const installerPath = getMacOSInstallerPath(packageRoot);
   const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
   const signingInfo = getCodeSigningInfo(installedAppPath);
-  const legacyInstallPaths = findLegacyMacOSAppPaths(home, installedAppPath);
-  const permissionStatus = legacyInstallPaths.length > 0
-    ? "ambiguous_multiple_installations"
-    : null;
+  // Ambiguity is a warning about WHICH bundle answered, not a substitute for the answer.
+  // Replacing the permission state with it discarded the one fact the operator needed.
+  // It must be flagged whenever more than one bundle exists — especially when the canonical
+  // path is absent, which is exactly when the answer comes from a bundle nobody named.
+  const ambiguousInstallations =
+    [canonicalAppPath, ...legacyInstallPaths].filter((path) => existsSync(path)).length > 1;
+  const microphoneGrant = getTccGrant("kTCCServiceMicrophone", home, installedAppPathForGrants);
+  const accessibilityGrant = getTccGrant(
+    "kTCCServiceAccessibility",
+    home,
+    installedAppPathForGrants,
+  );
 
   return {
     platform: process.platform,
@@ -2042,10 +2672,85 @@ function getMacOSAppStatus(): MacOSAppStatus {
     team_identifier: signingInfo.teamIdentifier,
     designated_requirement: signingInfo.designatedRequirement,
     signature_authorities: signingInfo.authorities,
-    microphone_permission: permissionStatus ?? getTccPermission("kTCCServiceMicrophone", home),
-    accessibility_permission: permissionStatus ?? getTccPermission("kTCCServiceAccessibility", home),
+    microphone_permission: microphoneGrant.state,
+    accessibility_permission: accessibilityGrant.state,
+    ambiguous_installations: ambiguousInstallations,
+    microphone_grant_durability: microphoneGrant.durability,
+    accessibility_grant_durability: accessibilityGrant.durability,
+    microphone_stored_requirement: microphoneGrant.storedRequirement,
+    accessibility_stored_requirement: accessibilityGrant.storedRequirement,
     log_path: logPath,
   };
+}
+
+/// Every caveat that qualifies a reported permission state, built once so the text output and
+/// `--json` cannot drift apart. `--json` consumers previously received none of these.
+function buildPermissionWarnings(status: MacOSAppStatus): string[] {
+  const warnings: string[] = [];
+  if (status.platform !== "darwin") return warnings;
+
+  if (!status.installed) {
+    warnings.push(
+      `no app bundle exists at ${status.installed_app_path}, so the states above describe no `
+        + "installed code — install the app before trusting them",
+    );
+  }
+  if (status.ambiguous_installations) {
+    warnings.push(
+      "more than one Recordings.app is installed, so the states above may describe a bundle "
+        + `other than the one macOS granted: reporting on ${status.installed_app_path}, also `
+        + `present are ${status.legacy_install_paths.join(", ")}`,
+    );
+  }
+  for (const [service, durability] of [
+    ["Microphone", status.microphone_grant_durability],
+    ["Accessibility", status.accessibility_grant_durability],
+  ] as const) {
+    if (durability === "dies_on_rebuild_cdhash_pinned") {
+      warnings.push(
+        `the ${service} grant is pinned to one exact build, so the next rebuild will silently `
+          + "revoke it — re-sign with a stable certificate identity to keep it",
+      );
+    }
+  }
+  for (const [service, state] of [
+    ["Microphone", status.microphone_permission],
+    ["Accessibility", status.accessibility_permission],
+  ] as const) {
+    if (state === "undetermined_tcc_database_unreadable") {
+      warnings.push(
+        `the TCC database holding the ${service} decision could not be read, so that state is `
+          + "unknown rather than ungranted — the usual cause is that this process lacks Full "
+          + "Disk Access",
+      );
+    }
+  }
+  return warnings;
+}
+
+/// Picks the bundle to report on when the canonical install is absent.
+///
+/// The order is deliberate rather than lexicographic: sorting picked whichever path sorted
+/// first, so `/Applications/Recordings.app` could silently answer for a grant held by the
+/// bundle in `~/.hasna/recordings`. Preference follows the installer's own policy —
+/// `install_macos_app.sh` installs to `$HOME/Applications` and classifies the
+/// `~/.hasna/recordings` copy as a duplicate to archive — so a real install location wins over
+/// one the installer treats as stale. Callers must still surface `ambiguous_installations`:
+/// this returns a defensible choice, not a certainty.
+function resolveInstalledAppPath(
+  home: string,
+  canonicalPath: string,
+  legacyPaths: string[],
+): string {
+  const preference = [
+    canonicalPath,
+    pathJoin("/", "Applications", "Recordings.app"),
+    pathJoin(home, ".hasna", "recordings", "Recordings.app"),
+  ];
+  for (const candidate of preference) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return legacyPaths.find((candidate) => existsSync(candidate)) ?? canonicalPath;
 }
 
 function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] {
@@ -2069,9 +2774,14 @@ function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] 
 function resetMacOSPermissions(): void {
   const services = ["Microphone", "Accessibility"];
   for (const service of services) {
-    const result = spawnSync("tccutil", ["reset", service, "com.hasna.recordings"], {
-      stdio: "inherit",
-    });
+    // Absolute path: this is the one command here that destroys grants, and `security` on a
+    // Hasna station already resolves to a shadowing CLI ahead of /usr/bin. Resolving a
+    // grant-destroying tool through PATH is not a risk worth carrying.
+    const result = spawnSync(
+      "/usr/bin/tccutil",
+      ["reset", service, RECORDINGS_BUNDLE_IDENTIFIER],
+      { stdio: "inherit" },
+    );
     if (result.error) {
       console.error(chalk.red(result.error.message));
       process.exit(1);
@@ -2111,45 +2821,22 @@ function getCodeSigningInfo(appPath: string): {
   return { cdHash, adHoc, identifier, teamIdentifier, designatedRequirement, authorities };
 }
 
-function getTccPermission(service: string, home: string): string {
-  if (process.platform !== "darwin") return "unsupported";
-
-  const dbPaths = [
-    pathJoin(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-    pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-  ];
-  const sql =
-    "select auth_value from access where service = '" +
-    service.replace(/'/g, "''") +
-    "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
-
-  for (const dbPath of dbPaths) {
-    if (!existsSync(dbPath)) continue;
-    const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const value = result.stdout.trim();
-    if (!value) continue;
-    return `${tccAuthValueLabel(value)}_identity_unverified`;
+/// Reports the authorization state for one TCC service. An `allowed` row is only reported
+/// as `allowed` when the grant's stored code requirement still validates against the
+/// installed bundle — see `resolveTccPermission`.
+///
+/// Rebase note (#24 x #25): this branch previously carried its own `getTccPermission()` plus a
+/// local `tccAuthValueLabel()`, which returned a flat `"<label>_identity_unverified"` string for
+/// every readable row. `macos-permissions.ts` (#24) supersedes both: it verifies the grant's
+/// stored code requirement against the installed bundle, so it can distinguish a genuinely
+/// verified `allowed` from `allowed_identity_unverified`, and it reads "no such table" as
+/// absence rather than refusal. The local copies were deleted rather than kept alongside it —
+/// two readers of one TCC database would disagree exactly where verification matters.
+function getTccGrant(service: string, home: string, appPath: string | null): TccGrantReport {
+  if (process.platform !== "darwin") {
+    return { state: "unsupported", storedRequirement: null, durability: "unknown" };
   }
-
-  return "not_determined";
-}
-
-function tccAuthValueLabel(value: string): string {
-  switch (value) {
-    case "0":
-      return "denied";
-    case "1":
-      return "unknown";
-    case "2":
-      return "allowed";
-    case "3":
-      return "limited";
-    default:
-      return `unknown(${value})`;
-  }
+  return resolveTccGrant({ service, home, appPath });
 }
 
 function findPackageRoot(): string {

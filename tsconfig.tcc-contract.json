@@ -1,0 +1,17 @@
+{
+  // The root tsconfig excludes `**/*.test.ts`, so `tsc --noEmit` never looks at a test file.
+  // That matters here specifically: `tcc-state-contract.test.ts` enforces its exhaustiveness over
+  // `TccAuthorizationState` with a `satisfies Record<...>` clause, and a `satisfies` clause that
+  // is never typechecked enforces nothing at all. Without this config the test would pass under
+  // `bun test` (Bun transpiles, it does not typecheck) while its central guarantee — that a state
+  // added to the union cannot be omitted from the contract — was silently absent.
+  //
+  // Scoped by `files` rather than by directory on purpose. Typechecking the whole existing suite
+  // surfaces pre-existing errors owned by other lanes, and turning those into a red typecheck for
+  // every branch is not this change's call to make.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "files": ["src/__tests__/tcc-state-contract.test.ts"]
+}

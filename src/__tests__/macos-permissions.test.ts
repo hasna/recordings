@@ -1,8 +1,44 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
+  classifyTccGrantDurability,
+  describeTccAuthorizationSubject,
+  RECORDINGS_BUNDLE_IDENTIFIER,
+  resolveTccGrant,
+  resolveTccPermission,
   runMacOSPermissionRequest,
+  tccDatabasePaths,
+  verifyStoredRequirementWithCodesign,
   type PermissionHelperRunner,
+  type TccAccessRow,
+  type TccIdentityVerification,
+  type TccPermissionProbe,
 } from "../cli/macos-permissions.js";
+
+const APP_PATH = "/Users/tester/.hasna/recordings/Recordings.app";
+
+/// Real blob taken from station03's system TCC.db row for
+/// kTCCServiceAccessibility / com.hasna.recordings. Decodes (via `csreq -r <file> -t`) to:
+///   identifier "com.hasna.recordings" and certificate root = H"6eb85e38...dfe4"
+const STATION_CSREQ_HEX =
+  "FADE0C000000004C00000001000000060000000200000014636F6D2E6861736E612E7265636F7264696E677300000004FFFFFFFF000000146EB85E38B7750391E313D7ED4119972CB4BDDFE4";
+
+function probeReturning(
+  row: TccAccessRow | null,
+  verification: TccIdentityVerification = "satisfied",
+  options: { presentDatabases?: string[] } = {},
+): TccPermissionProbe {
+  return {
+    databasePresence: (dbPath) =>
+      options.presentDatabases
+        ? options.presentDatabases.includes(dbPath)
+          ? "present"
+          : "absent"
+        : "present",
+    readAccessRow: () => (row ? { kind: "row", row } : { kind: "absent" }),
+    verifyStoredRequirement: () => verification,
+  };
+}
 
 describe("macOS permission helper exit relay", () => {
   test("runs the installed app executable directly and relays denied status", () => {
@@ -48,5 +84,497 @@ describe("macOS permission helper exit relay", () => {
 
     expect(failed).toEqual({ exitCode: 1, errorMessage: "launch failed" });
     expect(missingStatus.exitCode).toBe(1);
+  });
+});
+
+describe("TCC grant identity verification", () => {
+  test("an allowed row whose stored requirement still validates is genuinely allowed", () => {
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning({ authValue: "2", csreqHex: STATION_CSREQ_HEX }, "satisfied"),
+    });
+
+    expect(state).toBe("allowed");
+  });
+
+  test("an allowed row bound to a previous build is reported stale, never allowed", () => {
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning({ authValue: "2", csreqHex: STATION_CSREQ_HEX }, "unsatisfied"),
+    });
+
+    expect(state).toBe("stale_allowed_for_previous_app_build");
+  });
+
+  test("an unverifiable allowed row is disclosed as unverified rather than allowed", () => {
+    const unverifiable = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning({ authValue: "2", csreqHex: "" }, "unverifiable"),
+    });
+    const noInstalledApp = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: null,
+      probe: probeReturning({ authValue: "2", csreqHex: STATION_CSREQ_HEX }, "satisfied"),
+    });
+
+    expect(unverifiable).toBe("allowed_identity_unverified");
+    // No bundle to check is NOT an "allowed_" state: a human skim or a `grep allowed` over
+    // this output must not read "there is nothing installed" as a pass.
+    expect(noInstalledApp).toBe("unverified_no_installed_bundle");
+    expect(noInstalledApp.startsWith("allowed")).toBeFalse();
+  });
+
+  test("non-allowed decisions are returned without consulting the signature", () => {
+    let verifyCalls = 0;
+    const probe: TccPermissionProbe = {
+      databasePresence: () => "present",
+      readAccessRow: () => ({
+        kind: "row",
+        row: { authValue: "0", csreqHex: STATION_CSREQ_HEX },
+      }),
+      verifyStoredRequirement: () => {
+        verifyCalls += 1;
+        return "satisfied";
+      },
+    };
+
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe,
+    });
+
+    expect(state).toBe("denied");
+    expect(verifyCalls).toBe(0);
+  });
+
+  test("missing databases and missing rows fall through to not_determined", () => {
+    const noDatabase = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning(null, "satisfied", { presentDatabases: [] }),
+    });
+    const noRow = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning(null),
+    });
+
+    expect(noDatabase).toBe("not_determined");
+    expect(noRow).toBe("not_determined");
+  });
+
+  test("the user database is consulted before the system database", () => {
+    const [userDatabase, systemDatabase] = tccDatabasePaths("/Users/tester");
+    const consulted: string[] = [];
+    const probe: TccPermissionProbe = {
+      databasePresence: () => "present",
+      readAccessRow: (dbPath) => {
+        consulted.push(dbPath);
+        return dbPath === systemDatabase
+          ? { kind: "row", row: { authValue: "2", csreqHex: STATION_CSREQ_HEX } }
+          : { kind: "absent" };
+      },
+      verifyStoredRequirement: () => "satisfied",
+    };
+
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe,
+    });
+
+    expect(state).toBe("allowed");
+    expect(consulted).toEqual([userDatabase, systemDatabase]);
+    expect(userDatabase).toContain("/Users/tester/Library/Application Support/com.apple.TCC/TCC.db");
+    expect(systemDatabase).toBe("/Library/Application Support/com.apple.TCC/TCC.db");
+  });
+
+  test("queries the row for the canonical bundle identifier", () => {
+    expect(RECORDINGS_BUNDLE_IDENTIFIER).toBe("com.hasna.recordings");
+  });
+
+  /// Accessibility lives only in the system database, which needs Full Disk Access to open.
+  /// Reporting `not_determined` there would tell an operator the app had never been granted
+  /// when in fact the answer was simply unread — the failure this suite exists to prevent.
+  test("an unreadable database is reported as undetermined, never as not_determined", () => {
+    const probe: TccPermissionProbe = {
+      databasePresence: () => "present",
+      readAccessRow: () => ({ kind: "unreadable", detail: "unable to open database file" }),
+      verifyStoredRequirement: () => "satisfied",
+    };
+
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe,
+    });
+
+    expect(state).toBe("undetermined_tcc_database_unreadable");
+    expect(state).not.toBe("not_determined");
+  });
+
+  test("an unreadable user database does not mask a real grant in the system database", () => {
+    const [userDatabase, systemDatabase] = tccDatabasePaths("/Users/tester");
+    const probe: TccPermissionProbe = {
+      databasePresence: () => "present",
+      readAccessRow: (dbPath) =>
+        dbPath === userDatabase
+          ? { kind: "unreadable", detail: "permission denied" }
+          : { kind: "row", row: { authValue: "2", csreqHex: STATION_CSREQ_HEX } },
+      verifyStoredRequirement: () => "satisfied",
+    };
+
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe,
+    });
+
+    expect(state).toBe("allowed");
+    expect(systemDatabase).toBe("/Library/Application Support/com.apple.TCC/TCC.db");
+  });
+
+  test("an absent row is still not_determined when every present database was readable", () => {
+    const state = resolveTccPermission({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning(null),
+    });
+
+    expect(state).toBe("not_determined");
+  });
+});
+
+describe("TCC grant durability across rebuilds", () => {
+  /// The real requirement from station03's live Accessibility grant, decoded with
+  /// `csreq -r <blob> -t`. It names the signing certificate's root, not the binary.
+  const STATION_REQUIREMENT =
+    'identifier "com.hasna.recordings" and certificate root = H"6eb85e38b7750391e313d7ed4119972cb4bddfe4"';
+
+  test("a certificate-rooted requirement survives a rebuild", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement: STATION_REQUIREMENT,
+        adHocSigned: false,
+      }),
+    ).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  test("a Developer ID requirement survives a rebuild", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement:
+          'identifier "com.hasna.recordings" and anchor apple generic and certificate '
+          + 'leaf[subject.CN] = "Developer ID Application: VASILE ANDREI HASNA (HKZ326A8Y3)"',
+        adHocSigned: false,
+      }),
+    ).toBe("survives_rebuild_developer_id");
+  });
+
+  /// The shape of the stale `com.hasna.recordings-helper` grant measured on station03, and
+  /// the shape `build.sh` produces whenever it signs with `-`.
+  test("a cdhash-pinned requirement dies on rebuild", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement: 'cdhash H"d7e467f995dc72102c86f15c6ed5bdebc7918c2e"',
+        adHocSigned: false,
+      }),
+    ).toBe("dies_on_rebuild_cdhash_pinned");
+  });
+
+  test("ad-hoc signing decides the verdict even with no readable requirement", () => {
+    expect(
+      classifyTccGrantDurability({ designatedRequirement: null, adHocSigned: true }),
+    ).toBe("dies_on_rebuild_cdhash_pinned");
+  });
+
+  test("an unreadable requirement on a certificate-signed bundle stays unknown", () => {
+    expect(
+      classifyTccGrantDurability({ designatedRequirement: null, adHocSigned: false }),
+    ).toBe("unknown");
+  });
+
+  /// A bundle identifier is free to contain the word "cdhash". Classifying on the raw text
+  /// would call this certificate-anchored grant pinned, and so warn about a revocation that
+  /// is not going to happen.
+  test("cdhash inside a quoted identifier does not count as a cdhash term", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement:
+          'identifier "com.example.cdhash-tool" and certificate root = H"6eb85e38b7750391e313d7ed4119972cb4bddfe4"',
+        adHocSigned: false,
+      }),
+    ).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  test("an anchor-hash requirement is recognised as certificate anchored", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement: 'identifier "com.hasna.recordings" and anchor H"6eb85e38b775"',
+        adHocSigned: false,
+      }),
+    ).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  /// `anchor apple` (the platform-binary anchor, e.g. /bin/ls) is not `anchor apple generic`
+  /// (Developer ID), but it is still anchored to a certificate rather than to one binary.
+  /// Measured on macOS 26.5.1: `codesign -d -r- /bin/ls` reports
+  /// `identifier "com.apple.ls" and anchor apple`.
+  test("plain anchor apple is certificate anchored, not a Developer ID and not unknown", () => {
+    const durability = classifyTccGrantDurability({
+      designatedRequirement: 'identifier "com.apple.ls" and anchor apple',
+      adHocSigned: false,
+    });
+
+    expect(durability).toBe("survives_rebuild_certificate_anchored");
+    expect(durability).not.toBe("survives_rebuild_developer_id");
+  });
+});
+
+/// The system TCC database only opens for a process holding Full Disk Access, so telling
+/// "could not read" apart from "no grant recorded" is the whole point of the lookup type.
+/// Exit codes measured against sqlite3 3.45.1 and 3.51.0.
+/// Durability must be read from the requirement the grant was STORED with. The bundle's
+/// current signature cannot answer it: an app re-signed with a certificate still holds the
+/// cdhash-pinned grant it was given while ad-hoc, and classifying the bundle would promise a
+/// durability the stored grant does not have. Both shapes are live on station03.
+describe("grant durability comes from the stored requirement", () => {
+  const CERT_ROOT_REQUIREMENT =
+    'identifier "com.hasna.recordings" and certificate root = H"6eb85e38b7750391e313d7ed4119972cb4bddfe4"';
+  const CDHASH_REQUIREMENT = 'cdhash H"d7e467f995dc72102c86f15c6ed5bdebc7918c2e"';
+
+  function grantProbe(storedRequirement: string | null): TccPermissionProbe {
+    return {
+      databasePresence: () => "present",
+      readAccessRow: () => ({
+        kind: "row",
+        row: { authValue: "2", csreqHex: STATION_CSREQ_HEX },
+      }),
+      verifyStoredRequirement: () => "satisfied",
+      describeStoredRequirement: () => storedRequirement,
+    };
+  }
+
+  test("a cdhash-pinned stored grant is reported fragile even though the bundle is cert-signed", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: grantProbe(CDHASH_REQUIREMENT),
+    });
+
+    expect(report.state).toBe("allowed");
+    expect(report.durability).toBe("dies_on_rebuild_cdhash_pinned");
+    expect(report.storedRequirement).toBe(CDHASH_REQUIREMENT);
+  });
+
+  test("a certificate-rooted stored grant is reported durable", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: grantProbe(CERT_ROOT_REQUIREMENT),
+    });
+
+    expect(report.state).toBe("allowed");
+    expect(report.durability).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  test("an undecodable stored requirement is unknown, never assumed durable", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: grantProbe(null),
+    });
+
+    expect(report.durability).toBe("unknown");
+    expect(report.storedRequirement).toBeNull();
+  });
+
+  test("durability is per service, so one app can hold one durable and one fragile grant", () => {
+    const probe: TccPermissionProbe = {
+      databasePresence: () => "present",
+      readAccessRow: (_dbPath, service) => ({
+        kind: "row",
+        row: { authValue: "2", csreqHex: STATION_CSREQ_HEX, service } as TccAccessRow,
+      }),
+      verifyStoredRequirement: () => "satisfied",
+      describeStoredRequirement: () => CERT_ROOT_REQUIREMENT,
+    };
+    const accessibility = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe,
+    });
+    const microphone = resolveTccGrant({
+      service: "kTCCServiceMicrophone",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: { ...probe, describeStoredRequirement: () => CDHASH_REQUIREMENT },
+    });
+
+    expect(accessibility.durability).toBe("survives_rebuild_certificate_anchored");
+    expect(microphone.durability).toBe("dies_on_rebuild_cdhash_pinned");
+  });
+
+  test("a state with no row carries no durability claim", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning(null),
+    });
+
+    expect(report.state).toBe("not_determined");
+    expect(report.durability).toBe("unknown");
+    expect(report.storedRequirement).toBeNull();
+  });
+});
+
+describe("TCC database read failures", () => {
+  function probeWithSqliteFailure(detail: string): TccPermissionProbe {
+    return {
+      databasePresence: () => "present",
+      readAccessRow: () =>
+        /no such table/i.test(detail) ? { kind: "absent" } : { kind: "unreadable", detail },
+      verifyStoredRequirement: () => "satisfied",
+    };
+  }
+
+  /// sqlite3 exits 1 with "no such table: access" — the file opened and answered, so this is
+  /// absence, not illegibility.
+  test("a database with no access table is absence, not illegibility", () => {
+    expect(
+      resolveTccPermission({
+        service: "kTCCServiceAccessibility",
+        home: "/Users/tester",
+        appPath: APP_PATH,
+        probe: probeWithSqliteFailure("Error: in prepare, no such table: access"),
+      }),
+    ).toBe("not_determined");
+  });
+
+  /// sqlite3 exits 1 "unable to open database file" without Full Disk Access, and 26
+  /// "file is not a database" on a corrupt file. Neither means "not granted".
+  test("a database that cannot be opened or parsed is undetermined", () => {
+    for (const detail of [
+      'Error: unable to open database "TCC.db": unable to open database file',
+      "Error: in prepare, file is not a database (26)",
+    ]) {
+      expect(
+        resolveTccPermission({
+          service: "kTCCServiceAccessibility",
+          home: "/Users/tester",
+          appPath: APP_PATH,
+          probe: probeWithSqliteFailure(detail),
+        }),
+      ).toBe("undetermined_tcc_database_unreadable");
+    }
+  });
+});
+
+/// A CLI inherits its terminal's Accessibility grant, so a report that does not name its
+/// subject can read "allowed" on the strength of Ghostty's grant while Recordings.app is
+/// denied. The subject string must always identify the bundle being reported on.
+describe("authorization subject disclosure", () => {
+  test("names the installed bundle path and the bundle identifier", () => {
+    const subject = describeTccAuthorizationSubject(
+      "/Users/hasna/.hasna/recordings/Recordings.app",
+    );
+
+    expect(subject).toContain("/Users/hasna/.hasna/recordings/Recordings.app");
+    expect(subject).toContain(RECORDINGS_BUNDLE_IDENTIFIER);
+  });
+
+  test("says plainly when there is no bundle to report a grant for", () => {
+    const subject = describeTccAuthorizationSubject(null);
+
+    expect(subject).toContain(RECORDINGS_BUNDLE_IDENTIFIER);
+    expect(subject).toContain("no installed bundle");
+  });
+});
+
+describe("codesign requirement evaluation", () => {
+  test("maps the measured codesign exit codes to verdicts", () => {
+    const evaluate = (status: number | null, error?: Error) =>
+      verifyStoredRequirementWithCodesign(
+        STATION_CSREQ_HEX,
+        APP_PATH,
+        () => ({ status, error }),
+        () => true,
+      );
+
+    // 0 = "explicit requirement satisfied", 3 = "code failed to satisfy specified code
+    // requirement(s)", 1 = missing bundle or corrupt requirement (verdict unknown).
+    expect(evaluate(0)).toBe("satisfied");
+    expect(evaluate(3)).toBe("unsatisfied");
+    expect(evaluate(1)).toBe("unverifiable");
+    expect(evaluate(null)).toBe("unverifiable");
+    expect(evaluate(null, new Error("codesign missing"))).toBe("unverifiable");
+  });
+
+  test("passes the requirement blob as a file to codesign --verify -R", () => {
+    const invocations: Array<{ requirementPath: string; appPath: string }> = [];
+    const verdict = verifyStoredRequirementWithCodesign(
+      STATION_CSREQ_HEX,
+      APP_PATH,
+      (requirementPath, appPath) => {
+        invocations.push({ requirementPath, appPath });
+        return { status: 0 };
+      },
+      () => true,
+    );
+
+    expect(verdict).toBe("satisfied");
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]!.appPath).toBe(APP_PATH);
+    expect(invocations[0]!.requirementPath).toEndWith("tcc-requirement.bin");
+  });
+
+  test("refuses to guess when the blob or bundle is unusable", () => {
+    const runner = () => ({ status: 0 });
+    expect(verifyStoredRequirementWithCodesign("", APP_PATH, runner, () => true))
+      .toBe("unverifiable");
+    expect(verifyStoredRequirementWithCodesign("ABC", APP_PATH, runner, () => true))
+      .toBe("unverifiable");
+    expect(verifyStoredRequirementWithCodesign("ZZZZ", APP_PATH, runner, () => true))
+      .toBe("unverifiable");
+    expect(verifyStoredRequirementWithCodesign(STATION_CSREQ_HEX, APP_PATH, runner, () => false))
+      .toBe("unverifiable");
+    expect(verifyStoredRequirementWithCodesign(STATION_CSREQ_HEX, "", runner, () => true))
+      .toBe("unverifiable");
+  });
+
+  test("removes the temporary requirement file after evaluating", () => {
+    let capturedPath = "";
+    verifyStoredRequirementWithCodesign(
+      STATION_CSREQ_HEX,
+      APP_PATH,
+      (requirementPath) => {
+        capturedPath = requirementPath;
+        return { status: 0 };
+      },
+      () => true,
+    );
+
+    expect(capturedPath).not.toBe("");
+    expect(existsSync(capturedPath)).toBe(false);
   });
 });
