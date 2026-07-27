@@ -79,13 +79,38 @@ export const LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH = join(
 export function localOnlyApprovedTargets(
   policyPath: string = LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH,
 ): string[] {
-  const contents = readFileSync(policyPath, "utf8").replace(/^﻿/, "");
+  // lstat, not readFileSync alone: readFileSync FOLLOWS a symlink, and the shell reader
+  // refuses one outright (`[ -L ]`). That divergence was real and it favoured the
+  // attacker — a policy symlinked at a widened allowlist was rejected by the shell gate
+  // and silently honoured here. Refusing every non-regular file matches the shell reader
+  // and keeps the wording it prints, so both sides fail closed identically.
+  let policyStats;
+  try {
+    policyStats = lstatSync(policyPath);
+  } catch {
+    throw new Error("local-only approved target policy is missing");
+  }
+  if (!policyStats.isFile()) {
+    throw new Error("local-only approved target policy is missing");
+  }
+  const rawContents = readFileSync(policyPath, "utf8");
+  // Reject a NUL anywhere, in the same order and with the same wording as the shell
+  // reader's pre-scan. This reader had no NUL check at all and only ever refused one that
+  // happened to land inside a would-be hostname: "# comment\0" was dropped as a comment,
+  // so "# comment\0\nstation03\n" was refused by the shell gate and ACCEPTED here.
+  if (rawContents.includes("\u0000")) {
+    throw new Error("local-only approved target policy contains a NUL byte");
+  }
+  // Strip a BOM at offset 0 only. A U+FEFF anywhere else is a zero-width no-break space,
+  // not a byte-order mark; the shell reader used to strip one per line and therefore
+  // accepted a BOM on line 2 that this reader rejected.
+  const contents = rawContents.replace(/^﻿/, "");
   const targets = contents
     .split("\n")
-    // Deliberately NOT String.trim(): trim() also strips U+FEFF and U+00A0, which
-    // bash's [[:space:]] under LC_ALL=C does not, so a trailing NBSP or BOM would be
-    // accepted here and rejected by the shell reader. ASCII-only trimming keeps the
-    // two readers byte-for-byte equivalent.
+    // Deliberately NOT String.trim(): trim() also strips U+FEFF and U+00A0, and the
+    // shell reader trims neither, so a trailing NBSP or BOM would be accepted here and
+    // rejected there. ASCII space and tab only, matching read_local_only_targets.sh
+    // under its pinned LC_ALL=C; everything else is left for the hostname shape below.
     .map((line) => line.replace(/\r$/, "").replace(/^[\t ]+|[\t ]+$/g, ""))
     .filter((line) => line.length > 0 && !line.startsWith("#"));
   if (targets.length === 0) {

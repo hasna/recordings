@@ -10,17 +10,37 @@
 # policy shape"), which is the only thing that actually holds them together. If you
 # change the rules here, change them there and extend that test.
 #
-# Rules: strip an optional UTF-8 BOM and a trailing CR, trim ASCII spaces and tabs only
-# (NOT Unicode whitespace — JS trim() strips U+FEFF/U+00A0 and bash does not, so both
-# sides must reject them via the hostname shape instead), reject any NUL byte, drop blank
-# and comment lines, then require every target to be a well-formed short hostname,
-# unique, and never the release fleet target. Anything else fails closed.
+# Rules: reject anything that is not a regular file (a symlinked policy is refused, not
+# followed), strip an optional UTF-8 BOM from the FIRST line only and a trailing CR from
+# every line, trim ASCII space and tab only, reject any NUL byte, drop blank and comment
+# lines, then require every target to be a well-formed short hostname, unique, and never
+# the release fleet target. Anything else fails closed.
+#
+# Three of those rules exist because the two readers disagreed and the disagreement was
+# provable, not theoretical:
+#   * SYMLINKS. `[ -L ]` here refused a symlinked policy while readFileSync() there
+#     followed it, so a symlink pointing at a widened allowlist was rejected by the
+#     shell and silently honoured by TypeScript. Both now refuse; a symlink is never a
+#     legitimate shape for package-local policy data shipped inside the tarball.
+#   * ASCII-ONLY TRIM. This used to trim [[:space:]], which also covers VT (0x0b) and FF
+#     (0x0c) and is locale-dependent, while TypeScript trims /[\t ]/ only. "station03\v"
+#     was therefore accepted here and rejected there. Both now trim space and tab only,
+#     and everything else is left in place for the hostname shape to reject.
+#   * BOM POSITION. This used to strip a BOM from every line while TypeScript strips one
+#     only at offset 0, so a BOM on the second line was accepted here and rejected there.
+#     A U+FEFF anywhere but the very start of the file is a zero-width no-break space,
+#     not a byte-order mark, and both readers now reject it.
+#
+# LC_ALL/LANG are pinned to C for the duration of this function because every rule below
+# is a byte rule: `[a-z0-9-]` and `[[:space:]]` are both collation- and locale-dependent
+# in bash patterns, so without the pin the caller's locale silently redefines the policy.
 
 # read_local_only_targets <policy-path> <out-list-var> <out-match-var> <requested-target>
 # Sets <out-list-var> to a comma-separated list for error messages and
 # <out-match-var> to 1 when <requested-target> is approved. Returns non-zero with a
 # message on stderr when the policy itself is unusable.
 read_local_only_targets() {
+  local LC_ALL=C LANG=C
   local policy_path="$1"
   local list_var="$2"
   local match_var="$3"
@@ -39,15 +59,20 @@ read_local_only_targets() {
     return 1
   fi
 
-  local line target list="" matched=0
+  local line target list="" matched=0 first_line=1
+  local blanks=$' \t'
   local -a seen=()
   while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#$'\xef\xbb\xbf'}"
+    if [ "$first_line" -eq 1 ]; then
+      line="${line#$'\xef\xbb\xbf'}"
+      first_line=0
+    fi
     line="${line%$'\r'}"
-    # Trim leading and trailing blanks so an indented entry or comment behaves
-    # the same here as it does in the TypeScript reader.
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
+    # Trim ASCII space and tab only, so an indented entry or comment behaves the same
+    # here as it does in the TypeScript reader. Deliberately not [[:space:]]: that also
+    # covers VT and FF, which TypeScript's /[\t ]/ leaves in place to be rejected.
+    line="${line#"${line%%[!$blanks]*}"}"
+    line="${line%"${line##*[!$blanks]}"}"
     case "$line" in '' | '#'*) continue ;; esac
     target="$line"
     case "$target" in
