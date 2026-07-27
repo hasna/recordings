@@ -185,8 +185,12 @@ describe("trigger permission requirements", () => {
  */
 describe("blocked-trigger reporting contract", () => {
   test("the engine keeps the blocked reason outside statusMessage", () => {
-    expect(engineSource).toContain("triggerBlockedReason");
-    expect(engineSource).toContain("@Published public private(set) var triggerBlockedReason: String?");
+    expect(engineSource).toContain("@Published public private(set) var blockedReason: String?");
+    // The collapse: `triggerBlockedReason` and the delivery-side `blockedReason` were two
+    // published fields describing "the app cannot do what you asked". Two fields is two places
+    // for a view to forget to read, and the menu bar forgot to read either. One field only.
+    expect(engineSource).not.toContain("triggerBlockedReason: String?");
+    expect(engineSource).not.toContain("@Published public private(set) var triggerBlockedReason");
   });
 
   test("updateStatus consults the blocked reason before falling back to Ready", () => {
@@ -194,9 +198,9 @@ describe("blocked-trigger reporting contract", () => {
       engineSource.indexOf("public func updateStatus()"),
       engineSource.indexOf("// MARK: - Toggle"),
     );
-    expect(updateStatus).toContain("if let triggerBlockedReason");
+    expect(updateStatus).toContain("if let blockedReason");
     // The blocked branch must come before the "Ready" write, or Ready wins again.
-    expect(updateStatus.indexOf("if let triggerBlockedReason")).toBeLessThan(
+    expect(updateStatus.indexOf("if let blockedReason")).toBeLessThan(
       updateStatus.indexOf('statusMessage = "Ready"'),
     );
   });
@@ -237,8 +241,9 @@ describe("blocked-trigger reporting contract", () => {
       engineSource.indexOf("private func updateFnMonitor("),
       engineSource.indexOf("public func updateStatus()"),
     );
-    expect(updateFnMonitor).toContain("fnBlockedReason = nil");
-    expect(updateFnMonitor).toContain("fnBlockedReason = Self.fnAccessibilityBlockedMessage");
+    // Decided into a local and handed to the single writer once, keyed by source.
+    expect(updateFnMonitor).toContain("reason = Self.fnAccessibilityBlockedMessage");
+    expect(updateFnMonitor).toContain("setBlockedReason(reason, for: .fnKey)");
   });
 
   /**
@@ -246,16 +251,39 @@ describe("blocked-trigger reporting contract", () => {
    * writer would let whichever ran last erase the other, which is the same class of bug as
    * `updateStatus()` erasing the warning outright.
    */
-  test("only the compositor writes the published reason", () => {
-    const writes = engineSource.match(/^\s*triggerBlockedReason = /gm) ?? [];
+  test("only the source-keyed writer assigns the published reason", () => {
+    const writes = engineSource.match(/^\s*blockedReason = /gm) ?? [];
     expect(writes.length).toBe(1);
     const compositor = engineSource.slice(
-      engineSource.indexOf("private func recomputeTriggerBlockedReason()"),
+      engineSource.indexOf("private func setBlockedReason("),
       engineSource.indexOf("static func systemReservedShortcuts()"),
     );
-    expect(compositor).toContain("triggerBlockedReason = ");
-    expect(compositor).toContain("hotkeyBlockedReason");
-    expect(compositor).toContain("fnBlockedReason");
+    expect(compositor).toContain("blockedReason = ");
+    expect(compositor).toContain("blockedReasons[source]");
+    // Composition order comes from the enum's declaration order, so the same set of blockers
+    // renders the same string no matter which source was written last.
+    expect(compositor).toContain("sorted { $0.key < $1.key }");
+  });
+
+  /**
+   * Four sources can hold at once. Every one of them must go through the single writer, or the
+   * last one to run erases the others — the erasure bug this mechanism exists to prevent.
+   */
+  test("every blocked-reason source is declared and written through one function", () => {
+    const sources = engineSource.slice(
+      engineSource.indexOf("enum BlockedReasonSource"),
+      engineSource.indexOf("@Published public private(set) var blockedReason"),
+    );
+    for (const source of ["case hotkey", "case fnKey", "case pressConsumed", "case delivery"]) {
+      expect(sources).toContain(source);
+    }
+    // Comparable, so the composed order is the declaration order rather than dictionary order.
+    expect(sources).toContain("Comparable");
+
+    // No source may assign the published property directly.
+    for (const source of ["hotkey", "fnKey", "pressConsumed", "delivery"]) {
+      expect(engineSource).toContain(`for: .${source})`);
+    }
   });
 
   /**
@@ -265,7 +293,7 @@ describe("blocked-trigger reporting contract", () => {
    */
   test("the hotkey has a blocked path of its own", () => {
     expect(engineSource).toContain("private func refreshHotkeyDiagnostics()");
-    expect(engineSource).toContain("hotkeyBlockedReason =");
+    expect(engineSource).toContain("setBlockedReason(reason, for: .hotkey)");
     // The one arming failure that IS observable: a collision with an enabled system shortcut.
     expect(engineSource).toContain("CopySymbolicHotKeys");
     expect(engineSource).toContain("kHISymbolicHotKeyEnabled");
@@ -304,7 +332,7 @@ describe("blocked-trigger reporting contract", () => {
   });
 
   test("Settings shows the blocked reason next to the toggle that is blocked", () => {
-    expect(settingsSource).toContain("engine.triggerBlockedReason");
+    expect(settingsSource).toContain("engine.blockedReason");
     expect(settingsSource).toContain("openAccessibilitySettings()");
   });
 
@@ -314,6 +342,206 @@ describe("blocked-trigger reporting contract", () => {
     // Assert the log key only. Matching the surrounding indentation would make this fail on
     // any reformatting, which is churn rather than a broken contract.
     expect(engineSource).toContain('"trigger ignored trigger=');
+  });
+});
+
+/**
+ * A reason nothing renders is not a disclosure. `git grep blockedReason` over the pre-collapse
+ * tree returned four hits, all inside `RecordingEngine.swift`, and zero view consumers — while
+ * `git grep -lE "UNUserNotificationCenter|NSAlert|NSSound"` returned zero files, so no toast
+ * surface existed either. These assertions fail on that shape.
+ */
+describe("blocked state is visible in the always-on surface", () => {
+  const presentationSource = readFileSync(
+    "src/native/Recordings/RecordingsLib/MenuBarPresentation.swift",
+    "utf8",
+  );
+  const menuBarViewSource = readFileSync(
+    "src/native/Recordings/App/MenuBarStatusView.swift",
+    "utf8",
+  );
+
+  test("the presentation takes the blocked reason instead of discarding statusMessage", () => {
+    expect(presentationSource).toContain("blockedReason: String? = nil");
+    expect(presentationSource).toContain("} else if let blockedReason, !blockedReason.isEmpty {");
+    expect(presentationSource).toContain("public let isBlocked: Bool");
+  });
+
+  test("blocked changes BOTH the icon and the accessibility label", () => {
+    const blockedBranch = presentationSource.slice(
+      presentationSource.indexOf("} else if let blockedReason"),
+      presentationSource.indexOf("iconName = Self.idleIconName"),
+    );
+    // The menu-bar item renders only these two, so fixing one leaves half the users blind.
+    expect(blockedBranch).toContain("iconName = Self.blockedIconName");
+    expect(blockedBranch).toContain("accessibilityLabel = \"Recordings, blocked: \\(blockedReason)\"");
+    // Distinct from the idle icon, or the sighted signal is unchanged.
+    expect(presentationSource).toMatch(
+      /blockedIconName = "exclamationmark\.triangle\.fill"/,
+    );
+    expect(presentationSource).toMatch(/idleIconName = "mic\.fill"/);
+  });
+
+  test("both menu-bar surfaces actually pass the reason in", () => {
+    // Two call sites: the always-visible label and the popover. Missing either one recreates
+    // exactly the invisibility this fixes.
+    const passes = menuBarViewSource.match(/blockedReason: store\.engine\.blockedReason/g) ?? [];
+    expect(passes.length).toBe(2);
+    expect(menuBarViewSource).toContain("presentation.isBlocked ? .orange : .accentColor");
+  });
+});
+
+/**
+ * Two paste-path rulings that are easy to "simplify" wrongly, so they are asserted rather than
+ * only commented.
+ */
+describe("secure-input delivery contract", () => {
+  /**
+   * `updateDeliveryStatus` clears the persisted reason, because two statuses that reach the
+   * screen produce no `PasteDeliveryOutcome` at all — the "Finish the previous paste" rejection
+   * and the conversation route's "Answered" — so clearing on `startRecording()` cannot reach
+   * them. That makes the secure-input caller order-dependent: set BEFORE the status write and
+   * the reason is wiped, silently reinstating the invisible-blocked bug with every test green.
+   */
+  test("the secure-input reason is re-set AFTER the status write that clears it", () => {
+    const completion = engineSource.slice(
+      engineSource.indexOf("Self.isSecureInputOutcome(outcome) ? message : nil") - 3000,
+      engineSource.indexOf("Self.isSecureInputOutcome(outcome) ? message : nil") + 200,
+    );
+    expect(completion.lastIndexOf("self.updateDeliveryStatus(")).toBeLessThan(
+      completion.indexOf("self.setBlockedReason("),
+    );
+
+    const deliveryStatus = engineSource.slice(
+      engineSource.indexOf("private func updateDeliveryStatus("),
+      engineSource.indexOf("private func selectedRunningPasteTarget("),
+    );
+    expect(deliveryStatus).toContain("setBlockedReason(nil, for: .delivery)");
+    expect(deliveryStatus).toContain("setBlockedReason(nil, for: .pressConsumed)");
+  });
+
+  /**
+   * A `==` comparison against one outcome answers `false` for every case added later, with
+   * nobody having considered it — and these two predicates decide whether the engine still
+   * believes it owns the transcript.
+   */
+  test("the payload-ownership predicates switch exhaustively instead of comparing", () => {
+    expect(engineSource).not.toContain("outcome == .targetUnavailable");
+    for (const name of [
+      "outcomeLeavesTranscriptOnClipboard",
+      "clipboardOwnershipWasLostAfterPasteFailure",
+      "shouldCopyAfterPasteFailure",
+    ]) {
+      const body = engineSource.slice(
+        engineSource.indexOf(`static func ${name}(`),
+        engineSource.indexOf("nonisolated static func", engineSource.indexOf(`static func ${name}(`) + 10),
+      );
+      expect(body).toContain("switch outcome {");
+      expect(body).toContain("case .targetUnavailable:");
+      expect(body).toContain(".secureInputActive:");
+    }
+  });
+
+  test("the secure-input reason outlives the delivery status, and only that one does", () => {
+    expect(engineSource).toContain("Self.isSecureInputOutcome(outcome) ? message : nil");
+    expect(engineSource).toContain("for: .delivery");
+    const classifier = engineSource.slice(
+      engineSource.indexOf("static func isSecureInputOutcome("),
+      engineSource.indexOf("nonisolated static func deliveryStatusKind("),
+    );
+    expect(classifier).toContain("case .secureInputActive: true");
+    // Exhaustive, so a new outcome forces a decision instead of defaulting to invisible.
+    expect(classifier).toContain(".deliveryNotObserved, .deliveredUnverified");
+    expect(classifier).toContain("false");
+  });
+
+  /**
+   * By the time `.secureInputActive` is reachable the payload writer has already run, so the
+   * transcript IS the clipboard and the status line has just told the owner to press Cmd-V.
+   * Restoring would delete the exact text the app told them to paste — even though
+   * `restoreClipboard` is an explicit opt-in.
+   */
+  test("secure input never restores the clipboard, and the message says so", () => {
+    const settlement = engineSource.slice(
+      engineSource.indexOf("let shouldRestore = switch outcome {"),
+      engineSource.indexOf("if shouldRestore {"),
+    );
+    expect(settlement).toContain("case .secureInputActive:\n                false");
+    // The other outcomes still honour the opt-in.
+    expect(settlement).toContain("stillOwnsPayload");
+
+    // Both branches of the message must promise the clipboard, because both keep it.
+    expect(engineSource).toContain("transcript kept on the clipboard ");
+    expect(engineSource).toContain("transcript copied, press Cmd-V");
+  });
+
+  test("a press consumed by a permission prompt says so instead of writing Ready", () => {
+    expect(engineSource).toContain("static let pressConsumedByPermissionPromptMessage");
+
+    // Both released-before-start paths — fn and the hotkey — had the identical defect, and used
+    // to carry an identical copy of this disclosure. They now share one release path, so the
+    // guarantee is structural rather than duplicated: assert the single owner, and assert that
+    // both triggers reach it.
+    const consumedWrites =
+      engineSource.match(/Self\.pressConsumedByPermissionPromptMessage, for: \.pressConsumed/g) ??
+      [];
+    expect(consumedWrites.length).toBe(1);
+    const cancelPendingStart = engineSource.slice(
+      engineSource.indexOf("private func cancelPendingStart() {"),
+      engineSource.indexOf("\n    }\n", engineSource.indexOf("private func cancelPendingStart() {")),
+    );
+    expect(cancelPendingStart).toContain("pressConsumedByPermissionPromptMessage");
+    expect(cancelPendingStart).toContain("updateStatus()");
+    // Read BEFORE resetRecordingIntent(), which cancels the gate this is asking about.
+    expect(cancelPendingStart.indexOf("microphonePermissionStartGate.isAwaitingResponse")).toBeLessThan(
+      cancelPendingStart.indexOf("resetRecordingIntent()"),
+    );
+
+    // Both triggers must route their key-up through the shared path, or one of them is silent
+    // again. `handleTriggerRelease` is the only caller of `cancelPendingStart`.
+    for (const trigger of ["handleTriggerRelease(.fnKey)", "handleTriggerRelease(.keyboardShortcut)"]) {
+      expect(engineSource, `no key-up route for ${trigger}`).toContain(trigger);
+    }
+    const release = engineSource.slice(
+      engineSource.indexOf("func handleTriggerRelease(_ trigger: RecordingTrigger) {"),
+      engineSource.indexOf(
+        "\n    }\n",
+        engineSource.indexOf("func handleTriggerRelease(_ trigger: RecordingTrigger) {"),
+      ),
+    );
+    expect(release).toContain("cancelPendingStart()");
+  });
+
+  /**
+   * `blockedReason` was cleared only by the NEXT delivery's completion, so a recording that
+   * produced no delivery left "press Cmd-V" asserted indefinitely — pointing, by then, at a
+   * clipboard that may hold something else entirely.
+   */
+  test("a new recording clears both transient reasons", () => {
+    const startRecording = engineSource.slice(
+      engineSource.indexOf("public func startRecording("),
+      engineSource.indexOf("let myPID = ProcessInfo.processInfo.processIdentifier"),
+    );
+    expect(startRecording).toContain("setBlockedReason(nil, for: .pressConsumed)");
+    expect(startRecording).toContain("setBlockedReason(nil, for: .delivery)");
+  });
+
+  /**
+   * #28's `SecureInputProbe` is canonical. #29 shipped a second detector on
+   * `IsSecureEventInputEnabled()`, which is a Bool that reads as "not blocked" when the state
+   * cannot be determined; the session dictionary distinguishes "no session" from "secure input
+   * off", so the degrade-to-false is avoidable and the boolean detector is gone.
+   */
+  test("there is exactly one secure-input detector, and it is the three-state one", () => {
+    expect(engineSource).not.toContain("IsSecureEventInputEnabled");
+    expect(engineSource).toContain("SecureInputProbe.current()");
+    const verification = readFileSync(
+      "src/native/Recordings/RecordingsLib/PasteDeliveryVerification.swift",
+      "utf8",
+    );
+    expect(verification).not.toContain("IsSecureEventInputEnabled");
+    expect(verification).toContain("CGSessionCopyCurrentDictionary()");
+    expect(verification).toContain("case unknown");
   });
 });
 

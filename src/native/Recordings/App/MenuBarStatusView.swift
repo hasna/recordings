@@ -16,7 +16,7 @@ struct MenuBarStatusLabel: View {
             isWarmingUpCapture: store.engine.isWarmingUpCapture,
             canStartRecording: store.engine.canStartRecording,
             statusMessage: store.engine.statusMessage,
-            attemptAlert: store.engine.attemptAlert
+            blockedReason: store.engine.blockedReason
         )
     }
 }
@@ -75,7 +75,10 @@ struct MenuBarStatusView: View {
     }
 
     private var statusColor: Color {
-        store.engine.captureIsActive ? .red : .accentColor
+        if store.engine.captureIsActive { return .red }
+        // The popover repeats the menu-bar signal rather than relying on the caption text, which
+        // is rendered `.secondary` and reads as an aside.
+        return presentation.isBlocked ? .orange : .accentColor
     }
 
     private var presentation: MenuBarPresentation {
@@ -84,12 +87,10 @@ struct MenuBarStatusView: View {
             isWarmingUpCapture: store.engine.isWarmingUpCapture,
             canStartRecording: store.engine.canStartRecording,
             statusMessage: store.engine.statusMessage,
-            attemptAlert: store.engine.attemptAlert
+            blockedReason: store.engine.blockedReason
         )
     }
 
-    // Every affordance below reads `captureIsActive`, not `isRecording`: during the warm-up
-    // window the button must already be Stop, or a click there would silently start nothing.
     private var recordButtonTitle: String {
         store.engine.captureIsActive ? "Stop and Transcribe" : "Start Recording"
     }

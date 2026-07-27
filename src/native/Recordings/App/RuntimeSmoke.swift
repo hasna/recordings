@@ -22,11 +22,10 @@ final class RuntimeSmokeProbe: ObservableObject {
         MenuBarPresentation(
             isRecording: phase == .recording,
             // The smoke probe drives phases directly and never runs a real recorder, so it has
-            // no warm-up window and no attempt outcome to report.
+            // no warm-up window.
             isWarmingUpCapture: false,
             canStartRecording: phase == .idle,
-            statusMessage: phase == .transcribing ? "Transcribing" : "Ready",
-            attemptAlert: nil
+            statusMessage: phase == .transcribing ? "Transcribing" : "Ready"
         )
     }
 

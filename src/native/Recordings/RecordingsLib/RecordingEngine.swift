@@ -735,11 +735,6 @@ public final class RecordingEngine: ObservableObject {
     /// Surfaces render this as recording (the user is holding the key), and every teardown
     /// path can abandon it, but nothing may treat it as audio that exists.
     @Published public private(set) var isWarmingUpCapture = false
-    /// Terminal outcome of a recording attempt that produced nothing, published for the
-    /// menu-bar glyph. Recordings is `LSUIElement`: the glyph is its only always-on surface,
-    /// so an outcome that lives only in `statusMessage` or the Record pane is invisible to
-    /// someone who pressed the key while looking at their editor.
-    @Published public private(set) var attemptAlert: RecordingAttemptAlert?
     @Published public var useFnKey: Bool = false {
         didSet {
             UserDefaults.standard.set(useFnKey, forKey: "useFnKey")
@@ -747,15 +742,43 @@ public final class RecordingEngine: ObservableObject {
             refreshTriggerDiagnostics()
         }
     }
-    /// Why a trigger cannot currently fire. Held separately from `statusMessage` because
-    /// `updateStatus()` rewrites that on every return to idle; see `updateStatus()`.
+    /// Where a blocked reason came from. The published reason is composed across these rather
+    /// than written per-source, because more than one can hold at once — fn and the hotkey can
+    /// both be blocked, and a delivery can be blocked while a trigger is too. A per-source
+    /// writer lets whichever ran last erase the others, which is the erasure bug this whole
+    /// mechanism exists to prevent.
     ///
-    /// Composed from two independent sources rather than written directly: fn and the hotkey
-    /// block for different reasons and can block at the same time, so a single writer would
-    /// let whichever ran last erase the other.
-    @Published public private(set) var triggerBlockedReason: String?
-    private var fnBlockedReason: String?
-    private var hotkeyBlockedReason: String?
+    /// `Comparable` by declaration order, so the composed string is stable no matter which
+    /// source was written last: a reason that reorders itself between renders reads as two
+    /// different problems.
+    enum BlockedReasonSource: Int, CaseIterable, Comparable, Sendable {
+        /// The keyboard shortcut collides with an enabled system shortcut.
+        case hotkey
+        /// The fn monitor cannot run (Accessibility).
+        case fnKey
+        /// A trigger fired but the press was consumed before recording could start — the
+        /// permission-prompt case. Transient, and cleared by the next start.
+        case pressConsumed
+        /// The last delivery could not reach the target app and the transcript is sitting on
+        /// the clipboard waiting for the user. Cleared by the next recording, not by the next
+        /// status write.
+        case delivery
+
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    /// Why the app currently cannot record or deliver, when the reason outlives one status
+    /// write. Held separately from `statusMessage` because `updateStatus()` rewrites that on
+    /// every return to idle; see `updateStatus()`.
+    ///
+    /// This is the collapse of what were two fields — `triggerBlockedReason` (trigger health)
+    /// and `blockedReason` (secure-input delivery). Two published fields describing "the app
+    /// cannot do the thing you asked" is two places for a view to forget to read, and the
+    /// menu bar forgot to read either of them. One field, one writer.
+    @Published public private(set) var blockedReason: String?
+    /// The ONLY writer of `blockedReason` is `setBlockedReason(_:for:)`. Do not assign the
+    /// published property anywhere else; `macos-shortcut-contract.test.ts` asserts that.
+    private var blockedReasons: [BlockedReasonSource: String] = [:]
     /// Advanced fallback policy (Settings only): when off, every recording is dictated
     /// literally and the classifier is never consulted.
     @Published public var intentDetectionEnabled: Bool = true {
@@ -862,7 +885,6 @@ public final class RecordingEngine: ObservableObject {
     // Real-time streaming
     private var realtimeClient: RealtimeTranscriptionClient?
     private var streamingTask: Task<Void, Never>?
-    private var attemptAlertTask: Task<Void, Never>?
     private var pcmStreamPipe: PCMStreamPipe?
     private var streamingText = ""
     private var recordedPCM = Data()
@@ -1186,7 +1208,7 @@ public final class RecordingEngine: ObservableObject {
                 + "shortcutSystemReserved=\(systemReserved.map(String.init(describing:)) ?? "n/a") "
                 + "useFnKey=\(useFnKey) fnMonitorRunning=\(fnMonitor.isRunning) "
                 + "microphone=\(microphonePermissionLabel) accessibility=\(accessibilityPermissionLabel) "
-                + "blocked=\(triggerBlockedReason ?? "none")"
+                + "blocked=\(blockedReason ?? "none")"
         )
     }
 
@@ -1225,9 +1247,8 @@ public final class RecordingEngine: ObservableObject {
     private func refreshFnMonitorHealth() {
         guard useFnKey else { return }
         if fnMonitor.isRunning {
-            if fnBlockedReason != nil {
-                fnBlockedReason = nil
-                recomputeTriggerBlockedReason()
+            if blockedReasons[.fnKey] != nil {
+                setBlockedReason(nil, for: .fnKey)
                 updateStatus()
             }
             return
@@ -1236,38 +1257,45 @@ public final class RecordingEngine: ObservableObject {
             log("fn monitor not running while trusted — retrying")
             updateFnMonitor()
         } else {
-            fnBlockedReason = Self.fnAccessibilityBlockedMessage
-            recomputeTriggerBlockedReason()
+            setBlockedReason(Self.fnAccessibilityBlockedMessage, for: .fnKey)
         }
         updateStatus()
     }
 
     private func updateFnMonitor(allowAutomaticPrompt: Bool = true) {
+        // Decided as a local first, then handed to the single writer once. Assigning the
+        // published property from each branch is how the per-source erasure bug got in.
+        var reason: String?
         if useFnKey {
             let ok = fnMonitor.start()
             log("fn monitor start ok=\(ok)")
-            if ok {
-                fnBlockedReason = nil
-            } else {
+            if !ok {
                 if allowAutomaticPrompt {
                     let result = accessibilityPromptGate.trustForProtectedOperation()
                     log("fn monitor accessibility trusted=\(result.trusted) prompted=\(result.didPrompt)")
                 }
-                fnBlockedReason = Self.fnAccessibilityBlockedMessage
+                reason = Self.fnAccessibilityBlockedMessage
                 log("trigger blocked: \(Self.fnAccessibilityBlockedMessage)")
             }
         } else {
             fnMonitor.stop()
-            fnBlockedReason = nil
         }
-        recomputeTriggerBlockedReason()
+        setBlockedReason(reason, for: .fnKey)
     }
 
-    /// The hotkey and fn each own one half of the reason; this is the only writer of the
-    /// published value.
-    private func recomputeTriggerBlockedReason() {
-        let reasons = [hotkeyBlockedReason, fnBlockedReason].compactMap { $0 }
-        triggerBlockedReason = reasons.isEmpty ? nil : reasons.joined(separator: " · ")
+    /// Record or clear one source's reason and recompute the published value. Each source owns
+    /// its own slot; this is the **only** writer of `blockedReason`.
+    private func setBlockedReason(_ reason: String?, for source: BlockedReasonSource) {
+        if let reason, !reason.isEmpty {
+            blockedReasons[source] = reason
+        } else {
+            blockedReasons.removeValue(forKey: source)
+        }
+        let composed = blockedReasons
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+            .joined(separator: " · ")
+        blockedReason = composed.isEmpty ? nil : composed
     }
 
     /// Enabled system-reserved shortcuts, read straight from Carbon.
@@ -1316,26 +1344,30 @@ public final class RecordingEngine: ObservableObject {
 
     private func refreshHotkeyDiagnostics() {
         guard let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecording) else {
-            hotkeyBlockedReason = nil
-            recomputeTriggerBlockedReason()
+            setBlockedReason(nil, for: .hotkey)
             return
         }
         let key = [shortcut.carbonKeyCode, shortcut.carbonModifiers]
+        var reason: String?
         if Self.systemReservedShortcuts().contains(key) {
-            hotkeyBlockedReason =
-                "macOS already reserves this shortcut — pick another in Settings > Recording Shortcut"
+            reason = "macOS already reserves this shortcut — pick another in Settings > Recording Shortcut"
             log("trigger blocked: hotkey collides with an enabled system shortcut \(key)")
-        } else {
-            hotkeyBlockedReason = nil
         }
-        recomputeTriggerBlockedReason()
+        setBlockedReason(reason, for: .hotkey)
     }
+
+    /// Message shown after a trigger fired but the press was consumed before recording could
+    /// start — in practice, the first fn press after a microphone permission prompt. Cancelling
+    /// is correct for push-to-talk (releasing the key before the recorder starts must not leave
+    /// a recording running with no key held); saying nothing about it is not.
+    static let pressConsumedByPermissionPromptMessage =
+        "Permission was requested — press and hold again to record"
 
     /// The only writer of the idle status pair. Nothing else may set `statusMessage` to
     /// "Ready" — three separate callers had grown their own copy of that assignment, and each
-    /// one silently bypassed the `triggerBlockedReason` branch below, overwriting a live
-    /// "your trigger cannot fire" warning with a cheerful "Ready". Route every return-to-idle
-    /// through here so a fourth copy cannot appear.
+    /// one silently bypassed the `blockedReason` branch below, overwriting a live "the app
+    /// cannot do the thing you asked" disclosure with a cheerful "Ready". Route every
+    /// return-to-idle through here so a fourth copy cannot appear.
     public func updateStatus() {
         if captureIsActive || isTranscribing || deliveryIsPending { return }
         // A blocked trigger outlives one status write. `init` and every `useFnKey` change
@@ -1343,8 +1375,8 @@ public final class RecordingEngine: ObservableObject {
         // warning was overwritten with "Ready" before it could ever be read — an enabled
         // trigger that could not arm looked exactly like a working one. Idle now carries
         // the reason until the blocker clears.
-        if let triggerBlockedReason {
-            statusMessage = triggerBlockedReason
+        if let blockedReason {
+            statusMessage = blockedReason
             flowPhase = .idle
             return
         }
@@ -1380,7 +1412,14 @@ public final class RecordingEngine: ObservableObject {
             )
             return
         }
+        // Nothing was started: the press landed while the microphone permission prompt was up
+        // and was consumed by it. Both key-up handlers used to carry a copy of this disclosure;
+        // it belongs here, once, with the rest of the no-audio branch.
+        let consumedByPermissionPrompt = microphonePermissionStartGate.isAwaitingResponse
         resetRecordingIntent()
+        if consumedByPermissionPrompt {
+            setBlockedReason(Self.pressConsumedByPermissionPromptMessage, for: .pressConsumed)
+        }
         updateStatus()
     }
 
@@ -1408,9 +1447,6 @@ public final class RecordingEngine: ObservableObject {
             return
         }
         log("startRecording trigger=\(trigger) microphoneStatus=\(microphoneAuthorization().rawValue) accessibility=\(accessibilityTrustCheck())")
-        // A new attempt supersedes the previous attempt's visible outcome immediately; leaving
-        // a stale "released too soon" glyph up over a live recording would be a lie.
-        clearAttemptAlert()
         recordingGeneration &+= 1
         if pasteTargetProcessIdentityByGeneration.count >= 32 {
             let oldestRetainedGeneration = recordingGeneration > 16 ? recordingGeneration - 16 : 0
@@ -1421,6 +1457,18 @@ public final class RecordingEngine: ObservableObject {
         activeTrigger = trigger
         keyboardShortcutIsDown = trigger == .keyboardShortcut
         conversationReply = nil
+        // Both transient reasons are superseded by a new press, and the delivery one is the
+        // reason this clearing exists: "transcript copied, press Cmd-V" was only ever cleared
+        // by the NEXT delivery's completion, so a recording that produced no delivery left it
+        // asserted indefinitely — and by then the clipboard may hold something else, so Cmd-V
+        // pastes the wrong thing on the app's own instruction. This recording is about to
+        // rewrite the clipboard, so the old instruction stops being true here.
+        //
+        // Accepted cost, stated rather than hidden: if this recording is itself cancelled, a
+        // still-accurate "press Cmd-V" has been cleared early. Losing a true message is a
+        // smaller failure than asserting a false one forever.
+        setBlockedReason(nil, for: .pressConsumed)
+        setBlockedReason(nil, for: .delivery)
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let frontmostApp = frontmostAppSnapshot()
@@ -1826,42 +1874,29 @@ public final class RecordingEngine: ObservableObject {
         resetRecordingIntent()
 
         if let alert {
-            presentAttemptAlert(alert)
+            discloseEmptyAttempt(alert)
         } else {
             // `updateStatus()`, never a direct "Ready": the state above is already cleared, so
             // its early return does not fire, and going through it is what preserves a live
-            // `triggerBlockedReason` instead of overwriting the warning with "Ready".
+            // `blockedReason` instead of overwriting the disclosure with "Ready".
             updateStatus()
         }
     }
 
     // MARK: - Visible outcome
 
-    /// Raises the transient glyph alert and schedules its own removal. Only the glyph: the
-    /// caller owns `statusMessage`/`flowPhase`, which may carry a more specific message. The
-    /// Record pane keeps the failure after the glyph has settled.
-    private func raiseAttemptAlertGlyph(_ alert: RecordingAttemptAlert) {
-        attemptAlertTask?.cancel()
-        attemptAlert = alert
-        log("attempt alert raised alert=\(alert)")
-        attemptAlertTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(RecordingAttemptAlert.visibleDuration))
-            guard !Task.isCancelled, let self, self.attemptAlert == alert else { return }
-            self.attemptAlert = nil
-        }
-    }
-
-    /// Raises the glyph and sets the matching failure status and phase.
-    private func presentAttemptAlert(_ alert: RecordingAttemptAlert) {
-        statusMessage = alert.message
-        flowPhase = .failed(alert.message)
-        raiseAttemptAlertGlyph(alert)
-    }
-
-    private func clearAttemptAlert() {
-        attemptAlertTask?.cancel()
-        attemptAlertTask = nil
-        attemptAlert = nil
+    /// Discloses an attempt that produced nothing, on the one surface that is always on screen.
+    ///
+    /// Routed through `setBlockedReason(_:for: .pressConsumed)` rather than a published field of
+    /// its own. That slot already means "a press was consumed and nothing was recorded", it is
+    /// already cleared by the next `startRecording`, and `MenuBarPresentation` already renders
+    /// `blockedReason` with a distinct icon and a distinct VoiceOver label. It also outlives a
+    /// timer: the disclosure is still on the glyph a minute later, which a three-second badge on
+    /// a surface the user had no reason to watch would not be.
+    private func discloseEmptyAttempt(_ alert: RecordingAttemptAlert) {
+        log("attempt produced no audio disclosure=\(alert)")
+        setBlockedReason(alert.message, for: .pressConsumed)
+        updateStatus()
     }
 
     // MARK: - Real-time Streaming
@@ -2228,8 +2263,12 @@ public final class RecordingEngine: ObservableObject {
                     self.finish(resolved.failureStatus ?? RecordingAttemptAlert.noAudioCaptured.message)
                     // The one failure the user has no other way to notice: nothing was typed,
                     // nothing appeared, and the status line lives behind a click on a menu-bar
-                    // glyph that never changed. Change the glyph.
-                    self.raiseAttemptAlertGlyph(.noAudioCaptured)
+                    // glyph that never changed. `finish` owns statusMessage/flowPhase here
+                    // (its message can be more specific), so only the glyph is added.
+                    self.setBlockedReason(
+                        RecordingAttemptAlert.noAudioCaptured.message,
+                        for: .pressConsumed
+                    )
                 }
             }
 
@@ -3871,7 +3910,10 @@ public final class RecordingEngine: ObservableObject {
             verificationAttempts: Self.pasteReadBackAttempts
         ) { transaction, outcome in
             let accessibilityTrusted = AXIsProcessTrusted()
-            let completedTranscriptAlreadyOnClipboard = outcome == .targetUnavailable
+            // Same reason the two static predicates below switch instead of comparing: a `==`
+            // test answers `false` for any outcome added later, and this feeds
+            // `shouldCopyAfterPasteFailure`, which decides whether the transcript is re-copied.
+            let completedTranscriptAlreadyOnClipboard = Self.outcomeLeavesTranscriptOnClipboard(outcome)
                 && !restoreClipboard
                 && (ownedPasteboardChangeCount.map {
                     Self.clipboardStillOwned(.general, text: transaction.text, changeCount: $0)
@@ -3913,9 +3955,15 @@ public final class RecordingEngine: ObservableObject {
             case .deliveredUnverified: restoreClipboard
                 ? "Paste sent, delivery unconfirmed"
                 : "Paste sent, delivery unconfirmed — text kept on the clipboard"
+            // One message either way, because the clipboard is kept either way — see the
+            // `shouldRestore` switch in `settlement`. Telling the owner to press Cmd-V is only
+            // honest if the transcript is still there, so this branch may not depend on
+            // `restoreClipboard`. When restore WAS requested, say that it was overridden
+            // rather than letting the owner discover it.
             case .secureInputActive: restoreClipboard
-                ? "Paste blocked by secure input"
-                : "Copied — paste blocked by secure input"
+                ? "This field blocks typing (secure input) — transcript kept on the clipboard "
+                    + "instead of restoring it, press Cmd-V"
+                : "This field blocks typing (secure input) — transcript copied, press Cmd-V"
             case .targetUnavailable: Self.targetUnavailableDeliveryStatus(
                 deliveryKind: deliveryKind,
                 accessibilityTrusted: accessibilityTrusted,
@@ -3930,10 +3978,30 @@ public final class RecordingEngine: ObservableObject {
                 ? "Paste failed because the paste event could not be posted"
                 : "Copied, but paste event could not be posted"
             }
+            // `updateDeliveryStatus` writes `statusMessage`, and `updateStatus()` rewrites it to
+            // "Ready" on the next return to idle. A transient success line can afford that;
+            // "press Cmd-V" cannot, because it is the only thing telling the owner their
+            // transcript is recoverable. So the secure-input reason is persisted through the
+            // one field every surface reads.
+            //
+            // ONLY this outcome persists, deliberately. `.deliveryNotObserved` also leaves the
+            // transcript on the clipboard, but it has a documented false negative — pasting text
+            // identical to the selection it replaces reads as "unchanged" — so persisting it
+            // would raise a standing warning over a paste that worked. `.deliveredUnverified`
+            // means "could not tell", and a standing blocked banner would over-claim it. Secure
+            // input has no such path: it is measured from the window-session dictionary, and an
+            // uninterrogable session yields `.unknown`, which never reaches here.
+            // AFTER `updateDeliveryStatus`, not before: that call clears the delivery reason so
+            // statuses which produce no outcome cannot leave a stale one behind, and this is the
+            // one caller whose reason has to outlive its own status line.
             self.updateDeliveryStatus(
                 message,
                 kind: Self.deliveryStatusKind(for: outcome),
                 pipelineGeneration: transaction.generation
+            )
+            self.setBlockedReason(
+                Self.isSecureInputOutcome(outcome) ? message : nil,
+                for: .delivery
             )
         } settlement: { transaction, outcome in
             let pasteboard = NSPasteboard.general
@@ -3954,8 +4022,16 @@ public final class RecordingEngine: ObservableObject {
             let shouldRestore = switch outcome {
             case .clipboardWriteFailed:
                 stillOwnsChangeCount
+            // Never restore over secure input, even when `restoreClipboard` was requested.
+            // By the time this outcome is reachable the payload writer has already run, so the
+            // transcript IS the clipboard — and the status line has just told the owner to press
+            // Cmd-V. Restoring would delete the exact text the app told them to paste. This
+            // deliberately overrides an explicit opt-in, which is why the status message for
+            // this outcome says the clipboard was kept instead of restored.
+            case .secureInputActive:
+                false
             case .targetUnavailable, .clipboardOwnershipLost, .eventPostFailed, .pasted,
-                 .deliveryNotObserved, .deliveredUnverified, .secureInputActive:
+                 .deliveryNotObserved, .deliveredUnverified:
                 stillOwnsPayload
             }
             if shouldRestore {
@@ -3974,12 +4050,42 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    /// Whether an outcome ends with the transcript still sitting on the clipboard because the
+    /// paste never consumed it — so re-copying it would be redundant.
+    ///
+    /// Exhaustive on purpose. `.secureInputActive` answers `false` here even though it *does*
+    /// leave the transcript on the clipboard: it gets there because `shouldRestore` refuses to
+    /// restore, not because the paste was abandoned before the clipboard was written, and
+    /// `shouldCopyAfterPasteFailure` is additionally gated on `!accessibilityTrusted`, which is
+    /// never the path secure input takes.
+    nonisolated static func outcomeLeavesTranscriptOnClipboard(_ outcome: PasteDeliveryOutcome) -> Bool {
+        switch outcome {
+        case .targetUnavailable: true
+        case .pasted, .deliveryNotObserved, .deliveredUnverified, .clipboardOwnershipLost,
+             .clipboardWriteFailed, .eventPostFailed, .secureInputActive: false
+        }
+    }
+
     nonisolated static func clipboardOwnershipWasLostAfterPasteFailure(
         outcome: PasteDeliveryOutcome,
         hasOwnershipToken: Bool,
         stillOwnsPayload: Bool
     ) -> Bool {
-        outcome == .targetUnavailable && hasOwnershipToken && !stillOwnsPayload
+        // Switched rather than compared against `.targetUnavailable` so the compiler forces a
+        // decision here when an outcome is added. A `==` comparison answers `false` for every
+        // new case without anyone having considered it, and this predicate decides whether the
+        // engine still believes it owns the transcript — guessing wrong loses the text.
+        let outcomeCanStrandThePayload: Bool
+        switch outcome {
+        case .targetUnavailable:
+            outcomeCanStrandThePayload = true
+        // Secure input cannot strand the payload: nothing else wrote to the clipboard, and the
+        // transcript is deliberately kept there.
+        case .pasted, .deliveryNotObserved, .deliveredUnverified, .clipboardOwnershipLost,
+             .clipboardWriteFailed, .eventPostFailed, .secureInputActive:
+            outcomeCanStrandThePayload = false
+        }
+        return outcomeCanStrandThePayload && hasOwnershipToken && !stillOwnsPayload
     }
 
     @discardableResult
@@ -4063,7 +4169,19 @@ public final class RecordingEngine: ObservableObject {
         clipboardOwnershipWasLost: Bool = false,
         completedTranscriptAlreadyOnClipboard: Bool = false
     ) -> Bool {
-        outcome == .targetUnavailable
+        // Switched for the same reason as `clipboardOwnershipWasLostAfterPasteFailure`: a `==`
+        // test silently answers `false` for any outcome added later. Secure input already leaves
+        // the transcript on the clipboard, so re-copying it would be redundant at best — but that
+        // is a decision the compiler should make someone state, not one to inherit by accident.
+        let outcomeNeedsClipboardFallback: Bool
+        switch outcome {
+        case .targetUnavailable:
+            outcomeNeedsClipboardFallback = true
+        case .pasted, .deliveryNotObserved, .deliveredUnverified, .clipboardOwnershipLost,
+             .clipboardWriteFailed, .eventPostFailed, .secureInputActive:
+            outcomeNeedsClipboardFallback = false
+        }
+        return outcomeNeedsClipboardFallback
             && !accessibilityTrusted
             && !clipboardOwnershipWasLost
             && !completedTranscriptAlreadyOnClipboard
@@ -4142,6 +4260,19 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    /// Whether an outcome leaves a blocker the owner has to act on, so its explanation must
+    /// outlive the delivery status rather than being overwritten with "Ready".
+    ///
+    /// Written as an exhaustive switch rather than `if case`, so adding a `PasteDeliveryOutcome`
+    /// forces a decision here instead of silently defaulting to invisible.
+    nonisolated static func isSecureInputOutcome(_ outcome: PasteDeliveryOutcome) -> Bool {
+        switch outcome {
+        case .secureInputActive: true
+        case .pasted, .deliveryNotObserved, .deliveredUnverified, .targetUnavailable,
+             .clipboardOwnershipLost, .clipboardWriteFailed, .eventPostFailed: false
+        }
+    }
+
     /// Only observed delivery is a success. An unreadable target is its own state, and both a
     /// contradicted read-back and a refused post are failures.
     nonisolated static func deliveryStatusKind(for outcome: PasteDeliveryOutcome) -> DeliveryStatusKind {
@@ -4184,6 +4315,18 @@ public final class RecordingEngine: ObservableObject {
         }
         statusMessage = message
         flowPhase = Self.flowPhase(forDeliveryStatus: message, kind: kind)
+        // A delivery status that actually reaches the screen replaces whatever explanation was
+        // there, so a persisted reason must not survive it — otherwise `updateStatus()`
+        // resurfaces it on the next return to idle. This closes the two leaks that produce no
+        // `PasteDeliveryOutcome` at all, and which clearing on `startRecording()` therefore
+        // cannot reach: the "Finish the previous paste before trying again" rejection, and the
+        // conversation route's "Answered".
+        //
+        // ORDERING: the secure-input caller must call this FIRST and re-set its reason after,
+        // which it does. `macos-shortcut-contract.test.ts` asserts that order, because getting it
+        // backwards silently reinstates the invisible-blocked bug with every test still green.
+        setBlockedReason(nil, for: .delivery)
+        setBlockedReason(nil, for: .pressConsumed)
     }
 
     private func selectedRunningPasteTarget(

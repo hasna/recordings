@@ -113,6 +113,20 @@ private func expectFullyTornDown(
     #expect(engine.canStartRecording, "the engine must be immediately ready to try again", sourceLocation: sourceLocation)
 }
 
+/// The disclosure an empty attempt owes the user. Asserted on `blockedReason` rather than
+/// `statusMessage` alone: only `blockedReason` reaches the always-visible menu-bar glyph, and
+/// `statusMessage` is rewritten on every return to idle.
+@MainActor
+private func expectEmptyAttemptDisclosed(
+    _ engine: RecordingEngine,
+    _ alert: RecordingAttemptAlert,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    #expect(engine.blockedReason == alert.message, "the outcome must reach the always-on surface", sourceLocation: sourceLocation)
+    #expect(engine.statusMessage == alert.message, sourceLocation: sourceLocation)
+    #expect(engine.canStartRecording, "a disclosure must not disable Start", sourceLocation: sourceLocation)
+}
+
 @MainActor
 struct RecordingStartTimingTests {
     @Test("the recorder starts on keydown even while the AX selection capture is blocked")
@@ -213,9 +227,7 @@ struct RecordingCaptureWarmUpTests {
         engine.handleTriggerRelease(.fnKey)
 
         expectFullyTornDown(engine, recorder)
-        #expect(engine.attemptAlert == .releasedBeforeAudio)
-        #expect(engine.flowPhase == .failed(RecordingAttemptAlert.releasedBeforeAudio.message))
-        #expect(engine.statusMessage == RecordingAttemptAlert.releasedBeforeAudio.message)
+        expectEmptyAttemptDisclosed(engine, .releasedBeforeAudio)
     }
 
     @Test("the configurable shortcut takes the same path as fn")
@@ -228,7 +240,7 @@ struct RecordingCaptureWarmUpTests {
         engine.handleTriggerRelease(.keyboardShortcut)
 
         expectFullyTornDown(engine, recorder)
-        #expect(engine.attemptAlert == .releasedBeforeAudio)
+        expectEmptyAttemptDisclosed(engine, .releasedBeforeAudio)
     }
 
     @Test("a release after the first PCM chunk transcribes as before")
@@ -242,7 +254,7 @@ struct RecordingCaptureWarmUpTests {
 
         engine.handleTriggerRelease(.fnKey)
         #expect(engine.isTranscribing, "audio existed, so the pipeline must run")
-        #expect(engine.attemptAlert == nil)
+        #expect(engine.blockedReason == nil, "a recording that captured audio discloses nothing")
     }
 
     @Test("a PCM chunk that lands after the attempt was abandoned cannot resurrect it")
@@ -272,7 +284,7 @@ struct RecordingCaptureWarmUpTests {
         engine.stopAndTranscribe()
 
         expectFullyTornDown(engine, recorder)
-        #expect(engine.attemptAlert == .releasedBeforeAudio)
+        expectEmptyAttemptDisclosed(engine, .releasedBeforeAudio)
     }
 
     @Test("Discard during warm-up tears down without raising an alert the user does not need")
@@ -284,7 +296,7 @@ struct RecordingCaptureWarmUpTests {
         engine.cancelRecording()
 
         expectFullyTornDown(engine, recorder)
-        #expect(engine.attemptAlert == nil, "the user asked for the discard; do not alarm them")
+        #expect(engine.blockedReason == nil, "the user asked for the discard; do not alarm them")
         #expect(engine.flowPhase == .idle)
         #expect(engine.statusMessage == "Ready")
     }
@@ -305,9 +317,9 @@ struct RecordingCaptureWarmUpTests {
 
         // `.manual` has no key to release; Stop is the only way out of a warming manual start.
         engine.stopAndTranscribe()
-        #expect(engine.attemptAlert == .releasedBeforeAudio)
+        expectEmptyAttemptDisclosed(engine, .releasedBeforeAudio)
 
         engine.startRecording(trigger: .manual)
-        #expect(engine.attemptAlert == nil, "a live recording must not sit under a stale alert")
+        #expect(engine.blockedReason == nil, "a live recording must not sit under a stale disclosure")
     }
 }

@@ -174,23 +174,39 @@ describe("native capture warm-up contract", () => {
     const view = read("App/MenuBarStatusView.swift");
     const engine = read("RecordingsLib/RecordingEngine.swift");
 
-    const iconName = alert.match(/public var iconName: String \{ "([^"]+)" \}/)?.[1];
-    expect(iconName).toBeTruthy();
-    // Must be distinguishable from the three glyphs already in the vocabulary, or the change
-    // is invisible — the whole point of the alert.
-    expect(["mic.fill", "waveform", "ellipsis.circle"]).not.toContain(iconName);
+    // One published field, one writer. `blockedReason` already exists for "the app cannot do
+    // the thing you asked", already reaches the always-visible glyph with its own icon and
+    // VoiceOver label, and is already cleared by the next start. A second published field for
+    // the same idea would undo the collapse that field exists to be — so the empty-attempt
+    // messages are routed through it rather than carrying a surface of their own.
+    expect(engine, "no parallel disclosure field").not.toContain("var attemptAlert");
+    const writes = engine.match(/^\s*blockedReason = /gm) ?? [];
+    expect(writes.length, "blockedReason must keep exactly one writer").toBe(1);
+    const disclose = methodBody(
+      engine,
+      "private func discloseEmptyAttempt(_ alert: RecordingAttemptAlert) {",
+    );
+    expect(disclose).toContain("setBlockedReason(alert.message, for: .pressConsumed)");
+    expect(disclose).toContain("updateStatus()");
+    // The pre-existing completed-but-empty recording was equally invisible and gets the same
+    // disclosure.
+    expect(engine).toContain("RecordingAttemptAlert.noAudioCaptured.message,");
+    expect(engine).toContain("for: .pressConsumed");
+    // No timer: a badge that expires on a surface the user had no reason to watch is not a
+    // disclosure. This one survives until the next recording.
+    expect(alert, "the message vocabulary must not own a lifetime").not.toContain(
+      "visibleDuration",
+    );
+    expect(engine).not.toContain("attemptAlertTask");
 
     expect(presentation).toContain("if isRecording || isWarmingUpCapture {");
-    expect(presentation).toContain("iconName = attemptAlert.iconName");
-    // Neither new argument may be defaulted: `false` and `nil` are the invisible values, so a
-    // surface that forgot them would compile and render warm-up as busy and a failure as idle.
+    // No default on the warm-up argument: `false` is the invisible value, so a surface that
+    // forgot it would compile and drop the glyph to busy mid-hold.
     expect(presentation).not.toContain("isWarmingUpCapture: Bool = false");
-    expect(presentation).not.toContain("attemptAlert: RecordingAttemptAlert? = nil");
     expect(presentation).toContain("isWarmingUpCapture: Bool,");
-    expect(presentation).toContain("attemptAlert: RecordingAttemptAlert?\n    ) {");
 
-    // And every construction in the app and its tests must state both, including the runtime
-    // smoke probe, which omitted them entirely while the defaults existed.
+    // Every construction in the app and its tests must state it, including the runtime smoke
+    // probe, which omitted it entirely while a default existed.
     for (const file of [
       "App/MenuBarStatusView.swift",
       "App/RuntimeSmoke.swift",
@@ -202,23 +218,18 @@ describe("native capture warm-up contract", () => {
       expect(sites.length, `no MenuBarPresentation call sites found in ${file}`).toBeGreaterThan(0);
       for (const site of sites) {
         expect(site, `${file}: call site omits isWarmingUpCapture`).toContain("isWarmingUpCapture:");
-        expect(site, `${file}: call site omits attemptAlert`).toContain("attemptAlert:");
       }
     }
 
-    // Both menu-bar surfaces (the always-on label and the popover) must forward the new state,
-    // or the engine tracks it and nothing on screen changes.
+    // Both menu-bar surfaces — the always-on label and the popover — must forward warm-up, or
+    // the engine tracks it and nothing on screen changes.
     expect(view.match(/isWarmingUpCapture: store\.engine\.isWarmingUpCapture/g)?.length).toBe(2);
-    expect(view.match(/attemptAlert: store\.engine\.attemptAlert/g)?.length).toBe(2);
-    // The popover's primary button must read the combined state; during warm-up it has to
-    // already be Stop, or clicking it would start nothing.
+    expect(view.match(/blockedReason: store\.engine\.blockedReason/g)?.length).toBe(2);
+    // Every affordance must read the combined state; during warm-up the button has to already
+    // be Stop, or clicking it would silently start nothing.
     expect(view).not.toMatch(/store\.engine\.isRecording \? "stop\.fill"/);
     expect(view).toContain('store.engine.captureIsActive ? "stop.fill"');
-
-    // The pre-existing no-audio failure raises the same glyph: it was equally invisible.
-    expect(engine).toContain("self.raiseAttemptAlertGlyph(.noAudioCaptured)");
-    expect(engine).toContain("private func raiseAttemptAlertGlyph(_ alert: RecordingAttemptAlert)");
-    expect(alert).toContain("public static let visibleDuration: TimeInterval");
+    expect(view).toContain("if store.engine.captureIsActive {");
   });
 
   test("the realtime session is not negotiated for a recorder that never started", () => {
