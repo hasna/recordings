@@ -765,11 +765,55 @@ describe("designated-requirement identity-migration guard", () => {
   // A seventh, `main() { ... }` + `main "$@"`, is a legitimate refactor that survives the
   // whitelist correctly; a check that killed it would be worse than no check.
   //
-  // Reachability is a property of RUNNING, so this block runs the installer. One execution
-  // separates all seven correctly, because the question it asks is not "what does the call
-  // site look like" but "did the guard fire".
+  // Reachability is a property of RUNNING, so this block runs the installer, because the
+  // question it asks is not "what does the call site look like" but "did the guard fire".
+  // Each of the seven shapes above is separated correctly by ONE execution.
+  //
+  // BOUND, and it is the bound of execution testing itself rather than of these particular
+  // cases: an execution fixes ONE INPUT VECTOR, so it can only see a wrapper whose condition
+  // that vector varies. A wrapper conditioned on anything the fixture holds constant is
+  // invisible to it, no matter how many assertions the run carries. Measured on `main`
+  // f45d081, a pure 2-line insertion --
+  //
+  //   after `previous_identity_sha256="none"`:   if [ "$ARTIFACT_POLICY" = "local_only" ]; then
+  //   after the call's `|| exit 1`:              fi
+  //
+  // -- left this file at 32 pass / 0 fail and a five-file installer battery at 123 pass /
+  // 0 fail, byte-identical to the unmutated run, `bash -n` clean, while unenforcing the gate
+  // for every RELEASE artifact. Inverting the condition to `= "release"` (false under a
+  // local-only fixture) proved it is not cosmetic: 122 pass / 1 fail, the guard never fires
+  // and the install crosses into the transaction. That shape is closed below by varying the
+  // policy, which is why the cases come in local-only AND release pairs.
+  //
+  // What remains open, stated rather than implied: an env-var backdoor
+  // (`if [ -z "${RECORDINGS_SKIP_...}" ]`), a `uname`- or hostname-conditioned wrapper, or a
+  // wrapper keyed on the presence of a `RECORDINGS_TEST_INSTALL_*_EXECUTABLE` override -- the
+  // hermetic-stub mechanism is itself a detectable test signal -- are all still invisible
+  // here, because this fixture holds each of those constant. Closing one BY EXECUTION costs one
+  // more varied input, and no assertion over a single run closes them all.
+  //
+  // That is a bound on execution, not a statement that execution is the only route, and the
+  // difference matters because the cheaper route generalises further. A TEXT check closes the
+  // whole subclass inserted INSIDE this region without knowing what the condition tests:
+  // measured on this tree, the span from `identity_migration=0` to the guard call is
+  // depth-balanced -- every `if`/`for` it contains is closed within it -- and each of the three
+  // `if` wrappers named above leaves exactly one unmatched opener inside that span, artifact
+  // policy and env-var backdoor and `RECORDINGS_TEST_INSTALL_*` probe alike. A balance
+  // assertion over the span is therefore blind to the condition in the USEFUL direction, where
+  // an execution is blind to it in the harmful one. It is not a full closure either: a wrapper
+  // opened ABOVE `identity_migration=0` leaves the span balanced, which is the same bound the
+  // function-declaration check declares for itself further up this file. Neither technique
+  // subsumes the other, so closing the remaining shapes is not simply "one more run each".
   describe("the guard actually runs when the installer runs", () => {
     const REFUSAL = "not mutually compatible";
+    // The guard's release branch (scripts/enforce_identity_migration.sh:85) and its
+    // local-only branch (:87) print DIFFERENT sentences for the same refusal. This clause
+    // appears nowhere else in the repository, so a release case asserting it cannot be
+    // satisfied by the local-only branch, by the installer's own flag-validation errors, or
+    // by the usage text -- all of which also mention `--allow-signing-identity-migration`.
+    const RELEASE_REFUSAL = "review the signer change and rerun once with";
+    // Likewise unique to :87, and therefore the witness that a run really was local-only.
+    const ADHOC_REFUSAL = "this local-only artifact is ad-hoc signed";
 
     test("a real local-only run over an incompatible installed identity is refused by the guard", () => {
       const run = runInstallerToIdentityGuard({ identityMigration: true });
@@ -791,6 +835,11 @@ describe("designated-requirement identity-migration guard", () => {
       expect(run.stderr).toContain(EXISTING_IDENTITY_SHA256);
       expect(run.stderr).toContain(CANDIDATE_IDENTITY_SHA256);
       expect(run.exitCode).not.toBe(0);
+      // The branch, not just the refusal: this run must have taken the guard's LOCAL-ONLY
+      // arm. Without this pair the release cases below could both be passing against a run
+      // that silently fell back to local-only.
+      expect(run.stderr).toContain(ADHOC_REFUSAL);
+      expect(run.stderr).not.toContain(RELEASE_REFUSAL);
 
       // And it stopped the install. `mktemp -d .Recordings-transaction.XXXXXX` is the very
       // next thing the installer does once the guard returns 0, so its absence is a
@@ -829,6 +878,118 @@ describe("designated-requirement identity-migration guard", () => {
       const run = runInstallerToIdentityGuard({ identityMigration: false });
       expect(run.stderr).not.toContain(REFUSAL);
       expect(run.reachedTransaction).toBeTrue();
+    });
+
+    // The SECOND input vector, and the reason it exists. Every case above runs
+    // `--artifact-policy local-only`, so a wrapper conditioned on the policy --
+    // `if [ "$ARTIFACT_POLICY" = "local_only" ]; then ... fi` around the comparison loop and
+    // the call -- keeps all of them green while the gate stops existing for release
+    // artifacts. That is not sabotage-shaped; it is the exact regression
+    // scripts/enforce_identity_migration.sh:8-13 says this design exists to prevent, and it
+    // reads as a plausible "the ad-hoc case is the only one that matters" refactor.
+    //
+    // These cases are also the only execution of the guard's release arm: :85 and the
+    // exact-pair pinning at :102-108 are reached by no other test that RUNS the installer.
+    test("a real release run over an incompatible installed identity is refused by the guard", () => {
+      const run = runInstallerToIdentityGuard({
+        identityMigration: true,
+        artifactPolicy: "release",
+      });
+
+      expect(
+        run.codesignInvocations.filter((invocation) => invocation.includes(" -R ")),
+        "the release run never reached the designated-requirement comparison, so nothing below is about the guard",
+      ).not.toEqual([]);
+
+      // The release arm's own sentence, which appears nowhere else in the repository. A bare
+      // `toContain("--allow-signing-identity-migration")` would also be satisfied by the
+      // installer's flag-validation errors and by its usage text, so it would not witness
+      // that the GUARD denied.
+      expect(run.stderr, `exit ${run.exitCode}`).toContain(REFUSAL);
+      expect(run.stderr).toContain(RELEASE_REFUSAL);
+      // And it really was the release arm: the local-only arm's sentence must be absent, or
+      // this case would pass against a run that silently degraded to local-only.
+      expect(run.stderr).not.toContain(ADHOC_REFUSAL);
+      expect(run.exitCode).not.toBe(0);
+      expect(
+        run.reachedTransaction,
+        "the guard printed its release refusal but the install continued into the transaction",
+      ).toBeFalse();
+    });
+
+    // The control for the case above, and the only execution of the guard's exact-pair
+    // pinning. A release migration is approved by BOTH the flag and the precise old/new
+    // digests, so this crosses only when all three agree.
+    test("a release run crosses the guard only with the flag and the exact approved identity pair", () => {
+      const approvedPair = [
+        "--allow-signing-identity-migration",
+        "--expected-old-identity-sha256", EXISTING_IDENTITY_SHA256,
+        "--expected-new-identity-sha256", CANDIDATE_IDENTITY_SHA256,
+      ];
+      const approved = runInstallerToIdentityGuard({
+        identityMigration: true,
+        artifactPolicy: "release",
+        extraArguments: approvedPair,
+      });
+      expect(approved.stderr, `exit ${approved.exitCode}`).not.toContain(REFUSAL);
+      expect(
+        approved.reachedTransaction,
+        "the approved release run never reached the transaction, so the release refusal test above proves nothing",
+      ).toBeTrue();
+
+      // The pinning at scripts/enforce_identity_migration.sh:102-108: the flag alone is not
+      // consent for an arbitrary pair. Swapping the two digests is the strongest form of this
+      // -- both values are still on the operator's approved list, only the DIRECTION is
+      // wrong -- and the guard must still refuse.
+      const swapped = runInstallerToIdentityGuard({
+        identityMigration: true,
+        artifactPolicy: "release",
+        extraArguments: [
+          "--allow-signing-identity-migration",
+          "--expected-old-identity-sha256", CANDIDATE_IDENTITY_SHA256,
+          "--expected-new-identity-sha256", EXISTING_IDENTITY_SHA256,
+        ],
+      });
+      expect(swapped.stderr, `exit ${swapped.exitCode}`).toContain(
+        "Signing identity migration does not match",
+      );
+      expect(
+        swapped.reachedTransaction,
+        "the pinning printed its refusal but the install continued into the transaction",
+      ).toBeFalse();
+    });
+
+    // The guard's "approval supplied but no migration required" arm
+    // (scripts/enforce_identity_migration.sh:94-97), executed rather than only table-tested.
+    // It is what stops automation from carrying an approval permanently, which would turn the
+    // gate back into a no-op -- so a run that does NOT need the approval must be refused for
+    // offering it. Both policies, because this arm is reached through both approval flags.
+    test("a real run is refused for supplying an approval no migration requires", () => {
+      for (const [policy, approval] of [
+        ["local-only", ["--allow-adhoc-identity-migration"]],
+        [
+          "release",
+          [
+            "--allow-signing-identity-migration",
+            "--expected-old-identity-sha256", EXISTING_IDENTITY_SHA256,
+            "--expected-new-identity-sha256", CANDIDATE_IDENTITY_SHA256,
+          ],
+        ],
+      ] as const) {
+        const run = runInstallerToIdentityGuard({
+          identityMigration: false,
+          artifactPolicy: policy,
+          extraArguments: [...approval],
+        });
+        expect(run.stderr, `${policy}: exit ${run.exitCode}`).toContain(
+          "approval was supplied but no identity migration is required",
+        );
+        expect(run.exitCode, policy).not.toBe(0);
+        expect(
+          run.reachedTransaction,
+          `${policy}: the guard refused an unnecessary approval but the install continued into the transaction`,
+        ).toBeFalse();
+      }
     });
   });
 });

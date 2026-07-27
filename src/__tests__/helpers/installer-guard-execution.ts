@@ -40,6 +40,13 @@ const repositoryRoot = resolve(import.meta.dir, "../../..");
 /// stays real. Nothing outside the fixture root is read or written, and the guard is
 /// reached BEFORE the installer's first user-data mutation (the `mv` of an installed app),
 /// so a denied run never touches an app bundle at all.
+///
+/// One execution sees only the input vector it fixes. `artifactPolicy` is varied for exactly
+/// that reason: a wrapper conditioned on `$ARTIFACT_POLICY` around the comparison loop and the
+/// call was measured surviving the whole installer battery unchanged while unenforcing the gate
+/// for release artifacts. Every OTHER input this fixture holds constant -- the environment, the
+/// stubbed-tool overrides, `uname`, the hostname -- remains a condition a wrapper could hide
+/// behind. See the BOUND note in src/__tests__/identity-migration-guard.test.ts.
 
 /// Distinct so the guard's refusal names two different identities, and so a swap of the
 /// two digest arguments is visible in its message rather than symmetric.
@@ -62,6 +69,39 @@ const approvedTarget = (): string => {
 };
 
 const platformIdentity = "11111111-1111-4111-8111-111111111111";
+
+/// The two values `--artifact-policy` accepts, spelled as the installer's own usage text
+/// spells them (`scripts/install_macos_app.sh` usage: `--artifact-policy <release|local-only>`).
+export type ArtifactPolicy = "local-only" | "release";
+
+/// Any non-empty value: a release install only requires `--expected-team-id` to be set, and
+/// the artifact tool that would interpret it is stubbed. Named so the reason it is arbitrary
+/// is on the page rather than inferred from a bare literal.
+const releaseTeamIdentifier = "FIXTURETEAMID";
+
+/// The policy-specific part of the argument vector.
+///
+/// A local-only run has to present the whole approved-target triple plus the local-signing
+/// acknowledgment or the installer refuses before any gate. A release run must present NONE
+/// of them -- the installer rejects a target identity, a target identity kind, and the
+/// acknowledgment for a release artifact -- so the release vector carries only the policy and
+/// the team identifier and lets the installer's own defaults (`APPROVED_TARGET="fleet"`,
+/// `APPROVED_TARGET_IDENTITY_SHA256="none"`, kind defaulted to `none` for release) supply the
+/// rest. Restating `fleet` here would hardcode a value the installer already owns.
+///
+/// If those defaults ever drift, the release cases fail loudly rather than silently
+/// degrading into local-only runs: their load-bearing assertion is the refusal wording that
+/// only the guard's release branch prints.
+const policyArguments = (policy: ArtifactPolicy, target: string, targetIdentitySha256: string): string[] =>
+  policy === "release"
+    ? ["--artifact-policy", "release", "--expected-team-id", releaseTeamIdentifier]
+    : [
+        "--artifact-policy", "local-only",
+        "--approved-target", target,
+        "--approved-target-identity-kind", "hardware_uuid_sha256",
+        "--approved-target-identity-sha256", targetIdentitySha256,
+        "--acknowledge-local-signing-and-permissions",
+      ];
 
 /// Tools the installer resolves through `RECORDINGS_TEST_INSTALL_<NAME>_EXECUTABLE` whose
 /// OUTPUT it parses or whose EFFECT it depends on. These stay real: stubbing them would
@@ -101,6 +141,11 @@ export type GuardExecutionOptions = {
   /// `identity_migration`, so this drives the installer's real computation rather than
   /// injecting the flag.
   identityMigration: boolean;
+  /// Which artifact policy the run executes under. A run pinned to one policy cannot see a
+  /// wrapper conditioned on the other, and this is the only input the installer's own
+  /// policy-shaped conditionals read -- see the BOUND note in
+  /// src/__tests__/identity-migration-guard.test.ts.
+  artifactPolicy?: ArtifactPolicy;
   /// Appended after the base arguments, so a case can supply the ad-hoc approval.
   extraArguments?: string[];
 };
@@ -306,11 +351,7 @@ export function runInstallerToIdentityGuard(
       "--manifest-sha256", "a".repeat(64),
       "--expected-source-sha", "b".repeat(40),
       "--expected-version", "0.2.14",
-      "--artifact-policy", "local-only",
-      "--approved-target", target,
-      "--approved-target-identity-kind", "hardware_uuid_sha256",
-      "--approved-target-identity-sha256", targetIdentitySha256,
-      "--acknowledge-local-signing-and-permissions",
+      ...policyArguments(options.artifactPolicy ?? "local-only", target, targetIdentitySha256),
       ...(options.extraArguments ?? []),
     ];
 
