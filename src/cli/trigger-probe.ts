@@ -440,7 +440,7 @@ function describeHotkey(hotkey: HotkeyBinding): string {
     case "default_pending":
       return `${hotkey.chord} (the app's default, registered at next launch)`;
     case "cleared":
-      return "cleared — no hotkey is registered";
+      return "cleared (nothing is registered)";
     case "unreadable":
       return `unreadable (${hotkey.stored_raw})`;
   }

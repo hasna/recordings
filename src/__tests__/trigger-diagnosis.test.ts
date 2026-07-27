@@ -534,8 +534,10 @@ printf '%s\\n' "$value"
     expect(result.exitCode).toBe(1);
     const stdout = result.stdout.toString();
     expect(stdout).toContain("Recording trigger");
-    expect(stdout).toContain("no hotkey is registered");
+    expect(stdout).toContain("No recording trigger can fire");
     expect(stdout).toContain("fn/Globe off");
+    // A failure that does not say what to do about it is just a different silence.
+    expect(stdout).toContain("recordings shortcut --reset");
   });
 
   test("says nothing about the trigger, and stays green, where there is no app to ask", () => {
