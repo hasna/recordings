@@ -1,0 +1,13 @@
+# The "not TSV-expressible" chain markers, expressed via occurrence index instead of a line delete.
+# A bare identifier's FIRST occurrence is the shell function DEFINITION (`name() {`), which is why a
+# newline-free needle appeared unusable; the CALL site is simply a later occurrence.
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	acquire_maintenance_marker	2
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	drain_store_reader_leases	2
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	acquire_sqlite_barrier	3
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	acquire_sqlite_barrier	5
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	acquire_sqlite_barrier	6
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	stop_old_processes	3
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	stop_old_processes	4
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	stop_old_processes	5
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	trap cleanup_install_coordination_and_work EXIT	1
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	write_journal processes-stopped	1

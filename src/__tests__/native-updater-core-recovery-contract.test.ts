@@ -175,6 +175,15 @@ describe("native updater core recovery contracts", () => {
       "private static func recoverBootstrapCommit(",
       "private static func recoverPreparedWithSeenBarrier(",
     );
+    // Two positive pins BEFORE the absence claims, because the bound above cannot supply them.
+    // `sliceBetweenUnique` has no length floor of its own — it inherits `open.length + 1` — so
+    // gutting or stubbing `recoverBootstrapCommit` leaves a region that satisfies all three
+    // `not.toContain` checks below while recovering nothing. An absence claim is only as strong as
+    // the proof that the region still contains the logic it is making a claim about, and these two
+    // strings are what this function exists to do: dispatch the recovery policy, and compare the
+    // candidate tree digest it was given.
+    expect(bootstrapRecovery).toContain("BootstrapRecoveryPolicy.action(");
+    expect(bootstrapRecovery).toContain("journal.candidateTreeSHA256");
     expect(bootstrapRecovery).not.toContain("envelope.json");
     expect(bootstrapRecovery).not.toContain("SignedReleaseEnvelope");
     expect(bootstrapRecovery).not.toContain("verify(");

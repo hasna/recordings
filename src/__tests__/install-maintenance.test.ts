@@ -469,11 +469,18 @@ await new Promise(() => {});
     //
     // One forward walk closes both. Each step is searched from the end of the previous match, so
     // presence and order are asserted together and a step that moved earlier fails as loudly as one
-    // that was deleted. It is also the only formulation that can pin a repeated marker: the three
-    // bare `stop_old_processes` calls and the three `acquire_sqlite_barrier` calls are
-    // indistinguishable to a pairwise index comparison, yet the contract is precisely that a
-    // surviving writer is stopped on BOTH sides of the authoritative copy while the exclusive SQLite
-    // transaction is held.
+    // that was deleted. It is also the formulation that can pin a repeated marker: the needle
+    // `"stop_old_processes\n"` matches 3 positions and `"acquire_sqlite_barrier\n"` matches 4 — the
+    // fourth being the call inside `quiesce_canonical_database()`, not a top-level step — and a
+    // pairwise index comparison cannot tell those apart. The contract is precisely that a surviving
+    // writer is stopped on BOTH sides of the authoritative copy while the exclusive SQLite
+    // transaction is held; the script says so itself immediately above those lines.
+    //
+    // What this walk does NOT do is make the old block vacuous in the way the other suites in this
+    // sweep were. Simulated against 14 single-line deletions, the old chain caught 12 and this walk
+    // catches 13. The one it adds back is the trap, whose anchor string
+    // `trap release_install_coordination` occurs ZERO times in the installer, so that ordering claim
+    // was never asserted at all.
     let cursor = 0;
     for (const [step, marker] of [
       // Exclusivity is claimed before anything reads or rewrites canonical state.
@@ -495,7 +502,13 @@ await new Promise(() => {});
       ["rescanned before the stopped copy", "stop_old_processes\n"],
       ["stopped state copied", '"$DITTO_EXECUTABLE" "$DATA_DIR" "$NEXT_STATE_BACKUP"'],
       ["rescanned after the stopped copy", "stop_old_processes\n"],
-      ["processes-stopped phase journaled", "write_journal processes-stopped"],
+      // Column-0 anchored, and that is the whole point of this step. The bare needle matches TWICE:
+      // the authoritative durable boundary on the main path, and an indented copy inside the
+      // `for ((refresh_attempt = 1; ...))` retry loop. With the bare needle, deleting the
+      // authoritative one still passed — the retry-loop copy answered for it, which would mean the
+      // journal boundary is only ever written from inside a loop that can `continue` past it. The
+      // leading newline pins the col-0 call and reduces the match set to exactly one.
+      ["processes-stopped phase journaled", "\nwrite_journal processes-stopped\n"],
     ] as const) {
       const index = source.indexOf(marker, cursor);
       expect(

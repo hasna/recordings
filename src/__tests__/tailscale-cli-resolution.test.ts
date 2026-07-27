@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { sliceBetween } from "./helpers/source-assertions";
+import { sliceBetween, sliceBetweenUnique } from "./helpers/source-assertions";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const resolver = join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh");
@@ -379,12 +379,18 @@ describe("Tailscale CLI resolution", () => {
     // is only correct relative to this one function. The anchor was the unguarded operand: a renamed
     // resolver left `resolverFunction` at -1, `indexOf(needle, -1)` clamps to 0, and the whole test
     // silently re-anchored on the first Darwin branch in the file — a different function's.
-    const resolverFunction = source.indexOf("recordings_resolve_trusted_tailscale_app_cli() {");
-    expect(
-      resolverFunction,
-      "resolver function is missing entirely: recordings_resolve_trusted_tailscale_app_cli",
-    ).toBeGreaterThan(-1);
-    const resolverBody = source.slice(resolverFunction);
+    //
+    // Bounded at BOTH ends, which the -1 guard alone did not achieve. Slicing from the resolver to
+    // the end of the FILE left every override claim below satisfiable by a different function:
+    // `RECORDINGS_TEST_TAILSCALE_CODESIGN_EXECUTABLE` appears in this resolver's else AND in
+    // `recordings_run_trusted_tailscale_status`'s else, so replacing the resolver's own override with
+    // a hardcoded /usr/bin/codesign — removing the test seam from the function under test — still
+    // passed, answered by the copy in the other function.
+    const resolverBody = sliceBetweenUnique(
+      source,
+      "recordings_resolve_trusted_tailscale_app_cli() {",
+      "\nrecordings_run_trusted_tailscale_status() {",
+    );
 
     const darwinBranch = resolverBody.indexOf('if [ "$real_host_kernel" = "Darwin" ]; then');
     expect(darwinBranch, "the resolver has no real-kernel Darwin branch").toBeGreaterThan(-1);

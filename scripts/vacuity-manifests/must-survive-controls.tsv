@@ -1,0 +1,10 @@
+# DELIBERATE MUST-SURVIVE CONTROL. `options: .atomic` occurs twice in RecordingsApp.swift and only
+# the SECOND is inside the region under test. Deleting the FIRST (the runtimeSmokeOutput evidence
+# write, outside the region) MUST leave the test green. A battery that reports KILLED here is
+# over-matching, and would send someone to "fix" a guard that is working correctly.
+delete	src/__tests__/macos-smoke-process-identity.test.ts	uses challenge-bound completion with identity-verified failure cleanup	src/native/Recordings/App/RecordingsApp.swift	options: .atomic	1
+# Deleting one of FOUR legitimate `run_swift build` invocations must NOT fail: "tests precede any
+# build" is still true with three left. The reorder in reorder.tsv is the mutation that proves that
+# ordering claim is live. A harness that flagged this as a survivor would be over-matching.
+delete	src/__tests__/native-release-build-hardening-contract.test.ts	pins a clean full source revision before native compilation	src/native/Recordings/build.sh	run_swift build -c "$BUILD_CONFIGURATION"	1
+delete	src/__tests__/macos-artifact-binding.test.ts	verification and durability gates precede final manifest publication	scripts/macos_artifact.ts	fsyncSync(descriptor)	1

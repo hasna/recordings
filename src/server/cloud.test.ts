@@ -499,33 +499,39 @@ describe("cloud migration parity", () => {
       /alter column recording_id drop not null/i.test(ddl)
     );
 
+    // These run BEFORE the shape assertions, which is the only position where they do any work: a
+    // `toMatch` against `undefined` already throws, so a presence check placed after one can never
+    // be the assertion that fires. Named, they say which migration is missing instead of surfacing
+    // as a type error on a regex.
+    //
+    // `expectOrder` does not apply to the ordering below: the haystack is the migration array, not
+    // a source string, so `indexOf` is `Array.prototype`'s. Nor does that ordering carry the -1
+    // hole this sweep is about — `find` returns an array MEMBER, and `indexOf` of a member it just
+    // returned cannot be -1. The failure mode here is `undefined`, not -1, which is what these two
+    // checks cover and why the site keeps a raw comparison.
+    expect(createMigration, "no PG migration creates recording_idempotency").toBeDefined();
+    expect(
+      tombstoneMigration,
+      "no PG migration relaxes recording_id for tombstones",
+    ).toBeDefined();
     expect(createMigration).toMatch(
       /recording_id\s+text\s+not null\s+unique\s+references\s+recordings\(id\)\s+on delete cascade/i,
     );
     expect(tombstoneMigration).toMatch(/drop constraint if exists recording_idempotency_recording_id_fkey/i);
     expect(tombstoneMigration).toMatch(/alter column recording_id drop not null/i);
     expect(tombstoneMigration).toMatch(/on delete set null/i);
-    // `expectOrder` does not apply here: the haystack is the migration array, not a source string,
-    // so `indexOf` is Array.prototype's. The -1 hole is the same shape, and both operands carry it
-    // — `find` answers undefined when no migration matches, `!` hides that, and
-    // `indexOf(undefined)` is -1. Asserting both migrations were found first is what makes the
-    // ordering comparison below about ordering rather than about presence.
-    expect(
-      createMigration,
-      "no PG migration creates recording_idempotency",
-    ).toBeDefined();
-    expect(
-      tombstoneMigration,
-      "no PG migration relaxes recording_id for tombstones",
-    ).toBeDefined();
     expect(PG_MIGRATIONS.indexOf(tombstoneMigration!)).toBeGreaterThan(
       PG_MIGRATIONS.indexOf(createMigration!),
     );
 
     // The canonical schema has to create the table with ON DELETE CASCADE and only later relax it,
-    // and the CASCADE claim is made over the region between the two. As two bare `indexOf` bounds a
-    // missing CREATE sliced from the last character and a missing ALTER sliced to the first, so the
-    // region a `toMatch` was applied to could be text the file does not contain in that order.
+    // and the CASCADE claim is made over the region between the two.
+    //
+    // Unlike the rest of this sweep, this site was ALREADY sound: it guarded its start bound with
+    // `toBeGreaterThan(-1)` and its end bound against the start, so neither could be -1. Converting
+    // it buys only the non-trivial-region floor and one fewer hand-written guard to get wrong next
+    // time. Recorded plainly because claiming a hole here that the previous code did not have would
+    // be the same defect as the vacuous assertions this PR removes, one level up.
     const canonicalCreateToUpgrade = sliceBetween(
       canonical,
       "CREATE TABLE IF NOT EXISTS recording_idempotency",

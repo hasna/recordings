@@ -178,16 +178,21 @@ type Verdict =
  *
  * So a kill only counts when the failure output carries one of the guard's own messages. Anything
  * else is reported as KILLED-UNATTRIBUTED and proves nothing about the site.
+ *
+ * The patterns are deliberately fragments rather than whole sentences. Suites add their own named
+ * guards — "test override is missing entirely: ...", "resolver function is missing entirely: ..." —
+ * and a signal list enumerating only the helper's own wording reported those as UNATTRIBUTED, which
+ * cost two hand-attributions that the driver should have made itself.
  */
 const GUARD_SIGNAL =
-  /(ordering operand is missing entirely|slice start marker is missing|slice end marker is missing|marker is not unique|too small to assert anything about|installer step is missing or out of order)/;
+  /(is missing entirely|marker is missing|marker is not unique|too small to assert anything about|is missing or out of order|no longer sanitizes)/;
 
 function attributed(output: string): boolean {
   return GUARD_SIGNAL.test(output);
 }
 
 const results: { row: Row; verdict: Verdict }[] = [];
-const cleanCache = new Map<string, boolean>();
+const cleanCache = new Map<string, "ok" | "red" | "no-match">();
 
 for (const [n, row] of rows.entries()) {
   const label = `[${n + 1}/${rows.length}] ${row.kind} ${row.testFile} :: ${row.testName}`;
@@ -200,20 +205,22 @@ for (const [n, row] of rows.entries()) {
     continue;
   }
 
-  const cleanKey = `${row.testFile} ${row.testName}`;
+  // The cache records WHY a clean run was unusable, not merely that it was. Collapsing both causes
+  // into one boolean made every row after the first report RED-ON-CLEAN, so a broken `-t` filter
+  // masqueraded as a failing test and pointed the reader at the wrong thing to fix.
+  const cleanKey = `${row.testFile} ${row.testName}`;
   if (!cleanCache.has(cleanKey)) {
     const clean = runTest(row.testFile, row.testName);
-    if (!ranSomething(clean.output)) {
-      cleanCache.set(cleanKey, false);
-      results.push({ row, verdict: "FILTER-MATCHED-NOTHING" });
-      console.log(`${label}\n    FILTER-MATCHED-NOTHING`);
-      continue;
-    }
-    cleanCache.set(cleanKey, clean.code === 0);
+    cleanCache.set(
+      cleanKey,
+      !ranSomething(clean.output) ? "no-match" : clean.code === 0 ? "ok" : "red",
+    );
   }
-  if (!cleanCache.get(cleanKey)) {
-    results.push({ row, verdict: "RED-ON-CLEAN" });
-    console.log(`${label}\n    RED-ON-CLEAN — a mutation verdict here would be meaningless`);
+  const cleanState = cleanCache.get(cleanKey);
+  if (cleanState !== "ok") {
+    const verdict: Verdict = cleanState === "no-match" ? "FILTER-MATCHED-NOTHING" : "RED-ON-CLEAN";
+    results.push({ row, verdict });
+    console.log(`${label}\n    ${verdict} - no mutation verdict can be drawn here`);
     continue;
   }
 
@@ -245,4 +252,8 @@ if (notKilled.length) {
     );
   }
 }
-process.exit(0);
+
+// An instrument that always exits 0 is not a gate. Anything other than a clean kill — a survivor, a
+// kill credited to the wrong cause, or a control that could not be applied — has to be able to fail
+// a caller, or the summary is decoration that a script above it will happily ignore.
+process.exit(notKilled.length === 0 ? 0 : 1);

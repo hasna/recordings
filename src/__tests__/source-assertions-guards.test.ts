@@ -17,6 +17,16 @@ import {
  *
  * So every test here asserts a FAILURE. `expect(...).toThrow()` around a helper call is the point:
  * it proves the guard fires, rather than proving the happy path still passes.
+ *
+ * WHAT THE SWEEP DELIBERATELY LEFT BEHIND, so the next person does not read the remainder as an
+ * oversight. Four files still carry sites of this class:
+ *   - `macos-shortcut-contract.test.ts` and `native-paste-delivery-verification-contract.test.ts`
+ *     are owned by an unmerged PR that rewrites the same guards; converting them here would have
+ *     produced a conflict in the one place a conflict is most expensive.
+ *   - `native-secure-input-clipboard-restore-contract.test.ts` is owned by another open PR.
+ *   - `native-app-companion-contract.test.ts` fails on CLEAN source, so a mutation battery over it
+ *     reports every mutation as caught. It cannot be verified here at all, and converting a file
+ *     whose conversions cannot be checked is how vacuous assertions get added rather than removed.
  */
 describe("expectOrder", () => {
   const haystack = "alpha\nbeta\ngamma\n";

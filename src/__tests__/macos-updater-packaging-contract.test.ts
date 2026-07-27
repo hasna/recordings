@@ -293,9 +293,14 @@ describe("root-owned macOS updater packaging contract", () => {
     );
     expect(managedBootstrap).toContain("different authenticated package");
     expect(managedBootstrap).toContain("authorization evidence is missing or unsafe");
-    // `write_authorization_journal` names both its definition and its single call, and the
-    // definition sits above the first preflight, so an ordering claim on the bare name is answered
-    // by the function body wherever the call moves to. Pin the top-level call line instead.
+    // `write_authorization_journal` names both its definition and its single call. The definition
+    // sits ABOVE the first preflight, which means the previous `lastIndexOf(name, installerIndex)`
+    // form was not actually satisfiable by the definition — deleting the call dropped the index to
+    // the definition, which sorts before the preflight, so the old assertion did fail. The reason to
+    // pin the top-level call line is therefore not that the old form was vacuous here; it is that
+    // the property being claimed is "the journal is written by a call at top level", and a bare name
+    // cannot distinguish a call from a definition without depending on their relative order, which
+    // is not the contract and would silently invert if the definition were moved below.
     const journalWriteCall = "\n  write_authorization_journal\n";
     const journalWriter = managedBootstrap.match(
       /write_authorization_journal\(\) \{[\s\S]*?\n\}/,

@@ -47,12 +47,26 @@ function writeExecutable(path: string, source: string): void {
 // raw indexOf results made every absence claim about it vacuous: rename the function and the
 // start index is -1, `indexOf("\n}", -1)` then finds the first closing brace in the file, and
 // the region collapses to the empty string — at which point "does not forward
-// DYLD_INSERT_LIBRARIES" is a true statement about nothing. The length floor covers the other
-// half of the same hole, a body gutted down to a passthrough.
+// DYLD_INSERT_LIBRARIES" is a true statement about nothing.
+//
+// The other half of that hole is a body gutted down to a passthrough, and a byte floor is a poor
+// way to exclude it: the body measures 314 bytes, so `minimumLength: 200` left 36% of headroom and
+// would still pass with the entire sanitized-environment line deleted. These four strings ARE the
+// sanitization, so they say what "not gutted" actually means, and each one names the property it
+// protects rather than a length that happens to correlate with it.
 function releaseSensitiveToolBody(): string {
-  return sliceBetween(buildScript, "run_release_sensitive_tool() {", "\n}", {
-    minimumLength: 200,
-  });
+  const body = sliceBetween(buildScript, "run_release_sensitive_tool() {", "\n}");
+  for (const required of [
+    '"$ENV_EXECUTABLE" -i', // an empty environment, not the caller's
+    'HOME="$OPERATOR_HOME"',
+    'PATH="$SANITIZED_PATH"',
+    '"$executable" "$@"', // and it still actually runs the tool
+  ]) {
+    expect(body, `release-sensitive tool wrapper no longer sanitizes: ${required}`).toContain(
+      required,
+    );
+  }
+  return body;
 }
 
 describe("native release build hardening contract", () => {

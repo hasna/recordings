@@ -1,0 +1,4 @@
+# The semantically meaningful mutation for a 1-of-4 needle: REORDER, not delete. Deleting one of the
+# four legitimate `run_swift build` invocations correctly survives, because "tests precede any build"
+# is still true. Swapping the test past the first build is the mutation the assertion exists for.
+swap	src/__tests__/native-release-build-hardening-contract.test.ts	pins a clean full source revision before native compilation	src/native/Recordings/build.sh	run_swift test -c "$BUILD_CONFIGURATION"	run_swift build -c "$BUILD_CONFIGURATION"
