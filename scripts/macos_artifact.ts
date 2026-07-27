@@ -31,6 +31,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { crc32, inflateRawSync } from "node:zlib";
 import {
   nativeFsGuard,
@@ -57,6 +58,52 @@ export const BUNDLE_ID = "com.hasna.recordings";
 export const PROVENANCE_FILENAME = "recordings-build-provenance.json";
 export const RELEASE_APPROVED_TARGET = "fleet";
 export const LEGACY_LOCAL_TARGET_IDENTITY_KIND = "hardware_uuid_sha256";
+export const LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "policy",
+  "local-only-approved-targets.txt",
+);
+
+/// The approved local-only targets are policy data, not code: the same file backs
+/// the TypeScript validators and both shell entry points so a target is declared
+/// once. Parsing stays deliberately strict — a malformed policy file fails closed
+/// rather than silently widening the allowlist.
+export function localOnlyApprovedTargets(
+  policyPath: string = LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH,
+): string[] {
+  const contents = readFileSync(policyPath, "utf8");
+  const targets = contents
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  if (targets.length === 0) {
+    throw new Error("local-only approved target policy lists no targets");
+  }
+  for (const target of targets) {
+    if (!/^[a-z][a-z0-9-]{1,30}[a-z0-9]$/.test(target)) {
+      throw new Error(`local-only approved target policy has an invalid target name: ${target}`);
+    }
+  }
+  if (new Set(targets).size !== targets.length) {
+    throw new Error("local-only approved target policy has duplicate targets");
+  }
+  if (targets.includes(RELEASE_APPROVED_TARGET)) {
+    throw new Error("local-only approved target policy must not list the release fleet target");
+  }
+  return targets;
+}
+
+export function isLocalOnlyApprovedTarget(
+  target: string | undefined,
+  policyPath?: string,
+): boolean {
+  if (target === undefined) return false;
+  return localOnlyApprovedTargets(policyPath).includes(target);
+}
+
+function localOnlyApprovedTargetsMessage(policyPath?: string): string {
+  return localOnlyApprovedTargets(policyPath).join(", ");
+}
 
 export type ArtifactPolicy = "release" | "local_only";
 export type TargetIdentityKind =
@@ -1510,7 +1557,7 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
   } else {
     if (
       manifest.artifact_policy !== "local_only" ||
-      manifest.approved_target !== "station06" ||
+      !isLocalOnlyApprovedTarget(manifest.approved_target) ||
       (manifest.approved_target_identity_kind !== undefined &&
         manifest.approved_target_identity_kind !== "tailscale_node_id_sha256") ||
       (manifest.approved_target_identity_kind === undefined) !==
@@ -1523,7 +1570,10 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
       !isHex(manifest.builder_identity_sha256, 64) ||
       manifest.builder_identity_sha256 === manifest.approved_target_identity_sha256
     ) {
-      throw new Error("local-only schema v3 requires exact station06 name and machine identity");
+      throw new Error(
+        "local-only schema v3 requires an approved target name " +
+          `(${localOnlyApprovedTargetsMessage()}) and machine identity`,
+      );
     }
     if (
       manifest.non_notarized !== true ||
@@ -1963,14 +2013,17 @@ function writeProvenance(
     }
   } else if (
     expectedTeamId !== "ADHOC" ||
-    approvedTarget !== "station06" ||
+    !isLocalOnlyApprovedTarget(approvedTarget) ||
     approvedTargetIdentityKind !== "tailscale_node_id_sha256" ||
     builderIdentityKind !== "tailscale_node_id_sha256" ||
     !isHex(approvedTargetIdentitySha256, 64) ||
     !isHex(builderIdentitySha256, 64) ||
     approvedTargetIdentitySha256 === builderIdentitySha256
   ) {
-    throw new Error("new local-only provenance requires ADHOC and a Tailscale node-bound station06 identity");
+    throw new Error(
+      "new local-only provenance requires ADHOC and a Tailscale node-bound approved-target identity " +
+        `(${localOnlyApprovedTargetsMessage()})`,
+    );
   } else {
     provenance.artifact_policy = "local_only";
     provenance.approved_target = approvedTarget;
@@ -2702,7 +2755,7 @@ function readJournal(path: string): InstallJournal {
         journal.approved_target_identity_sha256 !== "none" ||
         journal.builder_identity_kind !== "none")) ||
     (journal.artifact_policy === "local_only" &&
-      (journal.approved_target !== "station06" ||
+      (!isLocalOnlyApprovedTarget(journal.approved_target) ||
         !isTargetIdentityKind(journal.approved_target_identity_kind) ||
         !isTargetIdentityKind(journal.builder_identity_kind) ||
         journal.approved_target_identity_kind !== journal.builder_identity_kind ||

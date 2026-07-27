@@ -1,0 +1,14 @@
+# Single source of truth for the Macs approved as local-only artifact targets.
+#
+# One short hostname (`hostname -s`) per line. Blank lines and lines beginning
+# with `#` are ignored. Both `scripts/macos_artifact.ts` and the two shell
+# entry points (`scripts/install_macos_app.sh`, `src/native/Recordings/build.sh`)
+# read this file, so a target is added in exactly one place.
+#
+# Listing a target here does not weaken any other local-only control. Every
+# local-only artifact is still ad-hoc signed and non-notarized, must be built on
+# a Mac other than the target, and stays bound to the target's authenticated
+# machine identity digest. Release artifacts ignore this file entirely and use
+# the fleet target policy.
+station03
+station06

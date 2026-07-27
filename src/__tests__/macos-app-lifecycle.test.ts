@@ -3687,6 +3687,11 @@ describe("macOS signed artifact build", () => {
       join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh"),
       join(root, "scripts", "resolve_tailscale_cli.sh"),
     );
+    mkdirSync(join(root, "scripts", "policy"), { recursive: true });
+    cpSync(
+      join(repositoryRoot, "scripts", "policy", "local-only-approved-targets.txt"),
+      join(root, "scripts", "policy", "local-only-approved-targets.txt"),
+    );
     writeFileSync(join(native, "RecordingsLib", "Info.plist"), "<plist><dict/></plist>\n");
     writeFileSync(join(native, "RecordingsLib", "Recordings.entitlements"), "<plist><dict/></plist>\n");
     cpSync(
@@ -4333,7 +4338,17 @@ fi
     const missing = createBuildFixture();
     const missingResult = await runLocalBuild(missing, { RECORDINGS_LOCAL_APPROVED_TARGET: "" });
     expect(missingResult.exitCode).not.toBe(0);
-    expect(missingResult.stderr).toContain("RECORDINGS_LOCAL_APPROVED_TARGET=station06");
+    expect(missingResult.stderr).toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
+    // The rejection enumerates the policy file's targets rather than a baked-in hostname.
+    expect(missingResult.stderr).toContain("station03");
+    expect(missingResult.stderr).toContain("station06");
+
+    const unapproved = createBuildFixture();
+    const unapprovedResult = await runLocalBuild(unapproved, {
+      RECORDINGS_LOCAL_APPROVED_TARGET: "station05",
+    });
+    expect(unapprovedResult.exitCode).not.toBe(0);
+    expect(unapprovedResult.stderr).toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
 
     const sameHost = createBuildFixture();
     const sameHostResult = await runLocalBuild(sameHost, { BUILD_FIXTURE_HOSTNAME: "station06" });

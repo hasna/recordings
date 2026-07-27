@@ -546,7 +546,7 @@ describe("macOS artifact manifest", () => {
         targetIdentitySha256,
         "hardware_uuid_sha256",
       ),
-    ).toThrow("exact station06 name and machine identity");
+    ).toThrow("requires an approved target name");
   });
 
   test("requires target and builder identities to use the same node-ID namespace", () => {
@@ -569,7 +569,7 @@ describe("macOS artifact manifest", () => {
         targetIdentitySha256,
         "tailscale_node_id_sha256",
       ),
-    ).toThrow("exact station06 name and machine identity");
+    ).toThrow("requires an approved target name");
   });
 
   test("hashes the live-schema online Tailscale Self.ID exactly for the approved hostname", () => {
@@ -654,7 +654,7 @@ describe("macOS artifact manifest", () => {
         "station06",
         targetIdentitySha256,
       ),
-    ).toThrow("exact station06 name and machine identity");
+    ).toThrow("requires an approved target name");
 
     manifest.approved_target_identity_sha256 = targetIdentitySha256;
     manifest.builder_identity_sha256 = targetIdentitySha256;
@@ -671,7 +671,7 @@ describe("macOS artifact manifest", () => {
         "station06",
         targetIdentitySha256,
       ),
-    ).toThrow("exact station06 name and machine identity");
+    ).toThrow("requires an approved target name");
   });
 
   test("rejects malformed numeric platform and bundle versions", () => {

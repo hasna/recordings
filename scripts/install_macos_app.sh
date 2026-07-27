@@ -336,8 +336,26 @@ else
     echo "Local-only artifacts do not accept --expected-team-id or a release TeamIdentifier environment value." >&2
     exit 2
   fi
-  if [ "$APPROVED_TARGET" != "station06" ]; then
-    echo "Local-only install is currently restricted to --approved-target station06." >&2
+  # The approved local-only targets are policy data shared with the artifact tool
+  # and the builder, so a target is declared in exactly one file.
+  LOCAL_TARGET_POLICY="${PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
+  [ -f "$LOCAL_TARGET_POLICY" ] && [ ! -L "$LOCAL_TARGET_POLICY" ] || {
+    echo "Local-only approved target policy is missing." >&2
+    exit 2
+  }
+  APPROVED_TARGET_MATCHED=0
+  APPROVED_TARGET_LIST=""
+  while IFS= read -r policy_line || [ -n "$policy_line" ]; do
+    case "$policy_line" in ''|'#'*) continue ;; esac
+    APPROVED_TARGET_LIST="${APPROVED_TARGET_LIST:+${APPROVED_TARGET_LIST}, }${policy_line}"
+    [ "$policy_line" = "$APPROVED_TARGET" ] && APPROVED_TARGET_MATCHED=1
+  done < "$LOCAL_TARGET_POLICY"
+  [ -n "$APPROVED_TARGET_LIST" ] || {
+    echo "Local-only approved target policy lists no targets." >&2
+    exit 2
+  }
+  if [ "$APPROVED_TARGET_MATCHED" -ne 1 ]; then
+    echo "Local-only install requires an approved --approved-target (${APPROVED_TARGET_LIST})." >&2
     exit 2
   fi
   if ! [[ "$APPROVED_TARGET_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
