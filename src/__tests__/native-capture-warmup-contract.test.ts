@@ -291,7 +291,64 @@ describe("native capture warm-up contract", () => {
     // be Stop, or clicking it would silently start nothing.
     expect(view).not.toMatch(/store\.engine\.isRecording \? "stop\.fill"/);
     expect(view).toContain('store.engine.captureIsActive ? "stop.fill"');
-    expect(view).toContain("if store.engine.captureIsActive {");
+
+    // Each affordance is pinned SEPARATELY, and this is the reason: the single
+    // `toContain("if store.engine.captureIsActive {")` that used to stand here is satisfied by
+    // either `statusColor` or `toggleRecording`, so reverting one of them to `isRecording` was
+    // invisible. Measured on this file: 4 of the 5 reads reverted with the suite still green at
+    // exit 0, and only `recordButtonIcon` was caught -- by the `not.toMatch`/`toContain` pair
+    // above, which is the shape the rest of these now copy. The consequence differs per member,
+    // so each carries its own failure message.
+    const warmUpAwareMembers: ReadonlyArray<readonly [string, string]> = [
+      [
+        "private var statusColor: Color",
+        "the popover glyph stays idle-coloured through the whole warm-up window",
+      ],
+      [
+        "private var recordButtonTitle: String",
+        "the button reads Start Recording while it already acts as Stop",
+      ],
+      [
+        "private var recordButtonIcon: String",
+        "the button shows mic.fill while it already acts as Stop",
+      ],
+      [
+        "private func toggleRecording()",
+        "Stop pressed during warm-up calls startRecording(), the gate refuses it, and the click " +
+          "silently does nothing -- verbatim the failure this suite exists to prevent",
+      ],
+    ];
+    for (const [declaration, consequence] of warmUpAwareMembers) {
+      const body = methodBody(view, declaration);
+      expect(body, `${declaration}: ${consequence}`).toContain("store.engine.captureIsActive");
+    }
+
+    // The button's tint lives inline in `body` rather than in a member, so it needs its own
+    // anchor; it is the fifth read.
+    expect(view, "the record button's tint must follow warm-up too").toContain(
+      ".tint(store.engine.captureIsActive ? .red : .accentColor)",
+    );
+
+    // A count as well, so a NEW affordance added without warm-up awareness is caught rather than
+    // silently joining the four above.
+    expect(
+      view.match(/store\.engine\.captureIsActive/g)?.length,
+      "every warm-up-aware read in MenuBarStatusView",
+    ).toBe(5);
+
+    // The converse, and the assertion that actually makes all five independent: `isRecording` is
+    // legitimate in exactly one shape in this file -- the argument handed to MenuBarPresentation,
+    // which receives both flags and decides between them itself. Any other read is a surface that
+    // ignores warm-up, so reverting any one of the five leaves a line here.
+    const strayIsRecording = view
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.includes("store.engine.isRecording"))
+      .filter((line) => line !== "isRecording: store.engine.isRecording,");
+    expect(
+      strayIsRecording,
+      "MenuBarStatusView reads isRecording outside MenuBarPresentation's argument",
+    ).toEqual([]);
   });
 
   /**
