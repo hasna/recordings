@@ -53,3 +53,24 @@ struct RealtimeSettleBudgetTests {
         )
     }
 }
+
+// MARK: - Realtime outbound send deadlines
+
+struct RealtimeSendDeadlineTests {
+    @Test("the configure send absorbs a cold connection handshake")
+    func configureDeadlineCoversColdHandshake() {
+        // Cold DNS + TCP + TLS + WebSocket upgrade measured 0.77-1.0 s against the
+        // live endpoint from a fresh process; the configure deadline must clear it
+        // with margin or a cold connection poisons the whole session.
+        #expect(RealtimeTranscriptionClient.configureSendTimeoutMilliseconds >= 2_000)
+    }
+
+    @Test("post-configure sends stay tight so mid-session stalls surface quickly")
+    func steadyStateDeadlineStaysTight() {
+        #expect(
+            RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds
+                < RealtimeTranscriptionClient.configureSendTimeoutMilliseconds
+        )
+        #expect(RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds <= 1_000)
+    }
+}

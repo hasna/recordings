@@ -294,7 +294,10 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         let sessionConfig = Self.transcriptionSessionUpdateEvent(transcription: transcription)
 
         do {
-            try await sendEvent(sessionConfig)
+            try await sendEvent(
+                sessionConfig,
+                timeoutMilliseconds: Self.configureSendTimeoutMilliseconds
+            )
             isConfigured = true
             flushPendingAudio()
         } catch {
@@ -611,14 +614,34 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         }
     }
 
-    private func sendEvent(_ obj: [String: Any]) async throws {
-        try await sendEncodedEvent(encodeJSON(obj))
+    /// Deadline for the session-configure send. This is the first frame on a
+    /// just-resumed socket, so it absorbs DNS + TCP + TLS + WebSocket upgrade on a
+    /// cold connection — measured 0.77-1.0 s from a fresh process against the live
+    /// endpoint. The old shared 500 ms deadline made a cold morning connection fail
+    /// configuration outright, poisoning the whole session and silently demoting
+    /// every recording to the batch path. The user is speaking while this runs
+    /// (audio buffers locally either way), so the larger budget costs nothing on
+    /// the delivery path.
+    nonisolated static let configureSendTimeoutMilliseconds: UInt64 = 3_000
+    /// Deadline for every send after configuration, riding the established
+    /// connection: kept tight so a mid-session stall surfaces as a transport
+    /// failure quickly instead of backing audio up in the outbound queue.
+    nonisolated static let outboundSendTimeoutMilliseconds: UInt64 = 500
+
+    private func sendEvent(
+        _ obj: [String: Any],
+        timeoutMilliseconds: UInt64 = RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds
+    ) async throws {
+        try await sendEncodedEvent(encodeJSON(obj), timeoutMilliseconds: timeoutMilliseconds)
     }
 
-    private func sendEncodedEvent(_ text: String) async throws {
+    private func sendEncodedEvent(
+        _ text: String,
+        timeoutMilliseconds: UInt64 = RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds
+    ) async throws {
         guard let ws else { throw URLError(.networkConnectionLost) }
         try await Self.runOutboundOperationWithDeadline(
-            timeoutMilliseconds: 500,
+            timeoutMilliseconds: timeoutMilliseconds,
             operation: { try await ws.send(.string(text)) },
             nowMilliseconds: Self.monotonicMilliseconds,
             sleepMilliseconds: { milliseconds in
