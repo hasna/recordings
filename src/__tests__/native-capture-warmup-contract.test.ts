@@ -361,7 +361,11 @@ describe("native capture warm-up contract", () => {
     const engine = read("RecordingsLib/RecordingEngine.swift");
     const compositor = methodBody(
       engine,
-      "private func setBlockedReason(_ reason: String?, for source: BlockedReasonSource) {",
+      // Anchored to the declaration's OPENING, not its full single-line spelling: `main` gave this
+      // method a third parameter (`generation: UInt64? = nil`) and broke the signature across four
+      // lines, so the one-line form no longer exists and `region` threw "missing anchor". The
+      // sibling suite already anchors this way (macos-shortcut-contract.test.ts:277, :700).
+      "private func setBlockedReason(",
     );
     expect(compositor, "a filtered source is a source that never reaches the glyph").not.toContain(
       ".filter",
@@ -379,17 +383,52 @@ describe("native capture warm-up contract", () => {
     // `blockedReason` stays nil, the glyph never changes, the whole disclosure is a no-op, and
     // every assertion above survives. So pin the write as unconditional, and forbid `source`
     // being compared at all: in this function it is a dictionary key, never a predicate.
+    // A8 reconciled with `main` rather than dropped, and this is the one place where merging this
+    // branch had to WEAKEN a landed assertion, so it is spelled out.
+    //
+    // The original form required the write to be textually adjacent to the reason check and forbade
+    // `source` being compared AT ALL. `main` now compares it deliberately three times: an early
+    // `return` refusing a reason that belongs to a superseded recording — the pre-render gate whose
+    // absence let "press Cmd-V" outlive its clipboard — plus two `source == .delivery` stamps of
+    // `deliveryBlockedReasonGeneration`. A blanket ban on `source ==` would delete that fix, and a
+    // blanket allowance would restore A8. So enumerate instead: exactly what may stand between the
+    // reason check and the dictionary write, and exactly which comparisons may exist.
+    //
+    // Still kills A8's own mutation: adding `source != .pressConsumed` to the write's condition
+    // changes the first gate's text, and adding a fresh `if source != … { return }` adds a third.
+    const beforeWrite = region(
+      compositor,
+      "if let reason, !reason.isEmpty {",
+      "blockedReasons[source] = reason",
+    )
+      // Line comments stripped: this function's prose mentions `return` and reads as code to a
+      // regex, and an assertion a comment can satisfy is not an assertion.
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("//"))
+      .join("\n");
+    const gates = [...beforeWrite.matchAll(/^\s*if (.+?) \{$/gm)].map((match) => match[1]);
+    expect(
+      gates,
+      "only the superseded-delivery gate may stand between the reason check and the write",
+    ).toEqual([
+      "let reason, !reason.isEmpty",
+      "source == .delivery, let generation, generation != recordingGeneration",
+    ]);
+    // The write's OWN condition carries no source predicate — that is A8's exact shape.
     expect(
       compositor,
-      "the dictionary write must be unconditional — an excluded source never reaches the glyph",
-    ).toContain("if let reason, !reason.isEmpty {\n            blockedReasons[source] = reason");
+      "`source` is a key at the write, never a predicate; comparing it there drops a whole cause",
+    ).not.toMatch(/if let reason,[^\n]*source/);
+    // And every comparison of `source` anywhere in the compositor is a `.delivery` scope check.
+    // Exact list, so a `!= .pressConsumed` anywhere in this method fails rather than blends in.
     expect(
-      compositor,
-      "`source` is a key here, never a predicate; comparing it silently drops a whole cause",
-    ).not.toMatch(/source\s*[!=]=/);
-    // Both the reads of `source` that may exist, and nothing else.
+      compositor.match(/source\s*[!=]=\s*\.\w+/g) ?? [],
+      "the only `source` comparisons here are the three .delivery scope checks",
+    ).toEqual(["source == .delivery", "source == .delivery", "source == .delivery"]);
+    // Both the reads of `source` that may exist, and nothing else. Was 3 before `main`'s generation
+    // gate: the parameter, the dictionary write and the removal; now also the three comparisons.
     const sourceUses = compositor.match(/\bsource\b/g) ?? [];
-    expect(sourceUses.length, "unexpected extra use of `source` in the compositor").toBe(3);
+    expect(sourceUses.length, "unexpected extra use of `source` in the compositor").toBe(7);
     // Both slots this branch writes must be reachable through it.
     for (const source of [".pressConsumed", ".delivery"]) {
       expect(engine, `no writer for ${source}`).toContain(`for: ${source}`);

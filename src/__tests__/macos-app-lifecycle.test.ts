@@ -143,6 +143,29 @@ function createInstallerFixture() {
     join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh"),
     join(root, "scripts", "resolve_tailscale_cli.sh"),
   );
+  // The installer sources its approved-target policy and reader out of its own package
+  // root, so a fixture package root without them cannot reach any gate past that point:
+  // every local-only install here exits 2 with "Packaged local-only approved target
+  // reader is missing." and the test then asserts against the wrong failure. The build
+  // fixture further down this file already copies both; this one was left behind.
+  //
+  // The identity-migration guard is sourced the same way and fails closed the same way,
+  // on "Packaged identity-migration guard is missing." Both copies have to be here: this
+  // fixture's local-only tests are already red on Linux for unrelated reasons, so a
+  // missing packaged file shows up as the same red and not as a new failure.
+  cpSync(
+    join(repositoryRoot, "scripts", "enforce_identity_migration.sh"),
+    join(root, "scripts", "enforce_identity_migration.sh"),
+  );
+  mkdirSync(join(root, "scripts", "policy"), { recursive: true });
+  cpSync(
+    join(repositoryRoot, "scripts", "policy", "local-only-approved-targets.txt"),
+    join(root, "scripts", "policy", "local-only-approved-targets.txt"),
+  );
+  cpSync(
+    join(repositoryRoot, "scripts", "read_local_only_targets.sh"),
+    join(root, "scripts", "read_local_only_targets.sh"),
+  );
   writeExecutable(
     join(root, "scripts", "smoke_macos_app.sh"),
     "#!/usr/bin/env bash\n[ \"$#\" -eq 2 ] || exit 64\n[ \"$2\" = \"$RECORDINGS_BUN_EXECUTABLE\" ] || exit 65\n[ \"${FAIL_RUNTIME_SMOKE:-0}\" = 0 ] || exit 1\nprintf '%s\\n' \"$1\" >> \"$MARKER_DIRECTORY/runtime-smoke.log\"\n",
@@ -1354,13 +1377,37 @@ describe("macOS finalized artifact installer", () => {
     expect(installer).not.toMatch(/\bxattr\b[^\n]*quarantine|com\.apple\.quarantine/);
   });
 
-  test("accepts verified ad-hoc local apps without a textual designated requirement", async () => {
+  // An installed app with no textual designated requirement cannot be proven compatible
+  // with the candidate, so install_macos_app.sh treats it as an identity migration. That
+  // is now refused by default for local-only too, not only for release.
+  test("refuses a local ad-hoc replacement of an app without a textual designated requirement until it is approved", async () => {
+    const refused = await (async () => {
+      const fixture = createInstallerFixture();
+      const installed = join(fixture.home, "Applications", "Recordings.app");
+      createApp(installed, "installed");
+      const result = await runLocalInstaller(fixture, [], { NO_DESIGNATED_REQUIREMENT: "1" });
+      return {
+        result,
+        installedExecutable: readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8"),
+      };
+    })();
+    expect(refused.result.exitCode).toBe(1);
+    expect(refused.result.stderr).toContain("not mutually compatible");
+    expect(refused.result.stderr).toContain("--allow-adhoc-identity-migration");
+    // Refused before the transaction, so the installed app is still the old one.
+    expect(refused.installedExecutable).toBe("installed");
+
     const fixture = createInstallerFixture();
     const installed = join(fixture.home, "Applications", "Recordings.app");
     createApp(installed, "installed");
-    const result = await runLocalInstaller(fixture, [], { NO_DESIGNATED_REQUIREMENT: "1" });
+    const result = await runLocalInstaller(fixture, ["--allow-adhoc-identity-migration"], {
+      NO_DESIGNATED_REQUIREMENT: "1",
+    });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("candidate");
+    // States the grant loss as fact, because at this point the identity did change.
+    expect(result.stdout).toContain("must be reauthorized");
+    expect(result.stdout).toContain("--allow-adhoc-identity-migration");
     const bunLog = readFileSync(join(fixture.markers, "bun.log"), "utf8");
     expect(bunLog).toContain("requirement-digest");
     expect(bunLog).toContain("--artifact-policy local_only");

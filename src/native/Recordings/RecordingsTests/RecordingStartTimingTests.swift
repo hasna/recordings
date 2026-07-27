@@ -55,7 +55,7 @@ private func makeStartableEngine(
     recorder: FakePCMRecorder,
     selectionCapture: @escaping @Sendable (pid_t) -> AccessibilitySelectionToken? = { _ in nil }
 ) -> RecordingEngine {
-    let engine = RecordingEngine()
+    let engine = RecordingEngine(homePath: makeIsolatedTestHome("start-timing-tests"))
     engine.openAIAPIKeyProvider = { "" }
     engine.microphoneAuthorization = { .authorized }
     engine.accessibilityTrustCheck = { true }

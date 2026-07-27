@@ -67,7 +67,7 @@ private func makeEngine(
     accessibilityTrusted: Bool = true,
     pasteRecorder: PasteRecorder? = nil
 ) -> RecordingEngine {
-    let engine = RecordingEngine()
+    let engine = RecordingEngine(homePath: makeIsolatedTestHome("delivery-tests"))
     engine.openAIAPIKeyProvider = { "" }
     engine.microphoneAuthorization = { .denied }
     engine.accessibilityTrustCheck = { accessibilityTrusted }
@@ -295,7 +295,7 @@ struct VoiceShortcutRoutingTests {
     func shortcutBoundaries() async {
         let recorder = PasteRecorder()
         let engine = makeEngine(pasteRecorder: recorder)
-        let shortcuts = VoiceShortcuts()
+        let shortcuts = VoiceShortcuts(homePath: makeIsolatedTestHome("voice-shortcuts"))
         shortcuts.shortcuts = [VoiceShortcut(trigger: "add disclaimer", content: "This is not legal advice.")]
         engine.voiceShortcuts = shortcuts
 

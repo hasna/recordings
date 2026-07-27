@@ -20,7 +20,35 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { RECORDINGS_BUNDLE_IDENTIFIER } from "./macos-permissions.js";
+
+/**
+ * The `defaults` binary every read and write below goes through, or null when this machine
+ * has no app UserDefaults to reach at all.
+ *
+ * Pinned absolutely on macOS, so PATH cannot redirect the read that decides whether a
+ * trigger is armed — the same rule `scripts/macos_artifact.ts` applies to codesign
+ * (`CODESIGN_EXECUTABLE`, macos_artifact.ts:46-48, pinned by
+ * src/__tests__/macos-artifact-command-pinning.test.ts). Production macOS never consults
+ * the environment override.
+ *
+ * `null` off macOS is the load-bearing part. There is no `defaults` and no app there, and
+ * the previous code spawned `/usr/bin/defaults` anyway: `spawnSync` set `error` with a null
+ * status, `readDefault` mapped that to null, and the caller could not tell "this key is
+ * not set" from "there is nothing here to ask". A null executable makes the difference
+ * explicit, so a non-macOS `check` can say nothing about the trigger instead of reporting
+ * a machine with no app as one whose fn key is switched off.
+ *
+ * The off-macOS override is what lets a Linux host exercise this module's real code paths —
+ * including `recordings check`'s exit code — against a stand-in `defaults`, which is
+ * otherwise untestable anywhere in this fleet: the only Mac is the owner's production
+ * machine and it is observation-only.
+ */
+export const TRIGGER_DEFAULTS_EXECUTABLE: string | null =
+  process.platform === "darwin"
+    ? "/usr/bin/defaults"
+    : process.env.RECORDINGS_TEST_DEFAULTS_EXECUTABLE ?? null;
 
 /**
  * Blocker 3, discharged on rebase.
@@ -283,8 +311,26 @@ export type ProcessLister = () => string | null;
 export type BundleIdentifierReader = (bundlePath: string) => string | null;
 
 const defaultBundleIdentifierReader: BundleIdentifierReader = (bundlePath) => {
+  if (TRIGGER_DEFAULTS_EXECUTABLE === null) return null;
+  // Measured cost, and the whole reason this guard exists: `runningAppBundlePaths` asks about
+  // every `/` position of every candidate line, which on station03 was 1846 candidates for 271
+  // matching `ps` lines. At 6.3 ms per `defaults` spawn that is 11.6 s per call — and
+  // `shortcut --fn on` called it twice, so one command cost ~23 s.
+  //
+  // A `stat` answers the same question for the overwhelming majority of those candidates for
+  // free. `defaults read <path>/Contents/Info KEY` reads `<path>/Contents/Info.plist`, so a
+  // candidate with no such file cannot possibly identify as this app; skipping the spawn for
+  // those is not a heuristic, it is the same answer arrived at cheaply. Both spellings are
+  // tested because `defaults` appends `.plist` itself: if a bundle ever carried a literal
+  // extensionless `Info`, dropping it here would change the answer rather than just its cost.
+  if (
+    !existsSync(`${bundlePath}/Contents/Info.plist`) &&
+    !existsSync(`${bundlePath}/Contents/Info`)
+  ) {
+    return null;
+  }
   const result = spawnSync(
-    "/usr/bin/defaults",
+    TRIGGER_DEFAULTS_EXECUTABLE,
     ["read", `${bundlePath}/Contents/Info`, "CFBundleIdentifier"],
     { encoding: "utf8" },
   );
@@ -297,13 +343,24 @@ export interface BundleScanProbes {
   readBundleIdentifier?: BundleIdentifierReader;
 }
 
+/**
+ * Same rule as `TRIGGER_DEFAULTS_EXECUTABLE`: pinned on macOS so PATH cannot substitute the
+ * process listing that decides which bundle holds the live trigger, and overridable only off
+ * macOS, where it is the one way to exercise the "an instance is running, so your write is not
+ * armed" exit path — a path that by definition needs a running Recordings.app to reach.
+ */
+const PROCESS_LISTER_EXECUTABLE =
+  process.platform === "darwin"
+    ? "/bin/ps"
+    : process.env.RECORDINGS_TEST_PS_EXECUTABLE ?? "/bin/ps";
+
 const defaultProcessLister: ProcessLister = () => {
   // `comm=` prints the executable path and nothing else. `args=` would include arguments,
   // and a wrapper such as `/bin/sh -c /path/Recordings.app/...` would then make the start
   // of the path ambiguous — the pattern below cannot tell an argument boundary from a
   // directory name once spaces are legal in the path. `-ww` stops ps truncating to the
   // terminal width, which would silently cut long bundle paths short.
-  const result = spawnSync("/bin/ps", ["-Awwo", "comm="], { encoding: "utf8" });
+  const result = spawnSync(PROCESS_LISTER_EXECUTABLE, ["-Awwo", "comm="], { encoding: "utf8" });
   if (result.status !== 0) return null;
   return result.stdout;
 };
@@ -325,6 +382,21 @@ export function runningAppBundlePaths(probes: BundleScanProbes = {}): string[] {
   const suffixPattern = /\/Contents\/MacOS\/[^/]+$/;
   const paths = new Set<string>();
 
+  // One identifier read per DISTINCT candidate path, not one per (line, candidate) pair. A
+  // real `ps` listing repeats the same directory prefixes across hundreds of lines — every
+  // `/Applications/...` process contributes the candidates `/Applications/...` and so on up
+  // the tree — and the previous code paid a `defaults` spawn for each repetition. The reader
+  // is a question about a path, so asking it twice in one scan can only return the same
+  // answer, more slowly.
+  const identifierCache = new Map<string, string | null>();
+  const readCached = (candidate: string): string | null => {
+    const cached = identifierCache.get(candidate);
+    if (cached !== undefined) return cached;
+    const identifier = readBundleIdentifier(candidate);
+    identifierCache.set(candidate, identifier);
+    return identifier;
+  };
+
   for (const raw of listing.split("\n")) {
     const line = raw.trim();
     const suffix = suffixPattern.exec(line);
@@ -337,7 +409,7 @@ export function runningAppBundlePaths(probes: BundleScanProbes = {}): string[] {
     // candidate first and accept the first one that identifies as this app.
     for (let index = bundle.indexOf("/"); index !== -1; index = bundle.indexOf("/", index + 1)) {
       const candidate = bundle.slice(index);
-      if (!isThisApp(candidate, readBundleIdentifier)) continue;
+      if (!isThisApp(candidate, readCached)) continue;
       paths.add(candidate);
       break;
     }
@@ -371,7 +443,8 @@ function isThisApp(candidate: string, readBundleIdentifier: BundleIdentifierRead
 }
 
 function readDefault(key: string): string | null {
-  const result = spawnSync("/usr/bin/defaults", ["read", RECORDINGS_BUNDLE_ID, key], {
+  if (TRIGGER_DEFAULTS_EXECUTABLE === null) return null;
+  const result = spawnSync(TRIGGER_DEFAULTS_EXECUTABLE, ["read", RECORDINGS_BUNDLE_ID, key], {
     encoding: "utf8",
   });
   if (result.status !== 0) return null;
@@ -379,7 +452,10 @@ function readDefault(key: string): string | null {
 }
 
 function writeDefault(key: string, value: string): void {
-  const result = spawnSync("/usr/bin/defaults", ["write", RECORDINGS_BUNDLE_ID, key, "-string", value], {
+  if (TRIGGER_DEFAULTS_EXECUTABLE === null) {
+    throw new Error(`cannot write ${key}: this machine has no readable app UserDefaults domain`);
+  }
+  const result = spawnSync(TRIGGER_DEFAULTS_EXECUTABLE, ["write", RECORDINGS_BUNDLE_ID, key, "-string", value], {
     encoding: "utf8",
   });
   if (result.status !== 0) {
@@ -420,8 +496,13 @@ export function writeShortcut(shortcut: Shortcut): void {
 }
 
 export function writeUseFnKey(enabled: boolean): void {
+  if (TRIGGER_DEFAULTS_EXECUTABLE === null) {
+    throw new Error(
+      `cannot write ${USE_FN_KEY_DEFAULTS_KEY}: this machine has no readable app UserDefaults domain`,
+    );
+  }
   const result = spawnSync(
-    "/usr/bin/defaults",
+    TRIGGER_DEFAULTS_EXECUTABLE,
     ["write", RECORDINGS_BUNDLE_ID, USE_FN_KEY_DEFAULTS_KEY, "-bool", enabled ? "true" : "false"],
     { encoding: "utf8" },
   );

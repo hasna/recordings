@@ -42,6 +42,7 @@ import {
   describeActiveStore,
   localStoreIsBehindSchema,
   probeRecordingPersistence,
+  renderPersistenceMarker,
   type PersistenceProbeResult,
 } from "../lib/persistence-probe.js";
 import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
@@ -66,6 +67,7 @@ import {
   DEFAULT_TOGGLE_RECORDING_CHORD,
   ShortcutParseError,
   TOGGLE_RECORDING_DEFAULTS_KEY,
+  TRIGGER_DEFAULTS_EXECUTABLE,
   TRIGGER_GRANT_REQUIREMENTS,
   USE_FN_KEY_DEFAULTS_KEY,
   formatShortcut,
@@ -76,6 +78,11 @@ import {
   writeShortcut,
   writeUseFnKey,
 } from "./macos-shortcut.js";
+import {
+  describeTriggerPickup,
+  probeTriggerDiagnostics,
+  type TriggerDiagnosis,
+} from "./trigger-probe.js";
 import { currentMachineId } from "../lib/machine.js";
 import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 import {
@@ -827,6 +834,16 @@ appCommand
     "--allow-signing-identity-migration",
     "Allow one reviewed signer change that requires new macOS permission approval",
   )
+  // Distinct from --allow-signing-identity-migration, and it has to be reachable here:
+  // this is the only install path the README documents, so without it the installer's
+  // escape hatch is discoverable only from stderr and usable only by invoking
+  // scripts/install_macos_app.sh directly. A local-only repair install of an ad-hoc
+  // signed app hits the identity-migration gate every time, because every ad-hoc rebuild
+  // changes the CDHash.
+  .option(
+    "--allow-adhoc-identity-migration",
+    "Accept that replacing an ad-hoc signed local-only app voids its Microphone and Accessibility grants",
+  )
   .option("--launch", "Launch and verify the canonical app after installation")
   .option("--launch-timeout <seconds>", "Canonical process launch timeout")
   .action((opts: {
@@ -846,6 +863,7 @@ appCommand
     expectedOldIdentitySha256?: string;
     expectedNewIdentitySha256?: string;
     allowSigningIdentityMigration?: boolean;
+    allowAdhocIdentityMigration?: boolean;
     launch?: boolean;
     launchTimeout?: string;
   }) => {
@@ -988,6 +1006,9 @@ appCommand
     if (opts.allowSigningIdentityMigration) {
       installerArgs.push("--allow-signing-identity-migration");
     }
+    if (opts.allowAdhocIdentityMigration) {
+      installerArgs.push("--allow-adhoc-identity-migration");
+    }
     if (opts.expectedOldIdentitySha256) {
       installerArgs.push("--expected-old-identity-sha256", opts.expectedOldIdentitySha256);
     }
@@ -1015,8 +1036,17 @@ appCommand
   .option("--verbose", "Show package paths, code hash, and log path")
   .action((opts: { verbose?: boolean }) => {
     const status = getMacOSAppStatus();
+    // An installed, fully permissioned app with a dead trigger dictates nothing, and this
+    // command reported the first two and not the third. One line and one additive JSON key,
+    // from the same diagnosis `check` renders. Unlike `check` this stays exit 0 whatever it
+    // finds: `app status` is a readout, `check` is the gate.
+    const trigger = probeTriggerDiagnostics({
+      accessibilityPermission:
+        process.platform === "darwin" ? status.accessibility_permission : null,
+      appLogPath: status.log_path,
+    });
     if (program.opts().json) {
-      console.log(JSON.stringify(status, null, 2));
+      console.log(JSON.stringify({ ...status, trigger }, null, 2));
       return;
     }
 
@@ -1029,6 +1059,12 @@ appCommand
     if (process.platform === "darwin") {
       console.log(`Microphone: ${status.microphone_permission}`);
       console.log(`Accessibility: ${status.accessibility_permission}`);
+    }
+    if (trigger) {
+      console.log(
+        `Trigger: ${trigger.summary}${trigger.can_fire ? "" : " — NOTHING CAN FIRE"}`,
+      );
+      console.log(chalk.dim("  'recordings check' reports the trigger in full and exits non-zero when nothing can fire."));
     }
     if (opts.verbose) {
       console.log(`Package: ${status.package_root}`);
@@ -1215,6 +1251,17 @@ program
     // had no Microphone grant and captured nothing but silence.
     const macStatus = process.platform === "darwin" ? getMacOSAppStatus() : null;
 
+    // And so is the trigger. A machine that can record, holds every grant and has a working
+    // credential still dictates nothing if no key starts a recording — which is exactly the
+    // state the owner's machine was in for days while this command reported green, because
+    // nothing here had ever looked at the trigger. Both reads are cheap: two `defaults` reads
+    // of the app's own domain plus a bounded tail of its log. Deliberately NOT the running-
+    // bundle scan, which costs ~11.6 s.
+    const trigger = probeTriggerDiagnostics({
+      accessibilityPermission: macStatus?.accessibility_permission ?? null,
+      appLogPath: macStatus?.log_path ?? null,
+    });
+
     // A transcript only counts as recorded once it is stored, and this package
     // has two stores behind one interface. Which one is live is decided by env
     // vars whose mere presence flips the transport, so `check` has to name it:
@@ -1281,6 +1328,14 @@ program
           (persistence && persistence.outcome === "failed"))
     );
 
+    // Extends the existing exit contract rather than inventing a second one: this command
+    // already answers "did anything actively fail" in its exit code, and a machine on which no
+    // trigger can fire has actively failed. It holds without `--probe` because it needs no
+    // probe — it is a storage read, and the silence it replaces was loudest for the operator
+    // who runs bare `check` first. `can_fire` is false only when EVERY trigger is a definite
+    // no; anything undecidable is a warning and keeps the exit code at 0.
+    const triggerFailed = trigger !== null && !trigger.can_fire;
+
     if (parentOpts.json) {
       console.log(JSON.stringify({
         recording: {
@@ -1313,8 +1368,11 @@ program
         credential_probe: credential,
         enhancement_credential_probe: enhancementCredential,
         persistence_probe: persistence,
+        // Additive: null on any machine with no app UserDefaults domain to read, exactly as
+        // `capture_probe` is null when no probe ran. No existing key changes name or meaning.
+        trigger,
       }, null, 2));
-      if (probeFailed) process.exitCode = 1;
+      if (probeFailed || triggerFailed) process.exitCode = 1;
       return;
     }
 
@@ -1462,6 +1520,8 @@ program
       );
     }
 
+    if (trigger) reportTriggerDiagnosis(trigger);
+
     if (capture) {
       console.log(
         (capture.ok ? chalk.green("✓") : chalk.red("✗")) +
@@ -1491,17 +1551,35 @@ program
       // Three states, three markers. A green ✓ on the word SKIPPED is what made this check report
       // PASS while writing, reading and deleting nothing — and on a machine pointed at a shared
       // API store that was the DEFAULT path, so the round-trip was never proved there.
-      const persistenceMarker =
-        persistence.outcome === "proved"
-          ? chalk.green("✓")
-          : persistence.outcome === "skipped"
-            ? chalk.yellow("?")
-            : chalk.red("✗");
+      //
+      // The mapping lives in the lib beside the outcome it renders, because as an inline ternary
+      // here it was unreachable from any test: flipping the `skipped` arm to green survived the
+      // full suite with a byte-identical failure set. Only the palette stays local.
+      const persistenceMarker = renderPersistenceMarker(persistence.outcome, {
+        pass: chalk.green,
+        warn: chalk.yellow,
+        fail: chalk.red,
+      });
       console.log(persistenceMarker + ` Persistence round-trip: ${persistence.message}`);
     }
 
-    if (probeFailed) process.exitCode = 1;
+    if (probeFailed || triggerFailed) process.exitCode = 1;
   });
+
+/**
+ * Render one trigger diagnosis. Shared by `check` and `app status` so the two surfaces cannot
+ * describe the same trigger differently — and so the summary line is the same string `--json`
+ * carries, which is what stops a text/JSON drift of the kind this command has shipped before.
+ */
+function reportTriggerDiagnosis(trigger: TriggerDiagnosis): void {
+  console.log(
+    (trigger.can_fire ? chalk.green("✓") : chalk.red("✗")) +
+      ` Recording trigger: ${trigger.summary}`
+  );
+  for (const failure of trigger.failures) console.log(chalk.red(`  ${failure}`));
+  for (const warning of trigger.warnings) console.log(chalk.yellow(`  ⚠ ${warning}`));
+  for (const note of trigger.notes) console.log(chalk.dim(`  ${note}`));
+}
 
 // ── listen ───────────────────────────────────────────────────────────────────
 
@@ -1663,7 +1741,11 @@ program
 
 program
   .command("shortcut")
-  .description("Show or change the global recording trigger (macOS)")
+  .description(
+    "Show or change the global recording trigger (macOS). Exits non-zero when a change was " +
+      "written while Recordings.app was running, because the running instance keeps the " +
+      "trigger it registered with — the write is stored but not armed until it is reopened."
+  )
   .option("--set <chord>", 'Set the app hotkey, e.g. "f13" or "ctrl+opt+r"')
   .option("--reset", "Reset the app hotkey to the app's built-in default")
   .option("--fn <state>", "Use fn/Globe as push-to-talk: on|off")
@@ -1698,7 +1780,15 @@ program
       return;
     }
 
-    const isMacOS = process.platform === "darwin";
+    /**
+     * What every read and write below actually needs is a reachable app UserDefaults domain,
+     * which is what this asks. In production it is exactly the old `process.platform ===
+     * "darwin"` test — `TRIGGER_DEFAULTS_EXECUTABLE` is the pinned `/usr/bin/defaults` on
+     * macOS and null everywhere else — but stating it as the capability rather than as a
+     * `uname` is both more honest and what lets this command's exit contracts be exercised on
+     * a Linux host, the only kind of machine in this fleet where they can be tested at all.
+     */
+    const appDefaultsReachable = TRIGGER_DEFAULTS_EXECUTABLE !== null;
 
     /**
      * The app's own trigger lives in its UserDefaults, so it can be read and written
@@ -1707,10 +1797,24 @@ program
      * not a prerequisite.
      */
     function requireMacOS(what: string): boolean {
-      if (isMacOS) return true;
+      if (appDefaultsReachable) return true;
       console.error(chalk.red(`${what} is only available on macOS`));
       process.exitCode = 1;
       return false;
+    }
+
+    /**
+     * One running-bundle scan per invocation.
+     *
+     * `runningAppBundlePaths()` is measured at ~11.6 s on the owner's machine, and
+     * `shortcut --fn on` called it twice — once to name the grant target, once to report
+     * pickup — so a single command cost roughly 23 seconds. Nothing between those two calls
+     * starts or stops an app, so the second call could only ever repeat the first.
+     */
+    let runningBundlesCache: string[] | null = null;
+    function runningBundles(): string[] {
+      runningBundlesCache ??= runningAppBundlePaths();
+      return runningBundlesCache;
     }
 
     /**
@@ -1719,7 +1823,7 @@ program
      * useless precisely when it matters most — while telling someone to enable a permission.
      */
     function grantTargetPaths(): { paths: string[]; running: boolean } {
-      const running = runningAppBundlePaths();
+      const running = runningBundles();
       if (running.length > 0) return { paths: running, running: true };
       const status = getMacOSAppStatus();
       return {
@@ -1752,7 +1856,7 @@ program
        * Recordings.app. Only the bundle that actually runs can hold the app's grant.
        */
       function showGrantTargets(): void {
-        const running = runningAppBundlePaths();
+        const running = runningBundles();
         const status = getMacOSAppStatus();
         const installed = [
           ...(status.installed ? [status.installed_app_path] : []),
@@ -1818,8 +1922,8 @@ program
      * instance still holding the old trigger. Say which instance, by path.
      */
     function reportPickup(): void {
-      const running = runningAppBundlePaths();
-      if (running.length === 0) {
+      const pickup = describeTriggerPickup(runningBundles());
+      if (pickup.armed) {
         console.log(chalk.dim("  Recordings.app is not running; it will register this on next launch."));
         return;
       }
@@ -1827,7 +1931,28 @@ program
         chalk.yellow("  Recordings.app is running and still holds the previous trigger.") +
           "\n  Quit and reopen it to arm this one:",
       );
-      for (const path of running) console.log(chalk.dim(`    ${path}`));
+      for (const path of pickup.runningBundlePaths) console.log(chalk.dim(`    ${path}`));
+      /**
+       * The warning above was already truthful and the command still exited 0, so
+       * `recordings shortcut --fn on && echo armed` printed "armed" while the trigger was not
+       * armed. That is the same false green as a check that reports a dead trigger as fine —
+       * this one just told the lie in an exit code, where a script reads it and a human does
+       * not.
+       *
+       * Non-zero rather than a `--restart` flag, deliberately. Quitting and relaunching the
+       * app is a side effect on the owner's running session — it would drop an in-progress
+       * dictation and re-trigger permission prompts — and a diagnostic surface earns trust by
+       * not doing that behind a flag nobody passed. The write did succeed, so this is not an
+       * error in the write; it is a refusal to claim the trigger is live when it is not.
+       * `recordings check` reports the same disagreement between stored and armed state.
+       */
+      console.log(
+        chalk.dim(
+          "  Exiting non-zero: the value was written, but the trigger that fires right now is " +
+            "still the old one.",
+        ),
+      );
+      process.exitCode = 1;
     }
 
     if (opts.set !== undefined) {
