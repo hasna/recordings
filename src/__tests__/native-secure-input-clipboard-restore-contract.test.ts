@@ -170,6 +170,39 @@ function restoresPreviousClipboard(outcome: string, env: Record<string, boolean>
   return decides(armFor(restoreDecisionArms(), outcome).expression, env);
 }
 
+/**
+ * The condition actually guarding the restore call.
+ *
+ * Everything above reasons about the decision TABLE. None of it looks at the code that reads
+ * the table, and a correct table wired to an inverted guard destroys the transcript exactly as
+ * the original defect did: negating `if shouldRestore` passed every test in this file at exit 0.
+ * A table nobody obeys is not a safeguard.
+ *
+ * Structural rather than textual: find every restore call, then the innermost `if` that
+ * encloses it with no intervening block. Throws if the call is unguarded or duplicated, because
+ * both are ways for the decision to stop being consulted.
+ */
+function restoreGuardConditions(): string[] {
+  const RESTORE_CALL = "previousClipboard.restore(to: pasteboard)";
+  const conditions: string[] = [];
+  for (let at = SOURCE.indexOf(RESTORE_CALL); at >= 0; at = SOURCE.indexOf(RESTORE_CALL, at + 1)) {
+    // `[^{}]*$` is the load-bearing part: it requires the matched `if`'s brace to be the last
+    // brace before the call, so this is the innermost enclosing block and not some outer `if`.
+    const guard = /if[ \t]+([^\n{]+?)[ \t]*\{[^{}]*$/.exec(SOURCE.slice(0, at));
+    if (guard === null) {
+      throw new Error(
+        `a previousClipboard.restore call at offset ${at} is not directly guarded by an \`if\` ` +
+          "— an unconditional restore is the transcript-destroying defect this file exists for",
+      );
+    }
+    conditions.push(guard[1].trim());
+  }
+  if (conditions.length === 0) {
+    throw new Error("no previousClipboard.restore call found at all — this test lost its subject");
+  }
+  return conditions;
+}
+
 /** The user-facing status switch, evaluated for a given `restoreClipboard` value. */
 function statusMessage(outcome: string, env: Record<string, boolean>): string {
   const start = SOURCE.indexOf("let message = switch outcome");
@@ -269,6 +302,33 @@ describe("secure input must never cost the user their transcript", () => {
         "pasted",
       );
     }
+  });
+
+  test("no clipboard restore in the engine is reached without a condition", () => {
+    // This is what survives of this PR, and it is deliberately narrow.
+    //
+    // The consumer half this PR was written for — "the guard is `shouldRestore`, not `!shouldRestore`
+    // and not `true`" — is now covered by #42, and covered more strictly: it slices the settlement
+    // closure, asserts `restores.length === 1` inside it, and asserts the captured condition is
+    // EXACTLY `shouldRestore`, so an inversion, a constant or an added disjunct all fail on text
+    // without needing an evaluator. Keeping a second, weaker copy of that here would only add a
+    // second thing to update.
+    //
+    // What #42 does NOT cover is the OTHER restore. Its scope comment says so outright: it excludes
+    // `writeClipboardPreservingOnFailure`, which legitimately restores what its own failed write
+    // clobbered, gated by `pasteboard.changeCount == result.ownershipChangeCount`. Deleting that
+    // gate makes the restore unconditional — clobbering whoever took the pasteboard after our failed
+    // write — and it survived at EXIT 0 across every test file that reads RecordingEngine.swift
+    // (130 pass / 0 fail on main c11bc3d). `restoreGuardConditions` throws on exactly that shape.
+    const conditions = restoreGuardConditions();
+    // A count, so a THIRD restore call has to be argued for here rather than appearing quietly.
+    expect(conditions.length).toBe(2);
+    // Named, not positional: reordering the two sites is a refactor, losing either condition is not.
+    expect(conditions).toContain("shouldRestore");
+    expect(
+      conditions.filter((condition) => condition.includes("changeCount")),
+      "the failed-write restore must stay gated on the change count it owns",
+    ).toHaveLength(1);
   });
 
   test("the restore decision stays exhaustive over every outcome, with no default arm", () => {
