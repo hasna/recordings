@@ -1559,7 +1559,7 @@ program
       }
       writeShortcut(shortcut);
       console.log(chalk.green(`Hotkey set to ${formatShortcut(shortcut)}`));
-      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_ID} ${TOGGLE_RECORDING_DEFAULTS_KEY}`));
+      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_IDENTIFIER} ${TOGGLE_RECORDING_DEFAULTS_KEY}`));
       reportPickup();
       return;
     }
@@ -1569,7 +1569,7 @@ program
       const shortcut = parseShortcutChord(DEFAULT_TOGGLE_RECORDING_CHORD);
       writeShortcut(shortcut);
       console.log(chalk.green(`Hotkey reset to ${formatShortcut(shortcut)}`));
-      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_ID} ${TOGGLE_RECORDING_DEFAULTS_KEY}`));
+      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_IDENTIFIER} ${TOGGLE_RECORDING_DEFAULTS_KEY}`));
       reportPickup();
       return;
     }
@@ -1586,7 +1586,7 @@ program
       }
       writeUseFnKey(enable);
       console.log(chalk.green(`fn/Globe trigger ${enable ? "enabled" : "disabled"}`));
-      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_ID} ${USE_FN_KEY_DEFAULTS_KEY}`));
+      console.log(chalk.dim(`  ${RECORDINGS_BUNDLE_IDENTIFIER} ${USE_FN_KEY_DEFAULTS_KEY}`));
       if (enable) {
         const fnGrant = TRIGGER_GRANT_REQUIREMENTS.find((entry) => entry.id === "fn");
         if (fnGrant?.settingsPath) {
