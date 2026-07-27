@@ -1,0 +1,22 @@
+{
+  // Why this exists: `tsconfig.json` excludes every `*.test.ts`, so `tsc --noEmit` has never
+  // looked at a single test file. That is how a test calling
+  // `runningAppBundlePaths(lister, exists)` — after the signature became `(options)` —
+  // typechecked clean, "passed", and exercised nothing at all.
+  //
+  // Why `files` and not a directory: typechecking the existing suites surfaces pre-existing
+  // errors owned by other lanes (src/http/store.test.ts fetch casts, src/server/repo.test.ts
+  // unknown arg, src/server/v1.test.ts implicit-any fakePg, src/__tests__/
+  // native-app-companion-contract.test.ts stdout typing, src/__tests__/release-guard.test.ts
+  // importing scripts/ from outside rootDir). Turning those into a red `typecheck` for every
+  // other branch is not this change's call. This covers exactly the files this branch owns;
+  // widening it is a follow-up worth doing.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "files": [
+    "src/cli/macos-shortcut.ts",
+    "src/__tests__/macos-shortcut-contract.test.ts"
+  ]
+}

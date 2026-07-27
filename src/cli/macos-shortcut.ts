@@ -35,6 +35,15 @@ import { RECORDINGS_BUNDLE_IDENTIFIER } from "./macos-permissions.js";
  * test keep reading, while there is exactly one definition. The identifier is the same value TCC
  * keys grants to and the same domain the app writes its own preferences under — that is precisely
  * why one owner matters: a bundle that does not carry it is not this app, whatever it is named.
+ *
+ * The same TODO also required reconciling `showGrantTargets()` here with #24's
+ * `describeTccAuthorizationSubject()`. They are NOT the same question and both are kept:
+ * `describeTccAuthorizationSubject()` names the single bundle a TCC grant is being reported FOR
+ * (one path, or a statement that no bundle is installed), while `showGrantTargets()` enumerates
+ * every candidate an operator might have to grant — running instances first, falling back to
+ * installed copies, labelling which case it is reporting. Collapsing them would lose the
+ * multiple-candidate disclosure, which is the whole point of the readout. They now share the one
+ * identifier definition, which is what the ruling was protecting against.
  */
 export const RECORDINGS_BUNDLE_ID = RECORDINGS_BUNDLE_IDENTIFIER;
 
@@ -339,15 +348,25 @@ export function runningAppBundlePaths(probes: BundleScanProbes = {}): string[] {
 /**
  * Whether a path is a bundle of *this* app.
  *
- * The identifier is the invariant, not the name: TCC grants and the UserDefaults domain
- * both key on CFBundleIdentifier. A sibling bundle called "Hasna Recordings.app" whose id
- * is `com.hasna.recordings.launcher` ends with "Recordings.app" and exists on disk, but a
- * grant given to it does nothing for this app — naming it would send the owner to enable
- * the wrong row in the Accessibility list. Check the last path component exactly, then
- * confirm the identifier.
+ * The identifier is the *only* invariant. TCC grants and the UserDefaults domain both key on
+ * CFBundleIdentifier, so that is what decides it — and nothing else may, because every
+ * name-shaped test produces a wrong answer in one direction or the other:
+ *
+ *   - `/Applications/Hasna Recordings.app` (id `com.hasna.recordings.launcher`) ends with
+ *     "Recordings.app" and exists on disk, so a suffix test accepts a bundle a grant would
+ *     do nothing for.
+ *   - a renamed bundle (`/Applications/Dictation.app` carrying `com.hasna.recordings`) and a
+ *     case variant (`recordings.app` on case-insensitive APFS) are genuinely this app, and
+ *     an exact-name test rejects both — the readout then claims "not running" and points the
+ *     grant somewhere else entirely.
+ *
+ * `scripts/install_macos_app.sh` resolves installed copies the same way, by identifier
+ * (`mdfind kMDItemCFBundleIdentifier == 'com.hasna.recordings'`).
+ *
+ * Nothing is lost by dropping the name test: reading the identifier only succeeds for a real
+ * bundle, so a wrapper's argument text or a non-bundle path fails on its own.
  */
 function isThisApp(candidate: string, readBundleIdentifier: BundleIdentifierReader): boolean {
-  if (candidate.slice(candidate.lastIndexOf("/") + 1) !== "Recordings.app") return false;
   return readBundleIdentifier(candidate) === RECORDINGS_BUNDLE_ID;
 }
 

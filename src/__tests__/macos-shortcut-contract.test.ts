@@ -201,13 +201,75 @@ describe("blocked-trigger reporting contract", () => {
     );
   });
 
-  test("the fn monitor sets the reason on failure and clears it on success", () => {
+  test("the fn monitor sets its own half of the reason and clears it on success", () => {
     const updateFnMonitor = engineSource.slice(
       engineSource.indexOf("private func updateFnMonitor("),
       engineSource.indexOf("public func updateStatus()"),
     );
-    expect(updateFnMonitor).toContain("triggerBlockedReason = nil");
-    expect(updateFnMonitor).toContain("triggerBlockedReason = Self.fnAccessibilityBlockedMessage");
+    expect(updateFnMonitor).toContain("fnBlockedReason = nil");
+    expect(updateFnMonitor).toContain("fnBlockedReason = Self.fnAccessibilityBlockedMessage");
+  });
+
+  /**
+   * fn and the hotkey block for different reasons and can block simultaneously. A single
+   * writer would let whichever ran last erase the other, which is the same class of bug as
+   * `updateStatus()` erasing the warning outright.
+   */
+  test("only the compositor writes the published reason", () => {
+    const writes = engineSource.match(/^\s*triggerBlockedReason = /gm) ?? [];
+    expect(writes.length).toBe(1);
+    const compositor = engineSource.slice(
+      engineSource.indexOf("private func recomputeTriggerBlockedReason()"),
+      engineSource.indexOf("static func systemReservedShortcuts()"),
+    );
+    expect(compositor).toContain("triggerBlockedReason = ");
+    expect(compositor).toContain("hotkeyBlockedReason");
+    expect(compositor).toContain("fnBlockedReason");
+  });
+
+  /**
+   * The hotkey is the trigger that actually failed across 51 presses, and it had no blocked
+   * path at all: `getShortcut` is a UserDefaults read, and KeyboardShortcuts 1.12.0 discards
+   * `RegisterEventHotKey`'s OSStatus, so stored config read exactly like a live binding.
+   */
+  test("the hotkey has a blocked path of its own", () => {
+    expect(engineSource).toContain("private func refreshHotkeyDiagnostics()");
+    expect(engineSource).toContain("hotkeyBlockedReason =");
+    // The one arming failure that IS observable: a collision with an enabled system shortcut.
+    expect(engineSource).toContain("CopySymbolicHotKeys");
+    expect(engineSource).toContain("kHISymbolicHotKeyEnabled");
+  });
+
+  test("the trigger log reports stored config as stored, and arming as unknown", () => {
+    // It must not imply arming it cannot observe.
+    expect(engineSource).toContain("shortcutStored=");
+    expect(engineSource).toContain("shortcutArmed=unknown");
+    expect(engineSource).not.toContain('"trigger bindings: shortcut=\\(bound)');
+  });
+
+  /**
+   * A tap dies when Accessibility is revoked at runtime, which no creation-time check sees.
+   * `eventTap != nil` reported a dead tap as running, so the status stayed "Ready" and the
+   * `!isRunning` retry guard blocked recovery.
+   */
+  test("fn liveness is asked of the tap, not of the handle", () => {
+    const isRunning = fnMonitorSource.slice(
+      fnMonitorSource.indexOf("var isRunning: Bool"),
+      fnMonitorSource.indexOf("private static let fnKeyCode"),
+    );
+    expect(isRunning).toContain("CGEvent.tapIsEnabled");
+    expect(isRunning).not.toMatch(/var isRunning: Bool \{ eventTap != nil \}/);
+    // A tap that will not re-enable is torn down so it can be rebuilt.
+    expect(fnMonitorSource).toContain("Re-enable failed");
+  });
+
+  test("the retry path refreshes the visible status, not just the monitor", () => {
+    const health = engineSource.slice(
+      engineSource.indexOf("private func refreshFnMonitorHealth()"),
+      engineSource.indexOf("private func updateFnMonitor("),
+    );
+    expect(health).toContain("updateStatus()");
+    expect(health).toContain("AXIsProcessTrusted()");
   });
 
   test("Settings shows the blocked reason next to the toggle that is blocked", () => {
@@ -307,6 +369,32 @@ describe("running bundle detection", () => {
           path === decoy ? "com.hasna.recordings.launcher" : null,
       }),
     ).toEqual([]);
+  });
+
+  /**
+   * The name is not the invariant and must not be tested. A reviewer measured both of these
+   * returning [] under an exact-name gate: the readout then said "not running" and pointed the
+   * Accessibility grant at some other installed copy — the same wrong-bundle failure the decoy
+   * case causes, just in the opposite direction.
+   */
+  test("accepts a renamed bundle that still carries this app's identifier", () => {
+    const renamed = "/Applications/Dictation.app";
+    expect(
+      runningAppBundlePaths({
+        listProcesses: () => `${renamed}/Contents/MacOS/Recordings`,
+        readBundleIdentifier: appBundles(renamed),
+      }),
+    ).toEqual([renamed]);
+  });
+
+  test("accepts a case-variant bundle name, as case-insensitive APFS produces", () => {
+    const variant = "/Applications/recordings.app";
+    expect(
+      runningAppBundlePaths({
+        listProcesses: () => `${variant}/Contents/MacOS/Recordings`,
+        readBundleIdentifier: appBundles(variant),
+      }),
+    ).toEqual([variant]);
   });
 
   test("rejects a bundle named Recordings.app whose identifier is not this app", () => {
