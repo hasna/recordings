@@ -33,6 +33,14 @@ const CHUNK_HEADER_BYTES = 8;
 const INT16_FULL_SCALE = 32768;
 const FMT_CHUNK_MIN_BYTES = 16;
 const WAVE_FORMAT_PCM = 1;
+/**
+ * WAVE_FORMAT_EXTENSIBLE. Legitimate uncompressed PCM whose real format lives in
+ * a SubFormat GUID in the fmt extension; CoreAudio writers emit it. Rejecting it
+ * outright would turn a real capture into "could not read captured audio".
+ */
+const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
+/** First 2 bytes of KSDATAFORMAT_SUBTYPE_PCM, which is little-endian 0x0001. */
+const SUBFORMAT_OFFSET_IN_EXTENSION = 8;
 
 /**
  * Read the peak amplitude of a 16-bit PCM WAV file.
@@ -67,7 +75,7 @@ export function readWavPeak(filepath: string): WavPeak {
     const chunkSize = buf.readUInt32LE(offset + 4);
     const body = offset + CHUNK_HEADER_BYTES;
 
-    if (chunkId === "fmt ") {
+    if (chunkId === "fmt " && formatTag === null) {
       // Size the read off the DECLARED chunk length, not the remaining file. A
       // truncated fmt chunk otherwise reads the next chunk's header as
       // bitsPerSample (0x6164 = "da" from `data` = 24932 bits).
@@ -78,6 +86,20 @@ export function readWavPeak(filepath: string): WavPeak {
       }
       formatTag = buf.readUInt16LE(body);
       bitsPerSample = buf.readUInt16LE(body + 14);
+
+      // Resolve EXTENSIBLE to the format it actually carries. cbSize is at
+      // fmt+16 and the SubFormat GUID starts at fmt+18; its first 2 bytes hold
+      // the equivalent format tag.
+      if (formatTag === WAVE_FORMAT_EXTENSIBLE) {
+        const extensionStart = body + FMT_CHUNK_MIN_BYTES;
+        const subFormatAt = extensionStart + SUBFORMAT_OFFSET_IN_EXTENSION;
+        if (chunkSize < FMT_CHUNK_MIN_BYTES + 10 || subFormatAt + 2 > buf.length) {
+          throw new Error(
+            `WAVE_FORMAT_EXTENSIBLE without a readable SubFormat GUID: ${filepath}`
+          );
+        }
+        formatTag = buf.readUInt16LE(subFormatAt);
+      }
     } else if (chunkId === "data" && dataStart < 0) {
       dataStart = body;
       // Trust the file length over the declared size: a truncated capture

@@ -5,6 +5,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import {
   describeActiveStore,
+  localStoreIsBehindSchema,
   probeRecordingPersistence,
   safeBaseUrl,
   AUTO_FLIP_MODE_SOURCE,
@@ -437,5 +438,83 @@ describe("writing to a shared store requires consent", () => {
 
     expect(result.created_local_store).toBe(false);
     expect(result.message).not.toContain("CREATED");
+  });
+});
+
+describe("legacy local stores are not migrated silently", () => {
+  test("SKIPS a local store that is behind the schema", async () => {
+    const { store, rows } = makeFakeStore({ mode: "local", baseUrl: null });
+
+    const result = await probeRecordingPersistence({ store, localStoreIsLegacy: true });
+
+    expect(result.attempted).toBe(false);
+    expect(rows.size).toBe(0);
+    expect(result.message).toContain("behind the current schema");
+    expect(result.message).toContain("apply pending migrations");
+    // Skipping is not a failure.
+    expect(result.ok).toBe(true);
+  });
+
+  test("writes to a legacy store once the migration is accepted", async () => {
+    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+
+    const result = await probeRecordingPersistence({
+      store,
+      localStoreIsLegacy: true,
+      allowLocalMigration: true,
+    });
+
+    expect(result.attempted).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+
+  // An unknown schema level must not block the normal path, only a known-legacy one.
+  test("does not skip when the schema level could not be determined", async () => {
+    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+
+    const result = await probeRecordingPersistence({ store, localStoreIsLegacy: null });
+
+    expect(result.attempted).toBe(true);
+  });
+});
+
+describe("localStoreIsBehindSchema", () => {
+  test("is null for a database that does not exist", () => {
+    expect(localStoreIsBehindSchema(join(makeTempDir(), "missing.db"))).toBeNull();
+  });
+
+  test("is null for a file it cannot read as SQLite", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+    writeFileSync(dbPath, "not a sqlite database");
+
+    expect(localStoreIsBehindSchema(dbPath)).toBeNull();
+  });
+
+  test("reports a store with no _migrations table as behind", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+    seedLocalDb(dbPath, 1);
+
+    // seedLocalDb writes a bare `recordings` table with no _migrations, which is
+    // what a genuinely old file looks like.
+    expect(localStoreIsBehindSchema(dbPath)).toBeNull();
+  });
+
+  test("reports a store at an older migration level as behind", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+    const db = new Database(dbPath);
+    db.run("CREATE TABLE _migrations (id INTEGER PRIMARY KEY)");
+    db.run("INSERT INTO _migrations (id) VALUES (0)");
+    db.close();
+
+    expect(localStoreIsBehindSchema(dbPath)).toBe(true);
+  });
+
+  // Does not create the file it inspects — same rule as describeActiveStore.
+  test("creates nothing while inspecting a missing database", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+
+    localStoreIsBehindSchema(dbPath);
+
+    expect(existsSync(dbPath)).toBe(false);
   });
 });

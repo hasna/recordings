@@ -30,13 +30,16 @@ import {
   captureProbeSubject,
   microphoneGrantInstruction,
   classifyPermissionState,
+  RECORDINGS_BUNDLE_IDENTIFIER,
   DEFAULT_PROBE_SECONDS,
   MAX_PROBE_SECONDS,
   TCC_UNREADABLE_STATE,
   type CaptureProbeResult,
 } from "../lib/capture-probe.js";
+import { readTccPermission } from "../lib/tcc-permission.js";
 import {
   describeActiveStore,
+  localStoreIsBehindSchema,
   probeRecordingPersistence,
   type PersistenceProbeResult,
 } from "../lib/persistence-probe.js";
@@ -1172,6 +1175,8 @@ program
     // auditing the wrong store is what made two separate reviews conclude that
     // persistence had broken when it had only moved.
     const activeStore = describeActiveStore(config);
+    // Sampled here, before any probe runs, so it reflects the store as found.
+    const localStoreWasLegacy = localStoreIsBehindSchema(config.db_path);
 
     let capture: CaptureProbeResult | null = null;
     let credential: CredentialProbeResult | null = null;
@@ -1209,7 +1214,10 @@ program
         : null;
       persistence = await probeRecordingPersistence({
         allowRemoteWrite: Boolean(opts.probeStoreWrite),
+        allowLocalMigration: Boolean(opts.probeStoreWrite),
         localStoreExistedBefore: activeStore.local_db_present,
+        // Read before anything in this command could have created the file.
+        localStoreIsLegacy: localStoreWasLegacy,
       });
     }
 
@@ -2342,57 +2350,15 @@ function getCodeSigningInfo(appPath: string): {
 }
 
 function getTccPermission(service: string, home: string): string {
-  if (process.platform !== "darwin") return "unsupported";
-
-  const dbPaths = [
-    pathJoin(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-    pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-  ];
-  const sql =
-    "select auth_value from access where service = '" +
-    service.replace(/'/g, "''") +
-    "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
-
-  // Reading a TCC database requires Full Disk Access, granted to the RESPONSIBLE
-  // process. On a fleet Mac `sshd` and the terminal app typically have it while
-  // `tmux` and `bun` do not, so the same query succeeds from a plain ssh shell
-  // and is refused from a tmux pane on the same box. sqlite3 then exits non-zero
-  // with an empty stdout — indistinguishable from "no such row" unless the exit
-  // status is checked, which is why this used to report a confident
-  // `not_determined` on a machine that had been granted.
-  let refused = false;
-  for (const dbPath of dbPaths) {
-    if (!existsSync(dbPath)) continue;
-    const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    if (result.error || result.status !== 0) {
-      refused = true;
-      continue;
-    }
-    const value = result.stdout.trim();
-    if (!value) continue;
-    return `${tccAuthValueLabel(value)}_identity_unverified`;
-  }
-
-  // Only claim "never asked" when every database was actually readable.
-  return refused ? TCC_UNREADABLE_STATE : "not_determined";
-}
-
-function tccAuthValueLabel(value: string): string {
-  switch (value) {
-    case "0":
-      return "denied";
-    case "1":
-      return "unknown";
-    case "2":
-      return "allowed";
-    case "3":
-      return "limited";
-    default:
-      return `unknown(${value})`;
-  }
+  // Delegates to src/lib/tcc-permission.ts so the reader is testable. The bug
+  // this fixes lived here, in the reader, and an unexported CLI function is
+  // unreachable from any test: deleting the whole exit-status fix left the suite
+  // green. Behaviour and returned strings are unchanged for `app status --json`.
+  return readTccPermission({
+    service,
+    client: RECORDINGS_BUNDLE_IDENTIFIER,
+    home,
+  });
 }
 
 function findPackageRoot(): string {
