@@ -41,7 +41,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:tcc-contract": "tsc --noEmit -p tsconfig.tcc-contract.json",
     "test": "bun test",
-    "test:vacuity-battery": "bun scripts/vacuity-mutation-battery.ts scripts/vacuity-manifests/corrupt-sites.tsv",
+    "test:vacuity-battery": "bun scripts/vacuity-manifest-gen.ts > \"${TMPDIR:-/tmp}/vacuity-corrupt-sites.tsv\" && bun scripts/vacuity-mutation-battery.ts \"${TMPDIR:-/tmp}/vacuity-corrupt-sites.tsv\"",
     "test:vacuity-battery:source": "bun scripts/vacuity-mutation-battery.ts scripts/vacuity-manifests/source-side.tsv",
     "test:vacuity-battery:chain": "bun scripts/vacuity-mutation-battery.ts scripts/vacuity-manifests/install-chain.tsv",
     "test:vacuity-battery:vars": "bun scripts/vacuity-mutation-battery.ts scripts/vacuity-manifests/variable-operands.tsv",

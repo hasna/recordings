@@ -57,8 +57,15 @@ const only = onlyIndex >= 0 ? rest[onlyIndex + 1] : undefined;
 const rows: Row[] = readFileSync(manifestPath, "utf8")
   .split("\n")
   .filter((line) => line.trim() && !line.startsWith("#"))
-  .map((line) => {
+  .map((line, index) => {
     const [kind, testFile, testName, target, a, b] = line.split("\t");
+    // Fail loudly on a malformed row. Redirecting the generator with `2>&1` merges its progress line
+    // into the manifest, which parsed as a row with an undefined target and crashed the driver 164
+    // rows in — after all the expensive work, and with a stack trace that named the wrong cause.
+    if (!kind || !testFile || !testName || !target) {
+      console.error(`manifest line ${index + 1} is malformed (${line.split("\t").length} fields): ${line.slice(0, 120)}`);
+      process.exit(2);
+    }
     return { kind: kind as Kind, testFile, testName, target, a: a ?? "", b: b ?? "" };
   })
   .filter((r) => !only || `${r.testFile} ${r.testName} ${r.a}`.includes(only));
