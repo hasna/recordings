@@ -29,8 +29,10 @@ import {
   probeMicrophoneCapture,
   captureProbeSubject,
   microphoneGrantInstruction,
-  permissionStateProvesRequest,
+  classifyPermissionState,
   DEFAULT_PROBE_SECONDS,
+  MAX_PROBE_SECONDS,
+  TCC_UNREADABLE_STATE,
   type CaptureProbeResult,
 } from "../lib/capture-probe.js";
 import {
@@ -1165,8 +1167,12 @@ program
   )
   .option(
     "--probe-seconds <seconds>",
-    "Length of the capture probe in seconds",
+    `Length of the capture probe in seconds (1-${MAX_PROBE_SECONDS})`,
     String(DEFAULT_PROBE_SECONDS)
+  )
+  .option(
+    "--probe-store-write",
+    "Allow the persistence probe to write a marker recording to a SHARED API store. Off by default: that store is production for every machine pointed at it"
   )
   .action(async (opts) => {
     const config = loadConfig();
@@ -1175,7 +1181,11 @@ program
     // Check recording deps
     const deps = await checkRecordingDeps();
     const enhKey = config.enhancement_api_key || config.openai_api_key;
+    // Two distinct roles with distinct models AND distinct keys. Probing one
+    // with the other's credential produces a red tick on a working machine, and
+    // a green one on a machine whose transcription model is unavailable.
     const transcriberModel = resolveTranscriberModel(config);
+    const transcriptionModel = config.transcription_model;
 
     // macOS capture permissions are part of "can this machine record at all".
     // Omitting them is why a fully-green `check` could coexist with an app that
@@ -1191,12 +1201,15 @@ program
 
     let capture: CaptureProbeResult | null = null;
     let credential: CredentialProbeResult | null = null;
+    let enhancementCredential: CredentialProbeResult | null = null;
     let persistence: PersistenceProbeResult | null = null;
 
     if (opts.probe) {
       const parsedSeconds = Number.parseInt(String(opts.probeSeconds), 10);
+      // Bounded: an unbounded --probe-seconds blocked the command for as long as
+      // the operator mistyped, with no output.
       const seconds = Number.isFinite(parsedSeconds) && parsedSeconds > 0
-        ? parsedSeconds
+        ? Math.min(parsedSeconds, MAX_PROBE_SECONDS)
         : DEFAULT_PROBE_SECONDS;
 
       capture = deps.available
@@ -1210,14 +1223,27 @@ program
             silent: true,
             message: deps.message,
           };
-      credential = await verifyTranscriptionCredential(config, transcriberModel);
-      persistence = await probeRecordingPersistence();
+      credential = await verifyTranscriptionCredential(config, transcriptionModel, {
+        apiKey: config.openai_api_key,
+        role: "transcription",
+      });
+      enhancementCredential = enhKey
+        ? await verifyTranscriptionCredential(config, transcriberModel, {
+            apiKey: enhKey,
+            role: "enhancement",
+          })
+        : null;
+      persistence = await probeRecordingPersistence({
+        allowRemoteWrite: Boolean(opts.probeStoreWrite),
+        localStoreExistedBefore: activeStore.local_db_present,
+      });
     }
 
     const probeFailed = Boolean(
       opts.probe &&
         ((capture && !capture.ok) ||
           (credential && !credential.ok) ||
+          (enhancementCredential && !enhancementCredential.ok) ||
           (persistence && !persistence.ok))
     );
 
@@ -1247,10 +1273,11 @@ program
           ? microphoneGrantInstruction({
               installedAppPath: macStatus.installed_app_path,
               otherAppPaths: macStatus.legacy_install_paths,
-              everRequested: permissionStateProvesRequest(macStatus.microphone_permission),
+              requestState: classifyPermissionState(macStatus.microphone_permission),
             })
           : null,
         credential_probe: credential,
+        enhancement_credential_probe: enhancementCredential,
         persistence_probe: persistence,
       }, null, 2));
       if (probeFailed) process.exitCode = 1;
@@ -1281,7 +1308,8 @@ program
     // Check enhancement key
     if (enhKey) {
       console.log(
-        chalk.green(`✓ Enhancement API key present (model: ${transcriberModel})`)
+        chalk.green(`✓ Enhancement API key present (model: ${transcriberModel})`) +
+          chalk.dim(opts.probe ? "" : " (presence only — 'recordings check --probe' verifies it is accepted)")
       );
     } else {
       console.log(
@@ -1309,12 +1337,38 @@ program
     }
 
     if (macStatus) {
-      const micOk = macStatus.microphone_permission.startsWith("allowed");
+      const micState = macStatus.microphone_permission;
+      const micOk = micState.startsWith("allowed");
+      const micUnreadable = micState === TCC_UNREADABLE_STATE;
+      // Three outcomes, three markers. A refused database read is not a denial,
+      // and rendering it red-with-instructions told operators to grant a
+      // permission that was already granted.
       console.log(
-        (micOk ? chalk.green("✓") : chalk.red("✗")) +
-          ` Microphone permission: ${macStatus.microphone_permission}`
+        (micOk ? chalk.green("✓") : micUnreadable ? chalk.yellow("?") : chalk.red("✗")) +
+          ` Microphone permission: ${micState}`
       );
-      if (!micOk) {
+      if (micOk) {
+        // The value's own suffix says the signing identity was never checked
+        // against the installed bundle, so a bare green tick overstates it.
+        console.log(
+          chalk.dim(
+            "  Note: this is the TCC row for bundle id com.hasna.recordings. The row's code-signing " +
+              "requirement was NOT verified against the installed bundle, so a bundle re-signed with " +
+              "a different identity can still be denied at runtime. Confirm in the app's log."
+          )
+        );
+      }
+      if (micUnreadable) {
+        console.log(
+          chalk.dim(
+            "  Could not read the TCC database: that needs Full Disk Access for whatever process " +
+              "runs this command, which tmux and bun usually lack while sshd and the terminal app " +
+              "have it. This is NOT a denial and NOT proof the app never asked — re-run from a " +
+              "plain ssh shell or a terminal with Full Disk Access."
+          )
+        );
+      }
+      if (!micOk && !micUnreadable) {
         console.log(
           chalk.dim(
             "  Recordings.app cannot capture audio without this. macOS does not error when it is " +
@@ -1325,7 +1379,7 @@ program
         const instruction = microphoneGrantInstruction({
           installedAppPath: macStatus.installed_app_path,
           otherAppPaths: macStatus.legacy_install_paths,
-          everRequested: permissionStateProvesRequest(macStatus.microphone_permission),
+          requestState: classifyPermissionState(macStatus.microphone_permission),
         });
         for (const [index, step] of instruction.steps.entries()) {
           console.log(chalk.dim(`  ${index + 1}. ${step}`));
@@ -1346,12 +1400,22 @@ program
       );
       // Whose grant this exercised. Without it a green tick here reads as
       // "the app can record", which it never proves.
-      console.log(chalk.dim(`  subject: ${captureProbeSubject().note}`));
+      const subject = captureProbeSubject();
+      console.log(
+        chalk.dim(`  subject: ${subject.note}`) +
+          (subject.subject_known ? "" : chalk.yellow(" [subject unidentified — inconclusive]"))
+      );
     }
     if (credential) {
       console.log(
         (credential.ok ? chalk.green("✓") : chalk.red("✗")) +
-          ` Transcription credential: ${credential.message}`
+          ` Transcription credential (${credential.model}): ${credential.message}`
+      );
+    }
+    if (enhancementCredential) {
+      console.log(
+        (enhancementCredential.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Enhancement credential (${enhancementCredential.model}): ${enhancementCredential.message}`
       );
     }
     if (persistence) {
@@ -2408,6 +2472,14 @@ function getCodeSigningInfo(appPath: string): {
 /// Reports the authorization state for one TCC service. An `allowed` row is only reported
 /// as `allowed` when the grant's stored code requirement still validates against the
 /// installed bundle — see `resolveTccPermission`.
+///
+/// Rebase note (#24 x #25): this branch previously carried its own `getTccPermission()` plus a
+/// local `tccAuthValueLabel()`, which returned a flat `"<label>_identity_unverified"` string for
+/// every readable row. `macos-permissions.ts` (#24) supersedes both: it verifies the grant's
+/// stored code requirement against the installed bundle, so it can distinguish a genuinely
+/// verified `allowed` from `allowed_identity_unverified`, and it reads "no such table" as
+/// absence rather than refusal. The local copies were deleted rather than kept alongside it —
+/// two readers of one TCC database would disagree exactly where verification matters.
 function getTccGrant(service: string, home: string, appPath: string | null): TccGrantReport {
   if (process.platform !== "darwin") {
     return { state: "unsupported", storedRequirement: null, durability: "unknown" };

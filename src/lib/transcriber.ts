@@ -46,6 +46,8 @@ export interface CredentialProbeResult {
   /** HTTP status when the API answered, null when we never reached it. */
   status: number | null;
   model: string;
+  /** Which configured role this probe covered: transcription or enhancement. */
+  role: "transcription" | "enhancement";
   message: string;
 }
 
@@ -54,32 +56,48 @@ export interface CredentialProbeResult {
  * present in config.
  *
  * A non-empty string in `openai_api_key` proves nothing: any placeholder
- * satisfies it. This makes one real authenticated request against the model the
- * transcriber would actually use, so a rejected or revoked key surfaces as a
- * failure instead of a green tick.
+ * satisfies it. This makes one real authenticated request, so a rejected or
+ * revoked key surfaces as a failure instead of a green tick.
+ *
+ * The model and key must be passed in as a matched PAIR, and the caller must not
+ * mix roles. An earlier version probed `resolveTranscriberModel(config)` — which
+ * is `transcriber_model || enhancement_model`, the POST-PROCESSING model — using
+ * `openai_api_key`, under a line labelled "Transcription credential". Two ways
+ * to be wrong: with split keys it retrieved the enhancement model with the
+ * transcription key and printed a red 404 on a working machine; and it never
+ * touched `config.transcription_model`, the model `transcribeAudio` actually
+ * uses, so that model being unavailable produced a green tick.
  *
  * Scope note: this proves authentication and model access. It does not prove
  * quota or that a given audio file will transcribe.
  */
 export async function verifyTranscriptionCredential(
   config: RecordingsConfig,
-  model: string
+  model: string,
+  options: { apiKey?: string; role?: "transcription" | "enhancement" } = {}
 ): Promise<CredentialProbeResult> {
-  if (!config.openai_api_key) {
+  const role = options.role ?? "transcription";
+  const apiKey = options.apiKey ?? config.openai_api_key;
+  if (!apiKey) {
     return {
       ok: false,
       status: null,
       model,
+      role,
       message:
-        "no OpenAI API key configured. Set OPENAI_API_KEY env var or add to ~/.secrets",
+        `no API key configured for the ${role} role. ` +
+        "Set OPENAI_API_KEY env var or add to ~/.secrets",
     };
   }
 
   let client: OpenAI;
   try {
-    client = getClient(config);
+    // A throwaway client, not getClient(): that one caches by key at module
+    // scope, so probing the enhancement role would evict the transcription
+    // client and leave the wrong key cached for whatever ran next.
+    client = new OpenAI({ apiKey });
   } catch (error) {
-    return { ok: false, status: null, model, message: (error as Error).message };
+    return { ok: false, status: null, model, role, message: (error as Error).message };
   }
 
   try {
@@ -88,7 +106,8 @@ export async function verifyTranscriptionCredential(
       ok: true,
       status: 200,
       model,
-      message: `credential accepted; model '${retrieved.id ?? model}' reachable`,
+      role,
+      message: `credential accepted; ${role} model '${retrieved.id ?? model}' reachable`,
     };
   } catch (error) {
     const status =
@@ -106,7 +125,8 @@ export async function verifyTranscriptionCredential(
       ok: false,
       status,
       model,
-      message: `credential check failed${status ? ` (HTTP ${status})` : ""}: ${detail}${hint}`,
+      role,
+      message: `${role} credential check failed${status ? ` (HTTP ${status})` : ""}: ${detail}${hint}`,
     };
   }
 }
