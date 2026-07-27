@@ -300,6 +300,38 @@ describe("TCC grant durability across rebuilds", () => {
       classifyTccGrantDurability({ designatedRequirement: null, adHocSigned: false }),
     ).toBe("unknown");
   });
+
+  /// A bundle identifier is free to contain the word "cdhash". Classifying on the raw text
+  /// would call this certificate-anchored grant pinned, and so warn about a revocation that
+  /// is not going to happen.
+  test("cdhash inside a quoted identifier does not count as a cdhash term", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement:
+          'identifier "com.example.cdhash-tool" and certificate root = H"6eb85e38b7750391e313d7ed4119972cb4bddfe4"',
+        adHocSigned: false,
+      }),
+    ).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  test("an anchor-hash requirement is recognised as certificate anchored", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement: 'identifier "com.hasna.recordings" and anchor H"6eb85e38b775"',
+        adHocSigned: false,
+      }),
+    ).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  /// `anchor apple` (the platform-binary anchor) is not `anchor apple generic` (Developer ID).
+  test("plain anchor apple is not reported as a Developer ID requirement", () => {
+    expect(
+      classifyTccGrantDurability({
+        designatedRequirement: 'identifier "com.apple.Something" and anchor apple',
+        adHocSigned: false,
+      }),
+    ).not.toBe("survives_rebuild_developer_id");
+  });
 });
 
 /// A CLI inherits its terminal's Accessibility grant, so a report that does not name its

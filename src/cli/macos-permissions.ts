@@ -263,9 +263,14 @@ export function classifyTccGrantDurability(options: {
 
   const requirement = options.designatedRequirement?.trim();
   if (!requirement) return "unknown";
-  if (/\bcdhash\b/i.test(requirement)) return "dies_on_rebuild_cdhash_pinned";
-  if (/\banchor\s+apple\s+generic\b/i.test(requirement)) return "survives_rebuild_developer_id";
-  if (/\bcertificate\s+(root|leaf|\d+)\b|\banchor\s+H"/i.test(requirement)) {
+
+  // Quoted spans are data — a bundle identifier is free to contain "cdhash", and matching it
+  // there would misreport a certificate-anchored grant as pinned. Requirement *operators*
+  // live outside the quotes, so drop the quoted spans before classifying.
+  const operators = requirement.replace(/"[^"]*"/g, '""');
+  if (/\bcdhash\b/i.test(operators)) return "dies_on_rebuild_cdhash_pinned";
+  if (/\banchor\s+apple\s+generic\b/i.test(operators)) return "survives_rebuild_developer_id";
+  if (/\bcertificate\s+(root|leaf|\d+)\b|\banchor\s+H""/i.test(operators)) {
     return "survives_rebuild_certificate_anchored";
   }
   return "unknown";
