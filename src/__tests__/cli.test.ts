@@ -497,8 +497,16 @@ describe("recordings CLI", () => {
     expect(cli).toContain("createInstallerEnvironment(process.env, bunExecutable)");
     expect(installAction).toContain("getMacOSInstallerPath()");
     expect(installAction).not.toContain("getMacOSAppStatus()");
+    // Every OS binary the permission surface shells out to stays absolute-path pinned, so a
+    // hostile PATH cannot substitute the signature reader or the TCC reader. `sqlite3` and the
+    // requirement evaluator moved into macos-permissions.ts; the pinning contract travelled
+    // with them.
+    const permissions = readFileSync("src/cli/macos-permissions.ts", "utf8");
     expect(cli).toContain('spawnSync("/usr/bin/codesign"');
-    expect(cli).toContain('spawnSync("/usr/bin/sqlite3"');
+    expect(permissions).toContain('"/usr/bin/sqlite3"');
+    expect(permissions).toContain('"/usr/bin/codesign"');
+    expect(permissions).not.toContain('spawnSync("sqlite3"');
+    expect(permissions).not.toContain('spawnSync("codesign"');
     expect(cli).not.toContain('key.startsWith("RECORDINGS_TEST_INSTALL_")');
     expect(cli).not.toContain('spawnSync("bash", installerArgs');
     expect(installer.startsWith("#!/bin/bash\n")).toBeTrue();
@@ -731,14 +739,31 @@ describe("recordings CLI", () => {
 
   test("app status never treats a CDHash substring as permission identity proof", () => {
     const cli = readFileSync("src/cli/index.ts", "utf8");
+    const permissions = readFileSync("src/cli/macos-permissions.ts", "utf8");
     const permissionReader = cli.slice(
       cli.indexOf("function getTccPermission"),
-      cli.indexOf("function tccAuthValueLabel"),
+      cli.indexOf("function findPackageRoot"),
     );
 
+    // The reader delegates and never re-implements an identity heuristic inline.
+    expect(permissionReader).toContain("resolveTccPermission({ service, home, appPath })");
     expect(permissionReader).not.toContain("currentCodeHash");
-    expect(permissionReader).not.toContain("csreqHex");
-    expect(permissionReader).toContain("_identity_unverified");
+    expect(permissionReader).not.toContain("auth_value");
+
+    // The stored grant requirement is settled by codesign evaluating the csreq blob against
+    // the installed bundle — never by searching the blob for a CDHash substring, which is
+    // both spoofable and wrong for certificate-rooted requirements (they carry no CDHash).
+    expect(permissions).toContain(
+      '["--verify", "--verbose=2", "-R", requirementPath, appPath]',
+    );
+    expect(permissions).not.toContain("currentCodeHash");
+    expect(permissions).not.toMatch(/csreqHex[^\n]*\.includes\(/);
+    expect(permissions).not.toMatch(/\.includes\([^)]*cdHash/i);
+
+    // And an `allowed` row is never reported as `allowed` on its own: it has to survive
+    // verification first. Behavioural coverage lives in macos-permissions.test.ts.
+    expect(permissions).toContain("stale_allowed_for_previous_app_build");
+    expect(permissions).toContain("allowed_identity_unverified");
   });
 
   test("app status is compact by default and verbose on request", async () => {

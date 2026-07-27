@@ -25,7 +25,11 @@ import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
-import { runMacOSPermissionRequest } from "./macos-permissions.js";
+import {
+  RECORDINGS_BUNDLE_IDENTIFIER,
+  resolveTccPermission,
+  runMacOSPermissionRequest,
+} from "./macos-permissions.js";
 import { currentMachineId } from "../lib/machine.js";
 import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 import {
@@ -1004,7 +1008,7 @@ appCommand
     const status = getMacOSAppStatus();
     const permissions = {
       platform: status.platform,
-      bundle_id: "com.hasna.recordings",
+      bundle_id: RECORDINGS_BUNDLE_IDENTIFIER,
       installed_app_path: status.installed_app_path,
       legacy_install_paths: status.legacy_install_paths,
       microphone: status.microphone_permission,
@@ -2042,8 +2046,10 @@ function getMacOSAppStatus(): MacOSAppStatus {
     team_identifier: signingInfo.teamIdentifier,
     designated_requirement: signingInfo.designatedRequirement,
     signature_authorities: signingInfo.authorities,
-    microphone_permission: permissionStatus ?? getTccPermission("kTCCServiceMicrophone", home),
-    accessibility_permission: permissionStatus ?? getTccPermission("kTCCServiceAccessibility", home),
+    microphone_permission: permissionStatus
+      ?? getTccPermission("kTCCServiceMicrophone", home, installedAppPath),
+    accessibility_permission: permissionStatus
+      ?? getTccPermission("kTCCServiceAccessibility", home, installedAppPath),
     log_path: logPath,
   };
 }
@@ -2069,7 +2075,7 @@ function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] 
 function resetMacOSPermissions(): void {
   const services = ["Microphone", "Accessibility"];
   for (const service of services) {
-    const result = spawnSync("tccutil", ["reset", service, "com.hasna.recordings"], {
+    const result = spawnSync("tccutil", ["reset", service, RECORDINGS_BUNDLE_IDENTIFIER], {
       stdio: "inherit",
     });
     if (result.error) {
@@ -2111,45 +2117,12 @@ function getCodeSigningInfo(appPath: string): {
   return { cdHash, adHoc, identifier, teamIdentifier, designatedRequirement, authorities };
 }
 
-function getTccPermission(service: string, home: string): string {
+/// Reports the authorization state for one TCC service. An `allowed` row is only reported
+/// as `allowed` when the grant's stored code requirement still validates against the
+/// installed bundle — see `resolveTccPermission`.
+function getTccPermission(service: string, home: string, appPath: string | null): string {
   if (process.platform !== "darwin") return "unsupported";
-
-  const dbPaths = [
-    pathJoin(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-    pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-  ];
-  const sql =
-    "select auth_value from access where service = '" +
-    service.replace(/'/g, "''") +
-    "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
-
-  for (const dbPath of dbPaths) {
-    if (!existsSync(dbPath)) continue;
-    const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const value = result.stdout.trim();
-    if (!value) continue;
-    return `${tccAuthValueLabel(value)}_identity_unverified`;
-  }
-
-  return "not_determined";
-}
-
-function tccAuthValueLabel(value: string): string {
-  switch (value) {
-    case "0":
-      return "denied";
-    case "1":
-      return "unknown";
-    case "2":
-      return "allowed";
-    case "3":
-      return "limited";
-    default:
-      return `unknown(${value})`;
-  }
+  return resolveTccPermission({ service, home, appPath });
 }
 
 function findPackageRoot(): string {
