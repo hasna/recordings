@@ -7,6 +7,7 @@ import {
   pingCloudReadiness,
 } from "./cloud-readiness.js";
 import type { PgAdapterAsync } from "../db/remote-storage.js";
+import { sliceBetween } from "../__tests__/helpers/source-assertions";
 
 const REQUIRED_COLUMNS = {
   projects: {
@@ -498,6 +499,21 @@ describe("cloud migration parity", () => {
       /alter column recording_id drop not null/i.test(ddl)
     );
 
+    // These run BEFORE the shape assertions, which is the only position where they do any work: a
+    // `toMatch` against `undefined` already throws, so a presence check placed after one can never
+    // be the assertion that fires. Named, they say which migration is missing instead of surfacing
+    // as a type error on a regex.
+    //
+    // `expectOrder` does not apply to the ordering below: the haystack is the migration array, not
+    // a source string, so `indexOf` is `Array.prototype`'s. Nor does that ordering carry the -1
+    // hole this sweep is about — `find` returns an array MEMBER, and `indexOf` of a member it just
+    // returned cannot be -1. The failure mode here is `undefined`, not -1, which is what these two
+    // checks cover and why the site keeps a raw comparison.
+    expect(createMigration, "no PG migration creates recording_idempotency").toBeDefined();
+    expect(
+      tombstoneMigration,
+      "no PG migration relaxes recording_id for tombstones",
+    ).toBeDefined();
     expect(createMigration).toMatch(
       /recording_id\s+text\s+not null\s+unique\s+references\s+recordings\(id\)\s+on delete cascade/i,
     );
@@ -508,11 +524,23 @@ describe("cloud migration parity", () => {
       PG_MIGRATIONS.indexOf(createMigration!),
     );
 
-    const canonicalCreate = canonical.indexOf("CREATE TABLE IF NOT EXISTS recording_idempotency");
+    // The canonical schema has to create the table with ON DELETE CASCADE and only later relax it,
+    // and the CASCADE claim is made over the region between the two.
+    //
+    // Unlike the rest of this sweep, this site was ALREADY sound: it guarded its start bound with
+    // `toBeGreaterThan(-1)` and its end bound against the start, so neither could be -1. Converting
+    // it buys only the non-trivial-region floor and one fewer hand-written guard to get wrong next
+    // time. Recorded plainly because claiming a hole here that the previous code did not have would
+    // be the same defect as the vacuous assertions this PR removes, one level up.
+    const canonicalCreateToUpgrade = sliceBetween(
+      canonical,
+      "CREATE TABLE IF NOT EXISTS recording_idempotency",
+      "ALTER COLUMN recording_id DROP NOT NULL",
+    );
+    expect(canonicalCreateToUpgrade).toMatch(/on delete cascade/i);
+    // Reached only once `sliceBetween` has proven the ALTER exists, so this offset cannot be -1 —
+    // which would have sliced the last character and matched nothing.
     const canonicalUpgrade = canonical.indexOf("ALTER COLUMN recording_id DROP NOT NULL");
-    expect(canonicalCreate).toBeGreaterThan(-1);
-    expect(canonicalUpgrade).toBeGreaterThan(canonicalCreate);
-    expect(canonical.slice(canonicalCreate, canonicalUpgrade)).toMatch(/on delete cascade/i);
     expect(canonical.slice(canonicalUpgrade)).toMatch(/on delete set null/i);
   });
 });

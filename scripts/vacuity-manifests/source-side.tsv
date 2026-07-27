@@ -1,0 +1,15 @@
+# Source-side mutations for sites whose expectOrder operands are VARIABLES, so the offset-precise
+# test-literal corruption cannot reach them. Occurrence indices are load-bearing.
+delete	src/__tests__/release-output-publication-contract.test.ts	package notarization also verifies the log digest before stapling	packaging/macos/build_release_pkg.sh	SUBMITTED_PKG_SHA256="$(sha256_file "$PKG")"	1
+delete	src/__tests__/release-output-publication-contract.test.ts	package notarization also verifies the log digest before stapling	packaging/macos/build_release_pkg.sh	"$STAGED_VERIFIER" assert-notary-log	1
+delete	src/__tests__/release-output-publication-contract.test.ts	package notarization also verifies the log digest before stapling	packaging/macos/build_release_pkg.sh	--submitted-archive-sha256 "$SUBMITTED_PKG_SHA256"	1
+delete	src/__tests__/release-output-publication-contract.test.ts	package notarization also verifies the log digest before stapling	packaging/macos/build_release_pkg.sh	/usr/bin/xcrun stapler staple	1
+swap	src/__tests__/release-output-publication-contract.test.ts	package notarization also verifies the log digest before stapling	packaging/macos/build_release_pkg.sh	--submission-id	--submitted-archive-sha256
+delete	src/__tests__/macos-smoke-process-identity.test.ts	uses challenge-bound completion with identity-verified failure cleanup	src/native/Recordings/App/RecordingsApp.swift	options: .atomic	2
+duplicate	src/__tests__/macos-smoke-process-identity.test.ts	uses challenge-bound completion with identity-verified failure cleanup	src/native/Recordings/App/RecordingsApp.swift	Darwin._exit(0)	1
+delete	src/__tests__/macos-smoke-process-identity.test.ts	uses challenge-bound completion with identity-verified failure cleanup	scripts/smoke_macos_app.sh	cleanup()	1
+delete	src/__tests__/macos-artifact-command-pinning.test.ts	production requirement digests use the Darwin-pinned codesign executable	scripts/macos_artifact.ts	function assertFilesystemTree(	1
+# The two residual vacuities the semantics reviewer found. Both PASSED before the fix; both must
+# now be KILLED. Occurrence 1 is the authoritative site in each case.
+delete	src/__tests__/install-maintenance.test.ts	orders exclusivity before recovery and the authoritative stopped-state copy	scripts/install_macos_app.sh	write_journal processes-stopped	1
+delete	src/__tests__/tailscale-cli-resolution.test.ts	keeps all test app and tool overrides after the real Darwin branch	scripts/resolve_tailscale_cli.sh	codesign_executable="${RECORDINGS_TEST_TAILSCALE_CODESIGN_EXECUTABLE:-/usr/bin/codesign}"	1

@@ -19,6 +19,7 @@ import {
   createUpdateEnvelopePayload,
   parseCompatibleCohortManifest,
 } from "../../packaging/macos/release_lifecycle";
+import { expectOrder, sliceBetweenUnique } from "./helpers/source-assertions";
 
 const build = readFileSync("src/native/Recordings/build.sh", "utf8");
 const pkg = readFileSync("packaging/macos/build_release_pkg.sh", "utf8");
@@ -173,17 +174,25 @@ describe("root-owned macOS updater packaging contract", () => {
     ]) {
       expect(readme).toContain(required);
     }
-    const initialCommand = readme.slice(
-      readme.indexOf("# One-time initial bootstrap"),
-      readme.indexOf("# After independent review"),
+    // The two absence claims below are what keep the subtypes from documenting each other's
+    // credentials, so each region has to be provably the invocation it names: the section markers
+    // must be unique in the README, and the region must still carry its own `./build.sh` line. A
+    // region that collapsed to nothing would satisfy both absence claims and read as a pass.
+    const initialCommand = sliceBetweenUnique(
+      readme,
+      "# One-time initial bootstrap",
+      "# After independent review",
     );
-    const updateCommand = readme.slice(
-      readme.indexOf("# App-only update"),
-      readme.indexOf("# Explicit local-only alternative"),
+    const updateCommand = sliceBetweenUnique(
+      readme,
+      "# App-only update",
+      "# Explicit local-only alternative",
     );
-    expect(initialCommand).toContain("RECORDINGS_INSTALLER_CODESIGN_IDENTITY");
+    expect(initialCommand).toContain("./build.sh release initial-bootstrap");
+    expect(initialCommand).toContain('RECORDINGS_INSTALLER_CODESIGN_IDENTITY="');
     expect(initialCommand).not.toContain('RECORDINGS_RELEASE_COMPATIBLE_COHORT_MANIFEST="');
-    expect(updateCommand).toContain("RECORDINGS_RELEASE_COMPATIBLE_COHORT_MANIFEST");
+    expect(updateCommand).toContain("./build.sh release app-update");
+    expect(updateCommand).toContain('RECORDINGS_RELEASE_COMPATIBLE_COHORT_MANIFEST="');
     expect(updateCommand).not.toContain('RECORDINGS_INSTALLER_CODESIGN_IDENTITY="');
   });
 
@@ -229,23 +238,25 @@ describe("root-owned macOS updater packaging contract", () => {
     expect(managedBootstrap).toContain("root-private snapshot");
     expect(managedBootstrap).toContain("--expand-full");
     expect(managedBootstrap).toContain("--require-committed-state");
-    expect(managedBootstrap.indexOf("run_preflight false")).toBeLessThan(
-      managedBootstrap.indexOf("/usr/sbin/installer -pkg"),
-    );
-    expect(managedBootstrap.lastIndexOf("run_preflight false")).toBeLessThan(
-      managedBootstrap.indexOf('"$PAYLOAD_CLIENT" bootstrap'),
-    );
+    expectOrder(managedBootstrap, "run_preflight false", "/usr/sbin/installer -pkg");
+    // Every unauthenticated-release preflight, not just the first, has to precede the payload
+    // client, so this one reads the last call site.
+    expectOrder(managedBootstrap, "run_preflight false", '"$PAYLOAD_CLIENT" bootstrap', {
+      firstMatch: "last",
+    });
     expect(preinstall).toContain("path_exists_or_symlink");
     expect(preinstall).toContain("Recordings updater target ancestry is missing, linked, or not root-owned");
     expect(preinstall).toContain('"/Library/Application Support/Hasna/Recordings"');
     expect(postinstall).toContain("target ancestry is missing, linked, or not root-owned");
     expect(postinstall).toContain("interrupted package mutation root is linked or has ownership/mode drift");
-    expect(postinstall.indexOf("require_root_owned_nonwritable_directory")).toBeLessThan(
-      postinstall.indexOf("/bin/mkdir -p"),
+    // Name the ancestry loop's call, not the bare helper: the helper's own definition sits at the
+    // top of the script, so a claim about the bare name is true however far the call itself drifts.
+    expectOrder(
+      postinstall,
+      'require_root_owned_nonwritable_directory "$required_ancestor"',
+      "/bin/mkdir -p",
     );
-    expect(postinstall.indexOf("for created_directory in")).toBeLessThan(
-      postinstall.indexOf("/usr/sbin/chown -R"),
-    );
+    expectOrder(postinstall, "for created_directory in", "/usr/sbin/chown -R");
   });
 
   test("authorizes only exact-package crash repair through a durable pre-Installer journal", () => {
@@ -282,7 +293,15 @@ describe("root-owned macOS updater packaging contract", () => {
     );
     expect(managedBootstrap).toContain("different authenticated package");
     expect(managedBootstrap).toContain("authorization evidence is missing or unsafe");
-    const installerIndex = managedBootstrap.indexOf("/usr/sbin/installer -pkg");
+    // `write_authorization_journal` names both its definition and its single call. The definition
+    // sits ABOVE the first preflight, which means the previous `lastIndexOf(name, installerIndex)`
+    // form was not actually satisfiable by the definition — deleting the call dropped the index to
+    // the definition, which sorts before the preflight, so the old assertion did fail. The reason to
+    // pin the top-level call line is therefore not that the old form was vacuous here; it is that
+    // the property being claimed is "the journal is written by a call at top level", and a bare name
+    // cannot distinguish a call from a definition without depending on their relative order, which
+    // is not the contract and would silently invert if the definition were moved below.
+    const journalWriteCall = "\n  write_authorization_journal\n";
     const journalWriter = managedBootstrap.match(
       /write_authorization_journal\(\) \{[\s\S]*?\n\}/,
     )?.[0];
@@ -292,10 +311,8 @@ describe("root-owned macOS updater packaging contract", () => {
     expect(journalWriter).toContain("package_bootstrap_id=%s");
     expect(journalWriter).toContain("installer_certificate_sha256=%s");
     expect(journalWriter).toContain("/bin/sync");
-    expect(managedBootstrap.lastIndexOf("write_authorization_journal", installerIndex))
-      .toBeLessThan(installerIndex);
-    expect(managedBootstrap.lastIndexOf("write_authorization_journal", installerIndex))
-      .toBeGreaterThan(managedBootstrap.indexOf("run_preflight false"));
+    expectOrder(managedBootstrap, "run_preflight false", journalWriteCall);
+    expectOrder(managedBootstrap, journalWriteCall, "/usr/sbin/installer -pkg");
 
     expect(preinstall).toContain('JOURNAL_PHASE="authorized"');
     expect(preinstall).toContain('write_authorization_phase "installer-started"');
@@ -335,9 +352,15 @@ describe("root-owned macOS updater packaging contract", () => {
     expect(journalValidator).toContain('[ "$JOURNAL_PACKAGE_SHA256" = "$ACTUAL_PKG_SHA256" ]');
     expect(journalValidator).toContain('[ "$JOURNAL_PACKAGE_BOOTSTRAP_ID" = "$PACKAGE_BOOTSTRAP_ID" ]');
     expect(managedBootstrap).toContain("run_preflight true");
-    expect(managedBootstrap.lastIndexOf("run_preflight true")).toBeLessThan(
-      managedBootstrap.lastIndexOf("remove_authorization_journal"),
+    // Dropping the journal is what re-arms an exact-package replay, so it must be unreachable
+    // without the committed-state preflight directly above it. File ordering cannot express that:
+    // it is satisfied while a third, unguarded removal sits anywhere else in the script. Pin both
+    // guarded pairs verbatim and cap the removal call sites at those two.
+    expect(managedBootstrap).toContain(
+      "    run_preflight true\n    remove_authorization_journal\n",
     );
+    expect(managedBootstrap).toContain("\nrun_preflight true\nremove_authorization_journal\n");
+    expect(managedBootstrap.match(/^[ \t]*remove_authorization_journal$/gm)).toHaveLength(2);
     expect(managedBootstrap).toContain('/bin/rm -f "$AUTHORIZATION_JOURNAL"');
   });
 
@@ -355,9 +378,18 @@ describe("root-owned macOS updater packaging contract", () => {
     expect(postinstall).toContain('/bin/launchctl bootstrap system "$LAUNCHD_PLIST"');
     expect(postinstall).toContain('/bin/launchctl enable system/com.hasna.recordings.updater');
     expect(postinstall).toContain('/bin/launchctl kickstart -k system/com.hasna.recordings.updater');
-    expect(postinstall.indexOf("require_authorization_journal")).toBeLessThan(
-      postinstall.indexOf("/usr/bin/dscl . -create"),
+    // Again the top-level call, not the helper name it shares with its definition: no directory
+    // record may be created before this script has proven the exact-package authorization journal.
+    // The adjacency is the load-bearing half — the journal check is the first thing postinstall
+    // does once it knows it is root, and no ordering claim can say "first".
+    expect(postinstall).toContain(
+      [
+        '[ "$(/usr/bin/id -u)" = "0" ] || fail "postinstall must run as root through Installer or MDM"',
+        "",
+        "require_authorization_journal",
+      ].join("\n"),
     );
+    expectOrder(postinstall, "\nrequire_authorization_journal\n", "/usr/bin/dscl . -create");
   });
 
   test("fails closed on extended ACLs and strips ACL inheritance only from package-owned trees", () => {
@@ -385,43 +417,76 @@ describe("root-owned macOS updater packaging contract", () => {
     expect(postinstall).toContain('/bin/chmod -N "$package_owned_leaf"');
     expect(postinstall).toContain('require_tree_without_extended_acl "$package_owned_tree"');
     expect(postinstall).toContain('require_tree_without_extended_acl "$launch_tree"');
-    expect(postinstall.lastIndexOf('require_safe_package_tree_structure "$package_owned_tree"')).toBeLessThan(
-      postinstall.indexOf('/bin/chmod -RN "$package_owned_tree"'),
+    // The guarantee here is per iteration, not per file: structure is proven, that one tree is
+    // stripped, and that same tree is revalidated before the loop moves on. File ordering is
+    // satisfied by a strip whose guard and revalidation belong to different loops over different
+    // trees, so pin the loop body itself.
+    expect(postinstall).toContain(
+      [
+        '  require_safe_package_tree_structure "$package_owned_tree"',
+        '  /bin/chmod -RN "$package_owned_tree"',
+        '  require_tree_without_extended_acl "$package_owned_tree"',
+      ].join("\n"),
     );
-    expect(postinstall.indexOf('/bin/chmod -RN "$package_owned_tree"')).toBeLessThan(
-      postinstall.indexOf('require_tree_without_extended_acl "$package_owned_tree"'),
-    );
-    expect(postinstall.indexOf('/bin/chmod -RN "$package_owned_tree"')).toBeLessThan(
-      postinstall.indexOf("/bin/launchctl bootstrap system"),
+    expectOrder(
+      postinstall,
+      '/bin/chmod -RN "$package_owned_tree"',
+      "/bin/launchctl bootstrap system",
     );
     const recursiveAclMutation = postinstall.match(
       /for package_owned_tree in \\\n([\s\S]*?)\/bin\/chmod -RN "\$package_owned_tree"/,
-    )?.[1] ?? "";
+    )?.[1];
+    // Without the package-owned trees to compare against, the absence of "$APP" from this list is
+    // a claim about an empty string: a reshaped loop that stopped matching would read as a pass,
+    // which is precisely the mutation this assertion exists to catch.
+    expect(recursiveAclMutation, "recursive ACL-strip target list no longer parses").toBeDefined();
+    expect(recursiveAclMutation).toContain('"$STATE_ROOT"');
+    expect(recursiveAclMutation).toContain('"$TRUST_ROOT"');
     expect(recursiveAclMutation).not.toContain('"$APP"');
     expect(postinstall).not.toContain('/usr/sbin/chown -R root:wheel "$APP"');
     expect(postinstall).not.toContain('/bin/chmod -R go-w "$APP"');
     expect(postinstall).toContain('require_tree_without_extended_acl "$APP"');
-    expect(postinstall.lastIndexOf("require_root_owned_nonwritable_directory")).toBeLessThan(
-      postinstall.indexOf("/bin/launchctl bootstrap system"),
+    // The launch-window revalidation, named by its own loop variable rather than by whichever
+    // ancestry check happens to sit last in the file.
+    expectOrder(
+      postinstall,
+      'require_root_owned_nonwritable_directory "$launch_ancestor"',
+      "/bin/launchctl bootstrap system",
     );
 
     expect(managedBootstrap).toContain('require_no_extended_acl "$input"');
     expect(managedBootstrap).toContain('/bin/chmod -RN "$EXPANDED"');
     expect(managedBootstrap).toContain('require_tree_without_extended_acl "$EXPANDED"');
-    expect(managedBootstrap.lastIndexOf("validate_target_ancestry")).toBeLessThan(
-      managedBootstrap.indexOf('"$PAYLOAD_CLIENT" bootstrap'),
+    // Both read the last call site: the payload client may only run after the final ancestry and
+    // ACL reauthentication, so an earlier check somewhere in the script is not enough.
+    expectOrder(managedBootstrap, "validate_target_ancestry", '"$PAYLOAD_CLIENT" bootstrap', {
+      firstMatch: "last",
+    });
+    expectOrder(
+      managedBootstrap,
+      'require_tree_without_extended_acl "$EXPANDED"',
+      '"$PAYLOAD_CLIENT" bootstrap',
+      { firstMatch: "last" },
     );
-    expect(managedBootstrap.lastIndexOf('require_tree_without_extended_acl "$EXPANDED"')).toBeLessThan(
-      managedBootstrap.indexOf('"$PAYLOAD_CLIENT" bootstrap'),
+    // Ordering on a repeated guard still tolerates deleting the copy that matters: an earlier
+    // ancestry, ACL or preflight call elsewhere in the script answers for the missing one. The
+    // reauthentication window this comment block guards in the script is a contiguous property, so
+    // assert the launch verbatim — all three guards, then the scrubbed environment, then the client.
+    expect(managedBootstrap).toContain(
+      [
+        "validate_target_ancestry",
+        'require_tree_without_extended_acl "$EXPANDED"',
+        "run_preflight false",
+        '/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/var/empty TMPDIR="$WORK_DIR" \\',
+        '  "$PAYLOAD_CLIENT" bootstrap \\',
+      ].join("\n"),
     );
 
     expect(pkg).toContain('require_no_extended_acl "$release_input"');
     expect(pkg).toContain('require_tree_without_extended_acl "$APP"');
     expect(pkg).toContain('/bin/chmod -RN "$ROOT" "$SCRIPTS"');
     expect(pkg).toContain('require_tree_without_extended_acl "$ROOT"');
-    expect(pkg.indexOf('/bin/chmod -RN "$ROOT" "$SCRIPTS"')).toBeLessThan(
-      pkg.indexOf("/usr/bin/pkgbuild"),
-    );
+    expectOrder(pkg, '/bin/chmod -RN "$ROOT" "$SCRIPTS"', "/usr/bin/pkgbuild");
 
     for (const installerScript of [preinstall, postinstall, managedBootstrap]) {
       expect(installerScript).toContain("require_expected_var_link");
@@ -621,12 +686,12 @@ describe("root-owned macOS updater packaging contract", () => {
 
     expect(pkg).not.toContain('/bin/chmod -R 0755 "$APP"');
     expect(pkg).not.toContain('/bin/chmod -R 0644 "$APP"');
-    expect(pkg.indexOf('require_safe_signed_app_bundle_modes "$APP"')).toBeLessThan(
-      pkg.indexOf('/usr/bin/ditto "$APP" "$ROOT/Applications/Recordings.app"'),
+    expectOrder(
+      pkg,
+      'require_safe_signed_app_bundle_modes "$APP"',
+      '/usr/bin/ditto "$APP" "$ROOT/Applications/Recordings.app"',
     );
-    expect(pkg.indexOf('require_safe_signed_app_bundle_modes "$STAGED_APP"')).toBeLessThan(
-      pkg.indexOf('/usr/bin/pkgbuild'),
-    );
+    expectOrder(pkg, 'require_safe_signed_app_bundle_modes "$STAGED_APP"', "/usr/bin/pkgbuild");
   });
 
   test("isolates bootstrap PKG production from app-update envelope production", () => {
@@ -703,8 +768,11 @@ describe("root-owned macOS updater packaging contract", () => {
     ]) {
       expect(pkg).toContain(`require_exact_binary_architectures ${binary} arm64 x86_64`);
     }
-    expect(pkg.indexOf('require_exact_binary_architectures "$APP/Contents/MacOS/Recordings"'))
-      .toBeLessThan(pkg.indexOf("/usr/bin/pkgbuild"));
+    expectOrder(
+      pkg,
+      'require_exact_binary_architectures "$APP/Contents/MacOS/Recordings"',
+      "/usr/bin/pkgbuild",
+    );
   });
 
   test("builds root-cohort components only for initial bootstrap", () => {

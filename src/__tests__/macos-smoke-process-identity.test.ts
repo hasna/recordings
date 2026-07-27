@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { sliceBetweenUnique } from "./helpers/source-assertions";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const bunExecutable = process.execPath;
@@ -373,9 +374,15 @@ describe("macOS runtime smoke process identity", () => {
     expect(smokeSource).toContain('--runtime-smoke-completion "$completion"');
     expect(smokeSource).toContain("umask 077");
     expect(smokeSource).toContain("crypto.randomUUID()");
-    const terminationHelper = smokeSource.slice(
-      smokeSource.indexOf("terminate_verified_process()"),
-      smokeSource.indexOf("cleanup()"),
+    // The claim is that the signals below are sent from *inside* the identity-verified terminator,
+    // never from anywhere that skipped the recheck. With an unguarded `indexOf`, renaming
+    // `cleanup()` answers -1 and `slice(start, -1)` widens the region from the helper to the whole
+    // rest of the script — at which point the same four assertions pass with the TERM and the KILL
+    // moved out into an unverified code path, which is the regression this test exists for.
+    const terminationHelper = sliceBetweenUnique(
+      smokeSource,
+      "terminate_verified_process()",
+      "cleanup()",
     );
     expect(terminationHelper).toContain(
       'capture_process_start_identity "$pid" "$expected_executable"',
@@ -388,13 +395,27 @@ describe("macOS runtime smoke process identity", () => {
     expect(appSource).toContain("runtimeSmokeAcknowledgementPath");
     expect(appSource).toContain("runtimeSmokeCompletionPath");
     expect(appSource).toContain("contentsOfFile: acknowledgementPath");
-    const completionWriter = appSource.slice(
-      appSource.indexOf("let response = RuntimeSmokeCompletionResponse("),
-      appSource.indexOf("Darwin._exit(0)", appSource.indexOf("let response = RuntimeSmokeCompletionResponse(")),
+    // `Darwin._exit(0)` is the end bound because the contract is ordered: the completion response
+    // reaches disk, atomically, and only then does the process leave. That bound was doing no work
+    // — delete or relocate the exit and `indexOf` answers -1, `slice(start, -1)` keeps everything
+    // to the end of the file, and "written atomically before the exit" decays into "some atomic
+    // write appears after the response is built", which any later write in this file would supply.
+    // Requiring both bounds to be unique also refuses a second completion writer: two copies means
+    // the pin is aimed at whichever came first, including a dead one.
+    const completionWriter = sliceBetweenUnique(
+      appSource,
+      "let response = RuntimeSmokeCompletionResponse(",
+      "Darwin._exit(0)",
     );
     expect(completionWriter).toContain("responseData.write(");
     expect(completionWriter).toContain("options: .atomic");
-    expect(appSource).toContain("Darwin._exit(0)");
+    // There is deliberately no `expect(appSource).toContain("Darwin._exit(0)")` here. The end bound
+    // above already requires that string to occur EXACTLY once, which is strictly stronger, and a
+    // redundant assertion is not free: if the uniqueness bound is ever weakened, a surviving
+    // `toContain` still passes and still reads as coverage, so losing the real guarantee becomes
+    // invisible — the exact failure this suite was swept to remove. Duplicating `Darwin._exit(0)`
+    // is the mutation that separates them: the bare `toContain` stays green on it, the bound does
+    // not.
     expect(launchPlanSource).toContain('"--runtime-smoke-ack"');
     expect(launchPlanSource).toContain('"--runtime-smoke-completion"');
   });

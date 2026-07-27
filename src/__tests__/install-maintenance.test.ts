@@ -459,31 +459,64 @@ await new Promise(() => {});
 
   test("orders exclusivity before recovery and the authoritative stopped-state copy", () => {
     const source = readFileSync(installer, "utf8");
-    const acquired = source.indexOf("acquire_maintenance_marker\n", source.indexOf("trap release_install_coordination"));
-    const drained = source.indexOf("drain_store_reader_leases\n", acquired);
-    const recovered = source.indexOf('if [ -f "$JOURNAL_PATH" ]', acquired);
-    const recoveryBarrier = source.indexOf("acquire_sqlite_barrier\n", acquired);
-    const initialCopy = source.indexOf('"$DITTO_EXECUTABLE" "$DATA_DIR" "$STATE_BACKUP"');
-    const initialBarrier = source.lastIndexOf("acquire_sqlite_barrier\n", initialCopy);
-    const prepared = source.indexOf("write_journal prepared", initialCopy);
-    const stoppedApps = source.indexOf("stop_old_processes\n", prepared);
-    const stoppedCopy = source.indexOf('"$DITTO_EXECUTABLE" "$DATA_DIR" "$NEXT_STATE_BACKUP"', stoppedApps);
-    const stoppedBarrier = source.lastIndexOf("acquire_sqlite_barrier\n", stoppedCopy);
-    const stoppedJournal = source.indexOf("write_journal processes-stopped", stoppedCopy);
-    expect(acquired).toBeGreaterThan(0);
-    expect(drained).toBeGreaterThan(acquired);
-    expect(drained).toBeLessThan(recoveryBarrier);
-    expect(recoveryBarrier).toBeGreaterThan(acquired);
-    expect(recoveryBarrier).toBeLessThan(recovered);
-    expect(initialBarrier).toBeGreaterThan(recovered);
-    expect(initialBarrier).toBeLessThan(initialCopy);
-    expect(prepared).toBeGreaterThan(initialCopy);
-    expect(stoppedApps).toBeGreaterThan(prepared);
-    expect(stoppedBarrier).toBeGreaterThan(stoppedApps);
-    expect(stoppedBarrier).toBeLessThan(stoppedCopy);
-    expect(stoppedJournal).toBeGreaterThan(stoppedCopy);
-    expect(source.indexOf("stop_old_processes\n", stoppedBarrier)).toBeLessThan(stoppedCopy);
-    expect(source.indexOf("stop_old_processes\n", stoppedCopy)).toBeGreaterThan(stoppedCopy);
+    // Every claim here is positional, and a positional claim read from source text has one
+    // catastrophic failure mode: `indexOf` answers -1 for a needle that is gone, and `-1 < anything`
+    // is true, so `expect(indexOf(a)).toBeLessThan(indexOf(b))` is SATISFIED by DELETING `a` — the
+    // regression this test exists to catch would pass. The two-argument `indexOf(needle, from)` form
+    // adds a second route to -1: an anchor that is itself -1 silently restarts the search at byte 0,
+    // and an anchor past the last occurrence never matches. This suite carried both holes, including
+    // an anchor on `trap release_install_coordination`, a string the installer does not contain.
+    //
+    // One forward walk closes both. Each step is searched from the end of the previous match, so
+    // presence and order are asserted together and a step that moved earlier fails as loudly as one
+    // that was deleted. It is also the formulation that can pin a repeated marker: the needle
+    // `"stop_old_processes\n"` matches 3 positions and `"acquire_sqlite_barrier\n"` matches 4 — the
+    // fourth being the call inside `quiesce_canonical_database()`, not a top-level step — and a
+    // pairwise index comparison cannot tell those apart. The contract is precisely that a surviving
+    // writer is stopped on BOTH sides of the authoritative copy while the exclusive SQLite
+    // transaction is held; the script says so itself immediately above those lines.
+    //
+    // What this walk does NOT do is make the old block vacuous in the way the other suites in this
+    // sweep were. Simulated against 14 single-line deletions, the old chain caught 12 and this walk
+    // catches 13. The one it adds back is the trap, whose anchor string
+    // `trap release_install_coordination` occurs ZERO times in the installer, so that ordering claim
+    // was never asserted at all.
+    let cursor = 0;
+    for (const [step, marker] of [
+      // Exclusivity is claimed before anything reads or rewrites canonical state.
+      ["release trap installed", "trap cleanup_install_coordination_and_work EXIT"],
+      ["maintenance marker acquired", "acquire_maintenance_marker\n"],
+      ["store reader leases drained", "drain_store_reader_leases\n"],
+      ["barrier held for recovery", "acquire_sqlite_barrier\n"],
+      // Only then may journal recovery inspect and roll back a previous transaction.
+      ["journal recovery entered", 'if [ -f "$JOURNAL_PATH" ]'],
+      // The pre-replacement snapshot is taken under a barrier of its own.
+      ["barrier held for the initial copy", "acquire_sqlite_barrier\n"],
+      ["initial state copied", '"$DITTO_EXECUTABLE" "$DATA_DIR" "$STATE_BACKUP"'],
+      ["prepared phase journaled", "write_journal prepared"],
+      // The authoritative stopped-state snapshot, in full: stop, barrier, re-stop, copy, re-stop.
+      // A release that ignores the maintenance marker can relaunch from its helper at any point in
+      // that window, so each re-stop is a separate step rather than a repeat of the first.
+      ["old processes stopped", "stop_old_processes\n"],
+      ["barrier held for the stopped copy", "acquire_sqlite_barrier\n"],
+      ["rescanned before the stopped copy", "stop_old_processes\n"],
+      ["stopped state copied", '"$DITTO_EXECUTABLE" "$DATA_DIR" "$NEXT_STATE_BACKUP"'],
+      ["rescanned after the stopped copy", "stop_old_processes\n"],
+      // Column-0 anchored, and that is the whole point of this step. The bare needle matches TWICE:
+      // the authoritative durable boundary on the main path, and an indented copy inside the
+      // `for ((refresh_attempt = 1; ...))` retry loop. With the bare needle, deleting the
+      // authoritative one still passed — the retry-loop copy answered for it, which would mean the
+      // journal boundary is only ever written from inside a loop that can `continue` past it. The
+      // leading newline pins the col-0 call and reduces the match set to exactly one.
+      ["processes-stopped phase journaled", "\nwrite_journal processes-stopped\n"],
+    ] as const) {
+      const index = source.indexOf(marker, cursor);
+      expect(
+        index,
+        `installer step is missing or out of order: ${step} (${JSON.stringify(marker)})`,
+      ).toBeGreaterThan(-1);
+      cursor = index + marker.length;
+    }
     expect(source).toContain('RUNNING_EXECUTABLES+=("$existing_app/Contents/Helpers/recordings")');
     expect(source).toContain('"$SQLITE3_EXECUTABLE" -batch "$database_path"');
     expect(source).toContain("PRAGMA wal_checkpoint(TRUNCATE)");

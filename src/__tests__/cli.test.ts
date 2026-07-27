@@ -24,6 +24,7 @@ import {
   prepareReleaseInstallInputs,
 } from "../lib/release-install-policy.js";
 import { createHash } from "node:crypto";
+import { expectOrder, sliceBetween, sliceBetweenUnique } from "./helpers/source-assertions";
 
 const tempDirs: string[] = [];
 const cliEntry = join(process.cwd(), "src", "cli", "index.ts");
@@ -488,9 +489,15 @@ describe("recordings CLI", () => {
   test("app install pins bash and forwards only a validated Bun executable", () => {
     const cli = readFileSync("src/cli/index.ts", "utf8");
     const installer = readFileSync("scripts/install_macos_app.sh", "utf8");
-    const installAction = cli.slice(
-      cli.indexOf('.command("install")'),
-      cli.indexOf('appCommand\n  .command("status")'),
+    // The install action is bounded by its own `.command("install")` and the next command's
+    // declaration. Both bounds have to exist: the end marker is whitespace-exact, and when it
+    // stopped matching the -1 sliced to the last character instead, quietly extending this region
+    // over `status` — at which point `not.toContain("getMacOSAppStatus()")` was asserting about the
+    // wrong command's body. `sliceBetween` refuses the -1 and requires a non-trivial region.
+    const installAction = sliceBetween(
+      cli,
+      '.command("install")',
+      'appCommand\n  .command("status")',
     );
     expect(cli).toContain('spawnSync("/bin/bash", installerArgs');
     expect(cli).toContain("resolveInstallBunExecutable(process.env)");
@@ -510,8 +517,15 @@ describe("recordings CLI", () => {
     expect(cli).not.toContain('key.startsWith("RECORDINGS_TEST_INSTALL_")');
     expect(cli).not.toContain('spawnSync("bash", installerArgs');
     expect(installer.startsWith("#!/bin/bash\n")).toBeTrue();
-    expect(cli.indexOf('process.platform !== "darwin"')).toBeLessThan(
-      cli.indexOf("resolveInstallBunExecutable(process.env)"),
+    // The platform gate runs before any Bun executable is resolved, so a non-macOS host exits
+    // before touching the installer inputs. Two things were wrong: the whole-file `indexOf` let any
+    // of the six `process.platform !== "darwin"` checks elsewhere in the CLI stand in for the
+    // install action's own, and deleting the gate made `-1 < n` true. Asserting inside
+    // `installAction` pins it to this command, and `expectOrder` requires both halves to exist.
+    expectOrder(
+      installAction,
+      'process.platform !== "darwin"',
+      "resolveInstallBunExecutable(process.env)",
     );
   });
 
@@ -823,9 +837,15 @@ describe("recordings CLI", () => {
   test("app status never treats a CDHash substring as permission identity proof", () => {
     const cli = readFileSync("src/cli/index.ts", "utf8");
     const permissions = readFileSync("src/cli/macos-permissions.ts", "utf8");
-    const permissionReader = cli.slice(
-      cli.indexOf("function getTccGrant"),
-      cli.indexOf("function findPackageRoot"),
+    // Two absence claims are made about this reader below, and both are vacuous over an empty
+    // region: with bare `indexOf` bounds, moving `findPackageRoot` above `getTccGrant` produces a
+    // start > end slice — "" — which contains neither `currentCodeHash` nor `auth_value` no matter
+    // what the reader actually does. `sliceBetweenUnique` requires both declarations to exist
+    // exactly once and in this order.
+    const permissionReader = sliceBetweenUnique(
+      cli,
+      "function getTccGrant",
+      "function findPackageRoot",
     );
 
     // The reader delegates and never re-implements an identity heuristic inline.
