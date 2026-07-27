@@ -182,6 +182,10 @@ const defaultTccPermissionProbe: TccPermissionProbe = {
     if (result.error) return { kind: "unreadable", detail: result.error.message };
     if (result.status !== 0) {
       const detail = (result.stderr ?? "").trim() || `sqlite3 exited ${result.status}`;
+      // A database that opens but holds no `access` table has answered the question: there is
+      // no grant recorded here. That is absence, not illegibility — reporting it as unreadable
+      // would claim ignorance we do not have.
+      if (/no such table/i.test(detail)) return { kind: "absent" };
       return { kind: "unreadable", detail };
     }
     const value = result.stdout?.trim() ?? "";
@@ -270,6 +274,10 @@ export function classifyTccGrantDurability(options: {
   const operators = requirement.replace(/"[^"]*"/g, '""');
   if (/\bcdhash\b/i.test(operators)) return "dies_on_rebuild_cdhash_pinned";
   if (/\banchor\s+apple\s+generic\b/i.test(operators)) return "survives_rebuild_developer_id";
+  // `anchor apple` without `generic` is the Apple *platform binary* anchor (e.g. /bin/ls).
+  // It anchors to Apple's own root, so it is certificate-anchored and survives rebuilds —
+  // matched after the `generic` form above, which is the Developer ID case.
+  if (/\banchor\s+apple\b/i.test(operators)) return "survives_rebuild_certificate_anchored";
   if (/\bcertificate\s+(root|leaf|\d+)\b|\banchor\s+H""/i.test(operators)) {
     return "survives_rebuild_certificate_anchored";
   }

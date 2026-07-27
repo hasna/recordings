@@ -323,14 +323,63 @@ describe("TCC grant durability across rebuilds", () => {
     ).toBe("survives_rebuild_certificate_anchored");
   });
 
-  /// `anchor apple` (the platform-binary anchor) is not `anchor apple generic` (Developer ID).
-  test("plain anchor apple is not reported as a Developer ID requirement", () => {
+  /// `anchor apple` (the platform-binary anchor, e.g. /bin/ls) is not `anchor apple generic`
+  /// (Developer ID), but it is still anchored to a certificate rather than to one binary.
+  /// Measured on macOS 26.5.1: `codesign -d -r- /bin/ls` reports
+  /// `identifier "com.apple.ls" and anchor apple`.
+  test("plain anchor apple is certificate anchored, not a Developer ID and not unknown", () => {
+    const durability = classifyTccGrantDurability({
+      designatedRequirement: 'identifier "com.apple.ls" and anchor apple',
+      adHocSigned: false,
+    });
+
+    expect(durability).toBe("survives_rebuild_certificate_anchored");
+    expect(durability).not.toBe("survives_rebuild_developer_id");
+  });
+});
+
+/// The system TCC database only opens for a process holding Full Disk Access, so telling
+/// "could not read" apart from "no grant recorded" is the whole point of the lookup type.
+/// Exit codes measured against sqlite3 3.45.1 and 3.51.0.
+describe("TCC database read failures", () => {
+  function probeWithSqliteFailure(detail: string): TccPermissionProbe {
+    return {
+      databaseExists: () => true,
+      readAccessRow: () =>
+        /no such table/i.test(detail) ? { kind: "absent" } : { kind: "unreadable", detail },
+      verifyStoredRequirement: () => "satisfied",
+    };
+  }
+
+  /// sqlite3 exits 1 with "no such table: access" — the file opened and answered, so this is
+  /// absence, not illegibility.
+  test("a database with no access table is absence, not illegibility", () => {
     expect(
-      classifyTccGrantDurability({
-        designatedRequirement: 'identifier "com.apple.Something" and anchor apple',
-        adHocSigned: false,
+      resolveTccPermission({
+        service: "kTCCServiceAccessibility",
+        home: "/Users/tester",
+        appPath: APP_PATH,
+        probe: probeWithSqliteFailure("Error: in prepare, no such table: access"),
       }),
-    ).not.toBe("survives_rebuild_developer_id");
+    ).toBe("not_determined");
+  });
+
+  /// sqlite3 exits 1 "unable to open database file" without Full Disk Access, and 26
+  /// "file is not a database" on a corrupt file. Neither means "not granted".
+  test("a database that cannot be opened or parsed is undetermined", () => {
+    for (const detail of [
+      'Error: unable to open database "TCC.db": unable to open database file',
+      "Error: in prepare, file is not a database (26)",
+    ]) {
+      expect(
+        resolveTccPermission({
+          service: "kTCCServiceAccessibility",
+          home: "/Users/tester",
+          appPath: APP_PATH,
+          probe: probeWithSqliteFailure(detail),
+        }),
+      ).toBe("undetermined_tcc_database_unreadable");
+    }
   });
 });
 
