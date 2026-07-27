@@ -260,10 +260,9 @@ describe("the parser consumes what the Swift log statement produces", () => {
     );
     const functionStart = engineSource.indexOf("public func logResolvedTrigger()");
     expect(functionStart).toBeGreaterThan(-1);
-    const functionBody = engineSource.slice(
-      functionStart,
-      engineSource.indexOf("private func logIgnoredTrigger("),
-    );
+    const functionEnd = engineSource.indexOf("private func logIgnoredTrigger(");
+    expect(functionEnd).toBeGreaterThan(functionStart);
+    const functionBody = engineSource.slice(functionStart, functionEnd);
     const logCallStart = functionBody.indexOf("log(");
     expect(logCallStart).toBeGreaterThan(-1);
 
@@ -277,7 +276,7 @@ describe("the parser consumes what the Swift log statement produces", () => {
       ["fnMonitor.isRunning", "false"],
       ["microphonePermissionLabel", "allowed"],
       ["accessibilityPermissionLabel", "denied"],
-      ["triggerBlockedReason", "fn/Globe needs Accessibility"],
+      ["blockedReason", "fn/Globe needs Accessibility"],
     ]);
 
     const observation = parseTriggerBindingsLog(`[2026-07-27T12:00:00Z] ${rendered}`);
@@ -294,7 +293,7 @@ describe("the parser consumes what the Swift log statement produces", () => {
 /**
  * Concatenate the Swift string literals in `source`, substituting each `\(...)` interpolation
  * with a supplied value. Interpolations may themselves contain string literals
- * (`triggerBlockedReason ?? "none"`), so this tracks paren depth and quoting instead of
+ * (`blockedReason ?? "none"`), so this tracks paren depth and quoting instead of
  * pattern-matching, which a regex over quotes gets wrong on exactly that expression.
  */
 function renderSwiftInterpolatedString(source: string, values: Array<[string, string]>): string {
