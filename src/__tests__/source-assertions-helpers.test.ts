@@ -44,6 +44,26 @@ describe("withoutAnyComments", () => {
     expect(withoutAnyComments(source)).toBe(source);
   });
 
+  test("tracks the literal KIND, so a stray quote inside a multiline body does not desynchronise", () => {
+    // Coverage gap an adversarial reviewer found: disabling the `"""` branch left the previous
+    // version of this suite at 10 pass / 0 fail, because the only multiline case round-tripped
+    // either way. An ODD number of quotes in the body is what distinguishes the two.
+    const source = 'let m = """\n  say "hi\n  """\ncode() // c';
+    const stripped = withoutAnyComments(source);
+    expect(stripped).toContain('say "hi');
+    expect(stripped).toContain("code()");
+    expect(stripped).not.toContain("// c");
+  });
+
+  test("refuses a region whose literals or comments do not close, rather than failing open", () => {
+    // This function is applied to SLICES. An unterminated literal used to swallow the rest of the
+    // input, so every comment after it survived unstripped and the caller asserted over text that
+    // was never scanned. Failing open is the one outcome that must not be available.
+    expect(() => withoutAnyComments('let a = "oops\ncode() // survives')).toThrow(/unterminated/);
+    expect(() => withoutAnyComments('let a = #"oops\ncode() // survives')).toThrow(/unterminated/);
+    expect(() => withoutAnyComments("code() /* oops\nmore code")).toThrow(/unterminated/);
+  });
+
   test("preserves line count, so newline-anchored assertions still match", () => {
     const source = 'a()\n// gone\nb() /* also\ngone */\nc()';
     expect(withoutAnyComments(source).split("\n")).toHaveLength(source.split("\n").length);

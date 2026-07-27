@@ -124,6 +124,50 @@ export function withoutComments(source: string): string {
  *
  * Line count is preserved so any assertion that anchors on `\n` still sees the same shape.
  */
+/**
+ * Index just past the `close` matching the `open` at `openIndex`, skipping comments and literals.
+ *
+ * Needed because `lastIndexOf("}")` is not brace matching, and the difference is a live defect: an
+ * early exit written between a decision and its use —
+ *
+ *     }                                        // the decision table closes here
+ *     guard stillOwnsChangeCount else { return }
+ *     if shouldRestore { … }
+ *
+ * — puts a NEARER `}` (the `else` block's) between the two, so a "nothing between them" check
+ * measured from the last brace saw only whitespace and passed. Counting braces naively fails the
+ * other way: one `}` inside a string literal, such as `log("settlement }")`, cancels a real opener.
+ * Both were measured surviving at EXIT=0.
+ */
+export function matchingDelimiterIndex(
+  source: string,
+  openIndex: number,
+  open: string,
+  close: string,
+): number {
+  // Comments and literals are neutralised first, which also validates that they all close.
+  const scanned = withoutAnyComments(source);
+  expect(scanned[openIndex], `no ${open} at index ${openIndex}`).toBe(open);
+  let depth = 0;
+  for (let index = openIndex; index < scanned.length; index += 1) {
+    const character = scanned[index];
+    // A delimiter inside a string literal is text. `withoutAnyComments` leaves literals intact by
+    // design, so skip them here rather than counting their contents.
+    if (character === '"') {
+      const literal = scanned.indexOf('"', index + 1);
+      index = literal === -1 ? scanned.length : literal;
+      continue;
+    }
+    if (character === open) depth += 1;
+    else if (character === close) {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  expect(depth, `unbalanced ${open}${close} from index ${openIndex}`).toBe(0);
+  return scanned.length;
+}
+
 export function withoutAnyComments(source: string): string {
   const out = source.split("");
   const blank = (from: number, to: number): void => {
@@ -155,6 +199,15 @@ export function withoutAnyComments(source: string): string {
           at += 2;
         } else at += 1;
       }
+      // Same reasoning as the literal below, opposite direction: an unclosed `/*` blanked to end of
+      // input, deleting real code. Fail-closed rather than fail-open, but still a region the caller
+      // would assert over while believing it was intact.
+      if (depth > 0) {
+        throw new Error(
+          `unterminated block comment at offset ${index} — refusing to strip comments from a ` +
+            "region whose comments do not close, because everything after it would be blanked",
+        );
+      }
       blank(index, at);
       index = at;
       continue;
@@ -177,6 +230,7 @@ export function withoutAnyComments(source: string): string {
       const terminator = delimiter + pounds;
       const escape = `\\${pounds}`;
       let at = quoteAt + delimiter.length;
+      let terminated = false;
       while (at < source.length) {
         if (source.startsWith(escape, at)) {
           at += escape.length + 1;
@@ -184,9 +238,22 @@ export function withoutAnyComments(source: string): string {
         }
         if (source.startsWith(terminator, at)) {
           at += terminator.length;
+          terminated = true;
           break;
         }
         at += 1;
+      }
+      // THROW rather than run to end of input. An unterminated literal used to swallow the rest of
+      // the file, so every comment after it survived unstripped — and this function is applied to
+      // SLICES, so a region boundary that cuts a literal in half silently reopened exactly the
+      // defects it exists to close. Failing open is the one outcome that must not be available:
+      // the caller sees a clean-looking region and asserts over text that was never scanned.
+      if (!terminated) {
+        throw new Error(
+          `unterminated ${delimiter === '"""' ? "multiline" : "string"} literal at offset ${quoteAt} — ` +
+            "refusing to strip comments from a region whose literals do not close, because every " +
+            "comment after it would survive and any assertion over this text would be unsound",
+        );
       }
       index = at;
       continue;
