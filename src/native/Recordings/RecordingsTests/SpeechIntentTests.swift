@@ -517,7 +517,9 @@ struct IntentFlowStateTests {
             intentDetectionEnabled: false,
             enhanceTriggersJSON: "[]"
         ))
-        // Any cleanup mode other than off always persists first.
+        // `always` mode persists first whatever the transcript looks like. This used to read "any
+        // cleanup mode other than off", which this PR makes false: `auto` now pastes first when
+        // EnhancementScreen proves the helper cannot rewrite the text.
         #expect(!RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.always.rawValue,
             transcript: "meet me at noon",

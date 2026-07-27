@@ -88,8 +88,9 @@ struct EnhancementScreenTests {
     @Test("an empty trigger STRING inside the payload fails closed to may-enhance")
     func emptyTriggerRowFailsClosed() {
         // The CLI's `lower.includes("")` is true for every transcript, so one empty row in the
-        // configured list means the helper rewrites everything. Foundation's `contains("")` is
-        // false, so the mirror must special-case the row rather than test it.
+        // configured list means the helper rewrites everything. The mirror special-cases the row
+        // instead of testing it, because Swift's answer for an empty needle depends on which
+        // `contains` overload resolves and nothing executes this suite (see EnhancementScreen).
         #expect(EnhancementScreen.mayRequireEnhancement(
             text: "meet me at noon by the north entrance",
             enhanceTriggersJSON: #"[""]"#

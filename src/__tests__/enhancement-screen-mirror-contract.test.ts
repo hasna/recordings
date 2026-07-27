@@ -145,10 +145,11 @@ describe("EnhancementScreen mirrors the CLI enhancement decision", () => {
     expect(needsEnhancement(plainDictation, { ...DEFAULT_CONFIG, enhance_triggers: [""] }).needs)
       .toBe(true);
 
-    // Swift: Foundation's `contains("")` is FALSE, the opposite of JavaScript's, so the mirror
-    // cannot get this right by testing the trigger — it has to special-case it. Skipping the row
-    // (`continue`) answered "cannot be enhanced" for every transcript the CLI would have
-    // rewritten, which is a raw paste ahead of persistence where the user asked for the rewrite.
+    // Swift: skipping the row (`continue`, as shipped) answered "cannot be enhanced" for every
+    // transcript the CLI would have rewritten — a raw paste ahead of persistence where the user
+    // asked for the rewrite. The mirror special-cases the row rather than testing it, because
+    // Swift's answer for an empty needle depends on which `contains` overload resolves and no
+    // machine executes the Swift suite. Asserted on the source for the same reason.
     const screen = withoutAnyComments(
       read("src/native/Recordings/RecordingsLib/EnhancementScreen.swift"),
     );

@@ -50,13 +50,22 @@ public enum EnhancementScreen {
         let lowered = text.lowercased()
         for trigger in triggers {
             let loweredTrigger = trigger.lowercased()
-            // An EMPTY configured trigger matches everything in the CLI:
-            // `needsEnhancement` tests `lower.includes(trigger.toLowerCase())`, and
-            // JavaScript's `includes("")` is true for every string, so the helper
-            // rewrites every transcript. Foundation's `contains("")` is false, so
-            // neither testing nor skipping an empty trigger reproduces that -- both
-            // answer "cannot be enhanced" for speech the CLI does rewrite, which
-            // pastes raw text where the user asked for the rewrite. Fail closed.
+            // An EMPTY configured trigger matches EVERYTHING in the CLI:
+            // `needsEnhancement` tests `lower.includes(trigger.toLowerCase())` and
+            // JavaScript's `includes("")` is true for every string, so one empty row
+            // makes the helper rewrite every transcript (MEASURED on the CLI:
+            // needs=true, reason `Explicit trigger: ""`). This screen must answer
+            // may-enhance for the same input or it admits that speech to
+            // paste-before-persistence and pastes raw text where the user asked for
+            // the rewrite.
+            //
+            // Special-cased rather than left to `contains`, because Swift's answer for
+            // an empty needle depends on which overload resolves — Foundation's
+            // `range(of:)`-based one answers false, the stdlib `Collection` one answers
+            // true — and NO machine has ever executed this file, so neither answer may
+            // be assumed. That overload claim is an UNVERIFIED INFERENCE from the
+            // language, not a measurement; `return true` is the fail-closed answer
+            // under either.
             guard !loweredTrigger.isEmpty else { return true }
             if lowered.contains(loweredTrigger) { return true }
         }
