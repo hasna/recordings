@@ -20,10 +20,24 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "1.12.0"),
-        // Swift Testing pinned to the toolchain-matched release. The stations build with
-        // CommandLineTools (no bundled Testing module), so the package is required — but it
-        // must track the compiler: the archived 0.99 shim under the 6.2 compiler silently
-        // corrupted `#expect` Bool-comparison evaluation, passing false assertions.
+        // Swift Testing. The stations build with CommandLineTools (no bundled Testing
+        // module), so the package is required. The original rule here was "the pin must
+        // track the compiler", because an archived 0.99 shim under the 6.2 compiler once
+        // silently corrupted `#expect` Bool-comparison evaluation, passing false assertions.
+        //
+        // Measured on station06 (Apple Swift 6.3.2, swiftlang-6.3.2.1.108): the 6.3.x line
+        // CANNOT be used here. From swift-6.3-RELEASE onward swift-testing's own manifest adds
+        // `.linkedLibrary("_TestingInterop")` under `#if compiler(>=6.3)`. That library ships
+        // in the toolchain at `$(xcode-select -p)/Library/Developer/usr/lib`, which is not on
+        // SwiftPM's default search path, so `swift build --build-tests` fails with
+        // `ld: library '_TestingInterop' not found`. It links only if every invocation adds
+        // `-Xlinker -L$(xcode-select -p)/Library/Developer/usr/lib`, which nothing in this repo
+        // supplies. Repinning to 6.3.2 would therefore break `swift test` for every caller.
+        //
+        // So the pin stays on the 6.2 line, and the rule it was standing in for is now
+        // enforced directly instead of by version matching: ExpectationIntegrityTests asserts
+        // that `#expect` both admits true Bool comparisons and *records issues* for false ones.
+        // That turns the silent failure mode into a red test, which a version pin never could.
         .package(url: "https://github.com/apple/swift-testing.git", revision: "swift-6.2-RELEASE"),
     ],
     targets: [
