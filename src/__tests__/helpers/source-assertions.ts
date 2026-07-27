@@ -124,6 +124,94 @@ export function withoutComments(source: string): string {
  *
  * Line count is preserved so any assertion that anchors on `\n` still sees the same shape.
  */
+/**
+ * Index just past the Swift string literal starting at `index`, or null if none starts there.
+ *
+ * ONE implementation, used by both the comment stripper and the brace matcher, because they had two
+ * and the second was wrong. `matchingDelimiterIndex` skipped literals with `indexOf('"', index + 1)`,
+ * which pairs an opening quote with an ESCAPED one — so `{ log("a\\"}") }` returned the `}` INSIDE
+ * the literal as the matching brace, and an odd `"` in a `"""` body desynchronised it entirely. That
+ * was exploitable: two phantom-literal tokens placed either side of a real
+ * `guard … else { return }` made the `else` block's brace read as the decision table's own, so an
+ * adjacency check saw the early exit as adjacent and passed.
+ *
+ * Handles the three kinds Swift has — `"`, `"""`, and raw `#…"` with a matching pound count whose
+ * escape introducer is `\#…` — and returns null when the literal does not close, so callers decide
+ * whether that is fatal rather than silently running to end of input.
+ */
+function stringLiteralEnd(source: string, index: number): number | null {
+  let hashes = 0;
+  while (source[index + hashes] === "#") hashes += 1;
+  const quoteAt = index + hashes;
+  const delimiter = source.startsWith('"""', quoteAt)
+    ? '"""'
+    : source[quoteAt] === '"'
+      ? '"'
+      : null;
+  if (delimiter === null) return null;
+  const pounds = "#".repeat(hashes);
+  const terminator = delimiter + pounds;
+  const escape = `\\${pounds}`;
+  let at = quoteAt + delimiter.length;
+  while (at < source.length) {
+    if (source.startsWith(escape, at)) {
+      at += escape.length + 1;
+      continue;
+    }
+    if (source.startsWith(terminator, at)) return at + terminator.length;
+    at += 1;
+  }
+  return null;
+}
+
+/**
+ * Index just past the `close` matching the `open` at `openIndex`, skipping comments and literals.
+ *
+ * Needed because `lastIndexOf("}")` is not brace matching, and the difference is a live defect: an
+ * early exit written between a decision and its use —
+ *
+ *     }                                        // the decision table closes here
+ *     guard stillOwnsChangeCount else { return }
+ *     if shouldRestore { … }
+ *
+ * — puts a NEARER `}` (the `else` block's) between the two, so a "nothing between them" check
+ * measured from the last brace saw only whitespace and passed. Counting braces naively fails the
+ * other way: one `}` inside a string literal, such as `log("settlement }")`, cancels a real opener.
+ * Both were measured surviving at EXIT=0.
+ */
+export function matchingDelimiterIndex(
+  source: string,
+  openIndex: number,
+  open: string,
+  close: string,
+): number {
+  // Comments and literals are neutralised first, which also validates that they all close.
+  const scanned = withoutAnyComments(source);
+  expect(scanned[openIndex], `no ${open} at index ${openIndex}`).toBe(open);
+  let depth = 0;
+  let index = openIndex;
+  while (index < scanned.length) {
+    // A delimiter inside a string literal is text. `withoutAnyComments` leaves literals intact by
+    // design, so skip each one WHOLE using the same scanner it uses.
+    const literalEnd = stringLiteralEnd(scanned, index);
+    if (literalEnd !== null) {
+      index = literalEnd;
+      continue;
+    }
+    const character = scanned[index];
+    if (character === open) depth += 1;
+    else if (character === close) {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  throw new Error(
+    `unbalanced ${open}${close} from index ${openIndex} — refusing to report a matching delimiter ` +
+      "that was never found, because the caller would treat end-of-input as the closing position",
+  );
+}
+
 export function withoutAnyComments(source: string): string {
   const out = source.split("");
   const blank = (from: number, to: number): void => {
@@ -155,6 +243,15 @@ export function withoutAnyComments(source: string): string {
           at += 2;
         } else at += 1;
       }
+      // Same reasoning as the literal below, opposite direction: an unclosed `/*` blanked to end of
+      // input, deleting real code. Fail-closed rather than fail-open, but still a region the caller
+      // would assert over while believing it was intact.
+      if (depth > 0) {
+        throw new Error(
+          `unterminated block comment at offset ${index} — refusing to strip comments from a ` +
+            "region whose comments do not close, because everything after it would be blanked",
+        );
+      }
       blank(index, at);
       index = at;
       continue;
@@ -164,36 +261,62 @@ export function withoutAnyComments(source: string): string {
     // newline, so `https://x` on the second line of a multiline literal was cut to `https:`.
     // Stripping real code is the inverse of the bug this function exists for and just as bad:
     // an assertion then passes over text that is no longer there.
-    let hashes = 0;
-    while (source[index + hashes] === "#") hashes += 1;
-    const quoteAt = index + hashes;
-    const delimiter = source.startsWith('"""', quoteAt)
-      ? '"""'
-      : source[quoteAt] === '"'
-        ? '"'
-        : null;
-    if (delimiter !== null) {
-      const pounds = "#".repeat(hashes);
-      const terminator = delimiter + pounds;
-      const escape = `\\${pounds}`;
-      let at = quoteAt + delimiter.length;
-      while (at < source.length) {
-        if (source.startsWith(escape, at)) {
-          at += escape.length + 1;
-          continue;
-        }
-        if (source.startsWith(terminator, at)) {
-          at += terminator.length;
-          break;
-        }
-        at += 1;
-      }
-      index = at;
+    const literalEnd = stringLiteralEnd(source, index);
+    if (literalEnd !== null) {
+      index = literalEnd;
       continue;
+    }
+    // A literal that opens and never closes: THROW rather than run to end of input. This function is
+    // applied to SLICES, so a region boundary that cuts a literal in half used to leave every
+    // comment after it unstripped, and the caller then asserted over text that was never scanned.
+    // Failing open is the one outcome that must not be available.
+    if (source[index] === '"' || (source[index] === "#" && /^#+"/.test(source.slice(index)))) {
+      throw new Error(
+        `unterminated string literal at offset ${index} — refusing to strip comments from a region ` +
+          "whose literals do not close, because every comment after it would survive and any " +
+          "assertion over this text would be unsound",
+      );
     }
     index += 1;
   }
   return out.join("");
+}
+
+/**
+ * The arms of a Swift `switch` body, as a mapping from each matched case to its expression.
+ *
+ * Order- and grouping-independent, which matters because pinning an arm by its exact TEXT gets both
+ * directions wrong. It false-positives on a pure reorder — `.deliveredUnverified, .deliveryNotObserved`
+ * is the same table and failed — and it misses a real defect: splitting one outcome out of a group
+ * into its own arm with a different expression leaves the pinned needle intact, so
+ * `.targetUnavailable` could be given `false` while the six-outcome needle still matched.
+ *
+ * `body` is the text between the switch's braces, comments already stripped by the caller.
+ */
+export function switchArmsByOutcome(body: string): Map<string, string> {
+  const arms = new Map<string, string>();
+  // Case labels may wrap across lines, so split on `case`/`default` at the start of a line and take
+  // everything up to the first `:` as the label list.
+  const starts = [...body.matchAll(/^[ \t]*(case|default)\b/gm)];
+  starts.forEach((start, position) => {
+    const from = start.index ?? 0;
+    const to = position + 1 < starts.length ? (starts[position + 1]!.index ?? body.length) : body.length;
+    const arm = body.slice(from, to);
+    const colon = arm.indexOf(":");
+    expect(colon, `a switch arm has no \`:\` separating its label from its body: ${arm.slice(0, 60)}`)
+      .toBeGreaterThan(-1);
+    const label = arm.slice(0, colon);
+    const expression = arm.slice(colon + 1).trim();
+    if (start[1] === "default") {
+      arms.set("default", expression);
+      return;
+    }
+    for (const outcome of label.replace(/^[ \t]*case\b/, "").split(",")) {
+      const name = outcome.trim().replace(/^\./, "");
+      if (name) arms.set(name, expression);
+    }
+  });
+  return arms;
 }
 
 /**

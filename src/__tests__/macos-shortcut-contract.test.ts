@@ -4,9 +4,11 @@ import { join } from "node:path";
 
 import {
   evaluateSwiftCondition,
+  matchingDelimiterIndex,
   expectOrder,
   sliceBetween,
   sliceBetweenUnique,
+  switchArmsByOutcome,
   swiftSourcesUnder,
   withoutAnyComments,
   withoutComments,
@@ -799,9 +801,33 @@ describe("secure-input delivery contract", () => {
     const settlement = withoutAnyComments(
       sliceBetween(engineSource, "let shouldRestore = switch outcome {", "previousClipboard.restore("),
     );
-    expect(settlement).toContain("case .secureInputActive:\n                false");
-    // The other outcomes still honour the opt-in — asserted on the SWITCH, not on prose near it.
-    expect(settlement).toContain("stillOwnsPayload");
+    // The whole table as a MAPPING from outcome to expression — not as arm text. Text got both
+    // directions wrong: it false-positived on a pure reorder of the case list, and it missed
+    // splitting one outcome out of the group into its own arm with a different expression (giving
+    // `.targetUnavailable` a `false` arm left the six-outcome needle intact and survived at EXIT=0,
+    // so a target-unavailable failure never restored though the owner opted in and we still held the
+    // payload). A mapping is invariant under both, and a `_ = stillOwnsPayload` statement elsewhere
+    // in the region cannot satisfy it either.
+    const decision = switchArmsByOutcome(
+      sliceBetween(settlement, "switch outcome {", "\n            }"),
+    );
+    expect(decision.get("secureInputActive")).toBe("false");
+    expect(decision.get("clipboardWriteFailed")).toBe("stillOwnsChangeCount");
+    for (const outcome of [
+      "targetUnavailable",
+      "clipboardOwnershipLost",
+      "eventPostFailed",
+      "pasted",
+      "deliveryNotObserved",
+      "deliveredUnverified",
+    ]) {
+      expect(decision.get(outcome), `${outcome} must honour the restoreClipboard opt-in`).toBe(
+        "stillOwnsPayload",
+      );
+    }
+    // Exhaustive, and no `default:` to swallow a new outcome into the restoring group.
+    expect(decision.has("default")).toBe(false);
+    expect(decision.size).toBe(8);
 
     // Both branches of the message must promise the clipboard, because both keep it.
     expect(engineSource).toContain("transcript kept on the clipboard ");
@@ -837,19 +863,41 @@ describe("secure-input delivery contract", () => {
     const restoreGuard = executableClosure.match(/if ([^\n{]+?)\s*\{[^{}]*?previousClipboard\.restore\(/);
     expect(restoreGuard, "the restore is no longer guarded by a single `if`").not.toBeNull();
 
-    // And that `if` must be the ONLY thing gating the restore. `[^{}]*?` cannot cross a brace, so
-    // wrapping the guard in an outer condition —
-    //   `if stillOwnsChangeCount { if shouldRestore { restore } }`
-    // — makes the regex skip the outer `if` and capture the inner one, silently disabling the opt-in
-    // while every assertion here still passed. Brace depth at the captured guard is 0 when it sits
-    // at the closure's top level, which is the shape the decision table is written for.
-    const beforeGuard = executableClosure.slice(0, executableClosure.indexOf(restoreGuard![0]));
-    const nesting =
-      (beforeGuard.match(/\{/g) ?? []).length - (beforeGuard.match(/\}/g) ?? []).length;
+    // And NOTHING may sit between the decision and its use. The decision table's closing brace must
+    // be followed immediately by this `if` — no intervening statement at all.
+    //
+    // This replaces a brace-depth check that was wrong in both directions. It was too WEAK, because
+    // it counted braces over text that still contained string bodies, so one `}` inside a log line
+    // zeroed the counter; and because a brace-balanced early exit does not change the depth at all.
+    // Three measured EXIT=0 survivors, each semantically identical to wrapping the restore in an
+    // extra condition — which is how the `restoreClipboard` opt-in gets silently disabled:
+    //
+    //   guard stillOwnsChangeCount else { return }      // idiomatic Swift, depth unchanged
+    //   if !stillOwnsChangeCount { } else if shouldRestore { … }
+    //   if stillOwnsChangeCount { log("settlement }"); if shouldRestore { … } }
+    //
+    // It was also too STRICT in a way I did not disclose: `do { if shouldRestore { … } }` is
+    // semantics-identical and it failed. This assertion is strict too — deliberately, and stated
+    // here rather than discovered. Any `do`, `if let`, `switch` arm or early return introduced
+    // between the table and its use fails LOUDLY with the message below, so a legitimate refactor
+    // is a one-line change to this test plus an argument for why the decision is still total. That
+    // is the trade this file makes everywhere else, and the alternative is a control-flow analysis
+    // this suite has no parser for.
+    const guardAt = executableClosure.indexOf(restoreGuard![0]);
+    // The table's OWN closing brace, brace-matched. `lastIndexOf("}", guardAt)` is not brace
+    // matching: `guard stillOwnsChangeCount else { return }` between the table and the guard puts a
+    // nearer `}` in the way, so the check below saw only whitespace and passed — measured surviving
+    // at EXIT=0 while semantically gating the restore on a second condition.
+    const tableOpen = executableClosure.indexOf("{", executableClosure.indexOf("let shouldRestore = switch outcome"));
+    expect(tableOpen, "the decision table's opening brace is not locatable").toBeGreaterThan(-1);
+    const tableClose = matchingDelimiterIndex(executableClosure, tableOpen, "{", "}");
+    expect(tableClose, "the decision table's closing brace is not locatable").toBeLessThan(guardAt);
     expect(
-      nesting,
-      "the restore's `if` must sit at the settlement closure's top level, not inside another condition",
-    ).toBe(0);
+      executableClosure.slice(tableClose + 1, guardAt).trim(),
+      "nothing may sit between the shouldRestore decision and the `if` that uses it — an early " +
+        "return, an enclosing condition or an extra branch all gate the restore on something the " +
+        "decision table does not know about",
+    ).toBe("");
 
     // Folded in from PR #43, closed as superseded by this test: evaluate the captured guard for
     // BOTH values of the decision instead of pinning its spelling. Each direction is a distinct
