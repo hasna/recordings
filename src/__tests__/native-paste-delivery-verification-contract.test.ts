@@ -159,7 +159,13 @@ describe("native paste delivery verification contract", () => {
     expect(engine).toContain("case .success, .unverified: .ready(message)");
     expect(engine).toContain('"Paste sent, delivery unconfirmed');
     expect(engine).toContain('"Paste did not reach the target app');
-    expect(engine).toContain('"Copied — paste blocked by secure input"');
+    // Both secure-input messages must promise the clipboard, because the clipboard is kept
+    // either way — `shouldRestore` returns `false` for this outcome even when `restoreClipboard`
+    // was requested. A message that did not say "press Cmd-V" would leave the owner with a
+    // clipboard they were never told about; one that said it while restoring would be a lie.
+    expect(engine).toContain('"This field blocks typing (secure input) — transcript copied, press Cmd-V"');
+    expect(engine).toContain("transcript kept on the clipboard ");
+    expect(engine).not.toContain('"Copied — paste blocked by secure input"');
   });
 
   // The capability this PR adds is that the app reads the FULL text value of whatever field is

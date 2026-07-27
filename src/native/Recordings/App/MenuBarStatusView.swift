@@ -14,7 +14,8 @@ struct MenuBarStatusLabel: View {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
             canStartRecording: store.engine.canStartRecording,
-            statusMessage: store.engine.statusMessage
+            statusMessage: store.engine.statusMessage,
+            blockedReason: store.engine.blockedReason
         )
     }
 }
@@ -73,14 +74,18 @@ struct MenuBarStatusView: View {
     }
 
     private var statusColor: Color {
-        store.engine.isRecording ? .red : .accentColor
+        if store.engine.isRecording { return .red }
+        // The popover repeats the menu-bar signal rather than relying on the caption text, which
+        // is rendered `.secondary` and reads as an aside.
+        return presentation.isBlocked ? .orange : .accentColor
     }
 
     private var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
             canStartRecording: store.engine.canStartRecording,
-            statusMessage: store.engine.statusMessage
+            statusMessage: store.engine.statusMessage,
+            blockedReason: store.engine.blockedReason
         )
     }
 

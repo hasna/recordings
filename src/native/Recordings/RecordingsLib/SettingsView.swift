@@ -78,7 +78,7 @@ public struct SettingsView: View {
                 // A trigger that is switched on but cannot arm must say so next to its own
                 // switch. Silence here is what made 51 recorded hotkey presses look like a
                 // working trigger while nothing was delivered.
-                if let blocked = engine.triggerBlockedReason {
+                if let blocked = engine.blockedReason {
                     Label(blocked, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                     Button("Open Accessibility Settings") {
