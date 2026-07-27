@@ -30,3 +30,15 @@ delete	src/__tests__/enhancer.test.ts	enhances: make this sound more professiona
 # --- MUST-SURVIVE: nor may a comment deletion in the Swift mirror trip the identity guard --
 # otherwise the guard is a whole-file checksum rather than an assertion about the patterns.
 delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	the instruction pattern sources are byte-identical in the CLI and the Swift mirror	src/native/Recordings/RecordingsLib/EnhancementScreen.swift	/// Deterministic local pre-screen for the CLI's enhancement decision.\n	1
+
+# --- ADVERSARIAL REVIEW ADDITION (todos 96546cc7). The one place the mirror was LESS
+# conservative than the CLI: `needsEnhancement` tests `lower.includes(trigger.toLowerCase())` and
+# JS `includes("")` is true for every string, so one empty row in enhance_triggers makes the
+# helper rewrite every transcript. Foundation's `contains("")` is FALSE, so the mirror has to
+# special-case the row. It skipped it instead, and deleting the skip SURVIVED all three guards --
+# the fixture twins pin transcript text, never trigger lists. Deleting the fail-closed branch now
+# breaks the new guard's source assertion.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	an empty configured trigger makes both implementations fail closed	src/native/Recordings/RecordingsLib/EnhancementScreen.swift	            guard !loweredTrigger.isEmpty else { return true }\n	1
+# --- and the CLI half of the same claim: deleting the trigger scan makes needsEnhancement stop
+# treating an empty row as a match.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	an empty configured trigger makes both implementations fail closed	src/lib/enhancer.ts	    if (lower.includes(trigger.toLowerCase())) {	1

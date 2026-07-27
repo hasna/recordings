@@ -50,7 +50,14 @@ public enum EnhancementScreen {
         let lowered = text.lowercased()
         for trigger in triggers {
             let loweredTrigger = trigger.lowercased()
-            guard !loweredTrigger.isEmpty else { continue }
+            // An EMPTY configured trigger matches everything in the CLI:
+            // `needsEnhancement` tests `lower.includes(trigger.toLowerCase())`, and
+            // JavaScript's `includes("")` is true for every string, so the helper
+            // rewrites every transcript. Foundation's `contains("")` is false, so
+            // neither testing nor skipping an empty trigger reproduces that -- both
+            // answer "cannot be enhanced" for speech the CLI does rewrite, which
+            // pastes raw text where the user asked for the rewrite. Fail closed.
+            guard !loweredTrigger.isEmpty else { return true }
             if lowered.contains(loweredTrigger) { return true }
         }
 

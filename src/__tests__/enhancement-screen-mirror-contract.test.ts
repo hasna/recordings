@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { DEFAULT_CONFIG } from "../lib/config.js";
+import { needsEnhancement } from "../lib/enhancer.js";
 import {
   matchingDelimiterIndex,
   swiftSourcesUnder,
@@ -128,5 +130,29 @@ describe("EnhancementScreen mirrors the CLI enhancement decision", () => {
     expect(callSites.length, "no shouldPasteBeforePersistence call sites found under src/native")
       .toBeGreaterThan(1);
     expect(missing).toEqual([]);
+  });
+
+  // The fixture twins pin TEXT, not trigger-list handling, so the one place the two
+  // implementations disagreed about a trigger list was covered by nothing: an empty configured
+  // trigger. The CLI half below is executed; the Swift half is asserted on its source, because no
+  // reachable machine runs the Swift suite and this is the direction that pastes the wrong text.
+  test("an empty configured trigger makes both implementations fail closed", () => {
+    // CLI: `lower.includes("")` is true for every string, so a single empty trigger makes the
+    // helper rewrite every transcript — including speech that is otherwise plain dictation.
+    const plainDictation = "meet me at noon by the north entrance";
+    expect(needsEnhancement(plainDictation, { ...DEFAULT_CONFIG, enhance_triggers: [] }).needs)
+      .toBe(false);
+    expect(needsEnhancement(plainDictation, { ...DEFAULT_CONFIG, enhance_triggers: [""] }).needs)
+      .toBe(true);
+
+    // Swift: Foundation's `contains("")` is FALSE, the opposite of JavaScript's, so the mirror
+    // cannot get this right by testing the trigger — it has to special-case it. Skipping the row
+    // (`continue`) answered "cannot be enhanced" for every transcript the CLI would have
+    // rewritten, which is a raw paste ahead of persistence where the user asked for the rewrite.
+    const screen = withoutAnyComments(
+      read("src/native/Recordings/RecordingsLib/EnhancementScreen.swift"),
+    );
+    expect(screen, "the Swift mirror must fail closed on an empty configured trigger")
+      .toContain("guard !loweredTrigger.isEmpty else { return true }");
   });
 });
