@@ -30,6 +30,9 @@ import {
   captureProbeSubject,
   microphoneGrantInstruction,
   classifyPermissionState,
+  // RECORDINGS_BUNDLE_IDENTIFIER is imported from ./macos-permissions.js below, which is the
+  // ruled canonical name. capture-probe.js re-exports the same symbol from lib/macos-bundle.ts;
+  // importing it from both is a duplicate identifier, not a second constant.
   DEFAULT_PROBE_SECONDS,
   MAX_PROBE_SECONDS,
   TCC_UNREADABLE_STATE,
@@ -37,6 +40,7 @@ import {
 } from "../lib/capture-probe.js";
 import {
   describeActiveStore,
+  localStoreIsBehindSchema,
   probeRecordingPersistence,
   type PersistenceProbeResult,
 } from "../lib/persistence-probe.js";
@@ -1198,6 +1202,8 @@ program
     // auditing the wrong store is what made two separate reviews conclude that
     // persistence had broken when it had only moved.
     const activeStore = describeActiveStore(config);
+    // Sampled here, before any probe runs, so it reflects the store as found.
+    const localStoreWasLegacy = localStoreIsBehindSchema(config.db_path);
 
     let capture: CaptureProbeResult | null = null;
     let credential: CredentialProbeResult | null = null;
@@ -1237,7 +1243,10 @@ program
         : null;
       persistence = await probeRecordingPersistence({
         allowRemoteWrite: Boolean(opts.probeStoreWrite),
+        allowLocalMigration: Boolean(opts.probeStoreWrite),
         localStoreExistedBefore: activeStore.local_db_present,
+        // Read before anything in this command could have created the file.
+        localStoreIsLegacy: localStoreWasLegacy,
       });
     }
 

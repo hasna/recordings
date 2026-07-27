@@ -10,6 +10,7 @@ import {
   classifyPermissionState,
   readWavPeak,
   DEFAULT_PROBE_SECONDS,
+  MAX_PROBE_SECONDS,
   SILENCE_PEAK_THRESHOLD,
   RECORDINGS_BUNDLE_IDENTIFIER,
   TCC_UNREADABLE_STATE,
@@ -44,34 +45,55 @@ interface BuildWavOptions {
   omitFmt?: boolean;
   /** Declare a fmt chunk shorter than the 16 bytes the spec requires. */
   fmtChunkSize?: number;
+  /** Emit WAVE_FORMAT_EXTENSIBLE with this SubFormat tag in its GUID. */
+  extensibleSubFormat?: number;
+  /** Emit the fmt chunk twice, with this tag on the second one. */
+  duplicateFmtTag?: number;
+  /** Emit a second data chunk after the first. */
+  duplicateData?: boolean;
 }
 
 function buildWav(samples: number[], options: BuildWavOptions = {}): Buffer {
   const data = Buffer.alloc(samples.length * 2);
   samples.forEach((sample, index) => data.writeInt16LE(sample, index * 2));
 
-  const declaredFmtSize = options.fmtChunkSize ?? 16;
+  const extensible = options.extensibleSubFormat !== undefined;
+  // EXTENSIBLE needs cbSize (2) + 22 bytes of extension; SubFormat starts at +8.
+  const declaredFmtSize = options.fmtChunkSize ?? (extensible ? 40 : 16);
   const fmt = Buffer.alloc(8 + declaredFmtSize);
   fmt.write("fmt ", 0, "ascii");
   fmt.writeUInt32LE(declaredFmtSize, 4);
   if (declaredFmtSize >= 16) {
-    fmt.writeUInt16LE(options.formatTag ?? 1, 8); // wFormatTag
+    fmt.writeUInt16LE(extensible ? 0xfffe : options.formatTag ?? 1, 8); // wFormatTag
     fmt.writeUInt16LE(1, 10); // mono
     fmt.writeUInt32LE(16000, 12);
     fmt.writeUInt32LE(32000, 16);
     fmt.writeUInt16LE(2, 20);
     fmt.writeUInt16LE(options.bitsPerSample ?? 16, 22); // bits per sample
   }
+  if (extensible && declaredFmtSize >= 40) {
+    fmt.writeUInt16LE(22, 24); // cbSize
+    fmt.writeUInt16LE(options.bitsPerSample ?? 16, 26); // wValidBitsPerSample
+    fmt.writeUInt32LE(0x4, 28); // dwChannelMask
+    fmt.writeUInt16LE(options.extensibleSubFormat!, 32); // SubFormat GUID head
+  }
 
   // sox emits a LIST/INFO chunk ahead of `data` for some outputs. A reader that
   // assumes a fixed 44-byte header silently reads metadata as audio.
   const chunks: Buffer[] = options.omitFmt ? [] : [fmt];
+  if (options.duplicateFmtTag !== undefined) {
+    const second = Buffer.from(fmt);
+    second.writeUInt16LE(options.duplicateFmtTag, 8);
+    chunks.push(second);
+  }
   if (options.extraChunk) {
     // ODD length, so the chunk really is followed by a pad byte. The fixture read
     // `Buffer.from("INFOhello!")` with the comment "odd length -> needs pad", but that string is
     // 10 bytes — even — so the pad path was never exercised and dropping `+ (chunkSize % 2)` from
     // readWavPeak's chunk walk survived as a mutation. "INFOhello" is 9.
     const listBody = Buffer.from("INFOhello", "ascii"); // odd length (9) -> needs pad
+    // Guard the fixture itself: the previous comment asserted a property the bytes did not have.
+    if (listBody.length % 2 !== 1) throw new Error("LIST fixture must be odd-length");
     const list = Buffer.alloc(8 + listBody.length + (listBody.length % 2));
     list.write("LIST", 0, "ascii");
     list.writeUInt32LE(listBody.length, 4);
@@ -85,6 +107,7 @@ function buildWav(samples: number[], options: BuildWavOptions = {}): Buffer {
   data.copy(dataChunk, 8);
   if (options.dataFirst) chunks.unshift(dataChunk);
   else chunks.push(dataChunk);
+  if (options.duplicateData) chunks.push(Buffer.from(dataChunk));
 
   const body = Buffer.concat(chunks);
   const header = Buffer.alloc(12);
@@ -193,6 +216,63 @@ describe("readWavPeak", () => {
     expect(() => readWavPeak(file)).toThrow(/truncated fmt chunk/);
   });
 
+  // WAVE_FORMAT_EXTENSIBLE is legitimate uncompressed PCM; CoreAudio writers emit
+  // it. Requiring tag 1 outright would turn a real capture into a read failure.
+  test("accepts WAVE_FORMAT_EXTENSIBLE whose SubFormat is PCM", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "extensible-pcm.wav");
+    writeFileSync(file, buildWav([0, 8192, -4096], { extensibleSubFormat: 1 }));
+
+    const peak = readWavPeak(file);
+    expect(peak.samples).toBe(3);
+    expect(peak.peak).toBeCloseTo(0.25, 5);
+  });
+
+  test("rejects WAVE_FORMAT_EXTENSIBLE whose SubFormat is float", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "extensible-float.wav");
+    writeFileSync(file, buildWav([0, 8192], { extensibleSubFormat: 3 }));
+
+    expect(() => readWavPeak(file)).toThrow(/uncompressed PCM/);
+  });
+
+  test("rejects WAVE_FORMAT_EXTENSIBLE with no readable SubFormat GUID", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "extensible-truncated.wav");
+    writeFileSync(file, buildWav([0, 8192], { extensibleSubFormat: 1, fmtChunkSize: 16 }));
+
+    expect(() => readWavPeak(file)).toThrow(/SubFormat GUID/);
+  });
+
+  // A trailing bogus fmt chunk must not override the real one.
+  test("uses the FIRST fmt chunk when a file carries two", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "two-fmt.wav");
+    writeFileSync(file, buildWav([0, 8192], { duplicateFmtTag: 3 }));
+
+    const peak = readWavPeak(file);
+    expect(peak.peak).toBeCloseTo(0.25, 5);
+  });
+
+  test("uses the FIRST data chunk when a file carries two", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "two-data.wav");
+    writeFileSync(file, buildWav([0, 8192], { duplicateData: true }));
+
+    const peak = readWavPeak(file);
+    expect(peak.samples).toBe(2);
+  });
+
+  test("treats a zero-length data chunk as no samples, not as a crash", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "empty-data.wav");
+    writeFileSync(file, buildWav([]));
+
+    const peak = readWavPeak(file);
+    expect(peak.samples).toBe(0);
+    expect(peak.peak).toBe(0);
+  });
+
   test("rejects a non-RIFF file rather than reporting a peak", () => {
     const dir = makeTempDir();
     const file = join(dir, "not-a-wav.bin");
@@ -202,6 +282,13 @@ describe("readWavPeak", () => {
   });
 });
 
+/**
+ * The one real capture measured on station03 (recording-20260727-135932-380.wav):
+ * peak_int16 1326 of 32768. Quiet dictation, and the number the silence threshold
+ * has to stay clear of.
+ */
+const MEASURED_REAL_DICTATION_PEAK = 1326 / 32768;
+
 describe("SILENCE_PEAK_THRESHOLD", () => {
   // Imported by this file but asserted nowhere, so mutating 0.001 -> 0.06 survived the suite. That
   // matters: 0.06 sits ABOVE the ~0.0405 peak of a real quiet dictation, so that mutant makes
@@ -209,16 +296,16 @@ describe("SILENCE_PEAK_THRESHOLD", () => {
   // configured, not proven.
   test("sits above one LSB and below a real quiet dictation peak", () => {
     const ONE_LSB = 1 / 32768;
-    // Measured peak of a real quiet dictation on a fleet Mac. The threshold must stay below it or
-    // speech is reported as silence.
-    const QUIET_DICTATION_PEAK = 0.040466;
 
+    expect(MEASURED_REAL_DICTATION_PEAK).toBeCloseTo(0.040466, 5);
     expect(SILENCE_PEAK_THRESHOLD).toBeGreaterThan(ONE_LSB);
-    expect(SILENCE_PEAK_THRESHOLD).toBeLessThan(QUIET_DICTATION_PEAK);
+    expect(SILENCE_PEAK_THRESHOLD).toBeLessThan(MEASURED_REAL_DICTATION_PEAK);
+    // A full order of magnitude of headroom, not merely "below".
+    expect(SILENCE_PEAK_THRESHOLD).toBeLessThan(MEASURED_REAL_DICTATION_PEAK / 10);
     // The documented margins, so a future edit cannot quietly restate them wrongly: ~33 LSB of
     // headroom over dither, and ~40x below real speech.
     expect(SILENCE_PEAK_THRESHOLD / ONE_LSB).toBeCloseTo(32.77, 1);
-    expect(QUIET_DICTATION_PEAK / SILENCE_PEAK_THRESHOLD).toBeCloseTo(40.5, 1);
+    expect(MEASURED_REAL_DICTATION_PEAK / SILENCE_PEAK_THRESHOLD).toBeCloseTo(40.5, 1);
   });
 
   test("classifies at the boundary: 32 int16 is silence, 34 is signal", () => {
@@ -236,6 +323,27 @@ describe("SILENCE_PEAK_THRESHOLD", () => {
     });
     expect(aboveThreshold.ok).toBe(true);
     expect(aboveThreshold.silent).toBe(false);
+  });
+
+  test("a capture at the real dictation peak is NOT classified as silence", () => {
+    const dir = makeTempDir();
+    const executable = makeRecorderStub(dir, buildWav([0, 1326, -1200]));
+
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
+
+    expect(result.ok).toBe(true);
+    expect(result.silent).toBe(false);
+  });
+
+  test("a capture just at the threshold IS classified as silence", () => {
+    const dir = makeTempDir();
+    const atThreshold = Math.floor(SILENCE_PEAK_THRESHOLD * 32768);
+    const executable = makeRecorderStub(dir, buildWav([0, atThreshold]));
+
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
+
+    expect(result.ok).toBe(false);
+    expect(result.silent).toBe(true);
   });
 });
 
@@ -324,6 +432,36 @@ describe("probeMicrophoneCapture", () => {
     const peak = readWavPeak(file);
     expect(peak.samples).toBe(4);
     expect(peak.peak).toBeCloseTo(0.25, 5);
+  });
+
+  // F9's timeout branch survived being made to report ok:true, so it had no test.
+  test("FAILS when the recorder is killed by the timeout, even if it wrote a WAV", () => {
+    const dir = makeTempDir();
+    // Writes a perfectly good non-silent WAV, then hangs so the timeout fires.
+    const wavPath = join(dir, "canned.wav");
+    writeFileSync(wavPath, buildWav([0, 8192, -8192]));
+    const stub = join(dir, "slow-rec.sh");
+    writeFileSync(stub, `#!/usr/bin/env bash\ncp ${JSON.stringify(wavPath)} "$8"\nsleep 30\n`);
+    chmodSync(stub, 0o755);
+
+    const result = probeMicrophoneCapture(makeConfig(), {
+      executable: stub,
+      timeoutMs: 700,
+    });
+
+    // A partial or abandoned capture must not be laundered into a pass by the
+    // file happening to look valid.
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("did not finish");
+  });
+
+  test("clamps an absurd probe duration instead of blocking on it", () => {
+    const dir = makeTempDir();
+    const executable = makeRecorderStub(dir, buildWav([0, 4096]));
+
+    const result = probeMicrophoneCapture(makeConfig(), { executable, seconds: 999_999 });
+
+    expect(result.seconds).toBe(MAX_PROBE_SECONDS);
   });
 
   test("fails cleanly when the recorder executable does not exist", () => {

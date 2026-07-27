@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { CURRENT_MIGRATION_LEVEL } from "../db/database.js";
 import { existsSync } from "fs";
 import { resolveTransport } from "../http/client.js";
 import { redactKeyMaterial } from "./transcriber.js";
@@ -104,6 +105,31 @@ function readLocalRecordingCount(dbPath: string): number | null {
         | { count?: number }
         | null;
       return typeof row?.count === "number" ? row.count : null;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is an existing local store behind the current schema?
+ *
+ * Read-only, because the only other way to find out is to open it read-write,
+ * which applies the migrations — the exact side effect being checked for.
+ * Returns null when the answer cannot be established.
+ */
+export function localStoreIsBehindSchema(dbPath: string): boolean | null {
+  if (!existsSync(dbPath)) return null;
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT MAX(id) AS max_id FROM _migrations").get() as
+        | { max_id?: number | null }
+        | null;
+      const level = typeof row?.max_id === "number" ? row.max_id : -1;
+      return level < CURRENT_MIGRATION_LEVEL;
     } finally {
       db.close();
     }
@@ -280,6 +306,15 @@ export async function probeRecordingPersistence(
     allowRemoteWrite?: boolean;
     /** Pre-probe existence of the local SQLite file, for honest reporting. */
     localStoreExistedBefore?: boolean;
+    /**
+     * Required before this will migrate a LEGACY local store. Writing through
+     * the LocalStore opens the database read-write, which applies pending
+     * migrations — and this module calls migrating a legacy file "a destructive
+     * surprise" 80 lines above. It does not get to do it silently either.
+     */
+    allowLocalMigration?: boolean;
+    /** Whether the local store is behind the current schema; null = unknown. */
+    localStoreIsLegacy?: boolean | null;
   } = {}
 ): Promise<PersistenceProbeResult> {
   const store = options.store ?? getStore();
@@ -296,6 +331,29 @@ export async function probeRecordingPersistence(
     created_local_store: false,
     reachable: null,
   };
+
+  // Symmetry with describeActiveStore, which refuses to open the store
+  // read-write at all: the probe may not migrate a legacy file behind the
+  // operator's back just because the write happens to be its own.
+  if (
+    transport === "local" &&
+    options.localStoreIsLegacy === true &&
+    !options.allowLocalMigration
+  ) {
+    return {
+      ...base,
+      // NOT `ok: true`. This is the same defect F1 named on the cloud-http skip: declining to
+      // measure is not a proof, and rendering it as a green check is the lie. Reported as
+      // `skipped` so the renderer prints "NOT MEASURED" and the exit code keys off `failed` only.
+      ok: false,
+      outcome: "skipped",
+      message:
+        "NOT MEASURED: the local SQLite store is behind the current schema, and writing to it " +
+        "would apply pending migrations to a legacy file. Migrate deliberately " +
+        "('recordings migrate') or re-run with --probe-store-write to accept the migration as " +
+        "part of the probe.",
+    };
+  }
 
   if (transport === "cloud-http" && !options.allowRemoteWrite) {
     // Prove what CAN be proved without writing to production. A read-only stats call establishes
