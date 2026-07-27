@@ -638,6 +638,51 @@ printf '%s\\n' "$value"
     ]);
   });
 
+  /**
+   * The app-log observation, driven through the real CLI rather than only through the parser.
+   * `app status` is the surface that can be exercised this way off macOS, because it resolves
+   * the log path unconditionally; the parse, the cross-check and the rendering are the same
+   * code `check` runs.
+   */
+  test("app status reads the app's own log and says the stored trigger is not armed", () => {
+    const home = scratchHome("appstatus");
+    mkdirSync(join(home, ".hasna", "recordings"), { recursive: true });
+    writeFileSync(
+      join(home, ".hasna", "recordings", "Recordings.log"),
+      "[2026-07-27T08:00:00Z] app launched\n" +
+        "[2026-07-27T08:00:01Z] trigger bindings: shortcutStored=carbonKeyCode=96 " +
+        "carbonModifiers=0 shortcutArmed=unknown(carbon-registration-status-not-exposed) " +
+        "shortcutSystemReserved=false useFnKey=false fnMonitorRunning=false " +
+        "microphone=allowed accessibility=allowed blocked=none\n",
+    );
+    // Storage now says fn is ON; the running app registered with it OFF.
+    const result = Bun.spawnSync([process.execPath, cliEntry, "--json", "app", "status"], {
+      cwd: repoRoot,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: home,
+        ...fakeDefaults(home, STORED_F5, "1"),
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(result.stdout.toString()) as {
+      log_path: string;
+      trigger: {
+        can_fire: boolean;
+        warnings: string[];
+        app_observation: { fn_monitor_running: boolean; observed_at: string; use_fn_key: boolean };
+      };
+    };
+    // Existing keys are untouched.
+    expect(report.log_path).toContain(".hasna/recordings/Recordings.log");
+    expect(report.trigger.app_observation.observed_at).toBe("2026-07-27T08:00:01Z");
+    expect(report.trigger.app_observation.use_fn_key).toBe(false);
+    expect(report.trigger.app_observation.fn_monitor_running).toBe(false);
+    expect(report.trigger.warnings.join(" ")).toContain("NOT armed");
+    // A hotkey is bound, so `app status` is not claiming the machine is dead.
+    expect(report.trigger.can_fire).toBe(true);
+  });
+
   testWithStrace("bare check opens no network connection", () => {
     // Proved rather than asserted: the same claim was made for a previous change in this repo
     // and had to be established by watching the syscalls. `strace` is filtered to connect(2)
