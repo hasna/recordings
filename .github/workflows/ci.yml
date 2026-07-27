@@ -12,9 +12,11 @@ name: CI
 #   Swift/C native (87 files under src/native) — compiled on macOS, but only PARTLY, because `main`
 #     itself does not compile. Six pre-existing errors across Updater/VerifierLauncher (C) and
 #     Updater/Protocol (Swift) are recorded in .github/native-known-errors.txt, and they block 8 of
-#     the package's 11 targets. The other three — RecordingsLib, App and RecordingsTests, i.e. the
-#     bulk of the Swift — are built individually and required to be clean. Read that file before
-#     reading the `native` job's green tick as "the native code compiles". It does not.
+#     the package's 11 targets. The other three — RecordingsLib, App and RecordingsTests, holding 53
+#     of the 84 Swift files that belong to a target, about 63% — are built individually and required
+#     both to be clean AND to show compile activity, since an exit status alone does not distinguish
+#     "compiled clean" from "did nothing". The unchecked 37% is the whole updater subsystem. Read that
+#     file before reading the `native` job's green tick as "the native code compiles". It does not.
 #
 # LIMITS OF THIS FILE, stated because a reader will otherwise assume the opposite:
 #   - Nothing here is REQUIRED to merge. That is branch-protection configuration on `main`, which

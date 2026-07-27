@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   KNOWN_ERRORS_FILE,
   blockedTargets,
+  compiledTargets,
   errorSignatures,
   normalizeMessage,
   parseKnownErrors,
@@ -265,6 +266,39 @@ describe("targetsFromDump and blockedTargets", () => {
     expect(signatureFile(CLOSEFROM)).toBe(
       "src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c",
     );
+  });
+});
+
+describe("compiledTargets", () => {
+  /** Real SwiftPM progress lines, in both the numbered and bare forms it emits. */
+  const output = [
+    "Building for debugging...",
+    "[0/2] Write sources",
+    "[3/7] Compiling RecordingsUpdateProtocol HostOSVersionPolicy.swift",
+    "[5/9] Emitting module RecordingsUpdateProtocol",
+    "[29/59] Compiling RecordingsVerifierLauncher RecordingsVerifierLauncher.c",
+    "Compiling RecordingsLib RecordingEngine.swift",
+    "Build complete!",
+  ].join("\n");
+
+  test("reports every target SwiftPM did compile work for", () => {
+    expect(compiledTargets(output)).toEqual([
+      "RecordingsLib",
+      "RecordingsUpdateProtocol",
+      "RecordingsVerifierLauncher",
+    ]);
+  });
+
+  test("an up-to-date build that compiles nothing reports nothing", () => {
+    // The case that makes the caller's check load-bearing: SwiftPM exits 0 here, so exit status alone
+    // cannot tell this apart from a target that really was compiled clean. Reading run 30305889651's
+    // log showed no `Compiling RecordingsLib` line anywhere in the job while three targets were
+    // reported `ok`, because successful output was being discarded -- three unevidenced claims.
+    expect(compiledTargets("Building for debugging...\nBuild complete! (0.11s)")).toEqual([]);
+  });
+
+  test("does not mistake a write or copy step for compilation", () => {
+    expect(compiledTargets("[1/2] Write swift-version-5975E236E64FF690.txt\n[1/45] Copying HasnaLogo.jpg")).toEqual([]);
   });
 });
 

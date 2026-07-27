@@ -2,8 +2,8 @@
 /**
  * Compile the native half and compare the compiler's error SET against a recorded baseline.
  *
- * Why a set comparison rather than a plain build gate: `main` at 32c5538 does not compile, which the
- * first CI run on this repository discovered. The two obvious responses are both wrong.
+ * Why any of this exists: `main` does not compile. The first CI run this repository ever had
+ * discovered it, and the two obvious responses are both wrong.
  *
  *   Gate on a green build — the workflow is red on arrival for a defect it does not own, so it gets
  *     ignored or bypassed, and this repository ends up back where it started.
@@ -11,10 +11,18 @@
  *     protection whatsoever, and a check that renders green while 87 Swift files went unverified is
  *     the precise false assurance the workflow exists to end.
  *
- * So the baseline is recorded and the SET is gated. A newly introduced compile error is caught on
- * the first run that introduces it, even though the build was already failing. The exemption also
- * expires by itself: if the build starts succeeding, or a recorded error stops appearing, this
- * fails and says to update the file.
+ * So the recorded errors are baselined and everything they do NOT block is gated properly:
+ *
+ *   1. The whole package is built with --build-tests. A NEW error fails the job; a failure with no
+ *      diagnostic attributable to this repository also fails, since it cannot be compared to the
+ *      baseline at all; a success while the baseline is non-empty fails as stale.
+ *   2. Because that build stops scheduling after its first failure — measured: 41 of 140 tasks, all
+ *      of them third-party — step 1 alone proves nothing about the rest of the package. So every
+ *      target not transitively blocked by a baselined error is then built INDIVIDUALLY and required
+ *      to be clean, and required to show compile activity, because an exit status on its own does not
+ *      distinguish "compiled clean" from "did nothing".
+ *   3. Blocked targets are built too, and any that now builds cleanly fails the job as a stale
+ *      baseline entry. That is what stops the baseline being permanent by default.
  *
  * Usage: bun scripts/ci-native-build.ts [--package-path <dir>]
  */
@@ -195,6 +203,27 @@ export function signatureFile(signature: string): string {
   return signature.split(": ")[0]!;
 }
 
+/**
+ * Target names SwiftPM reported doing compile work for.
+ *
+ * This turns "the build exited 0" into evidence that something was actually compiled. Without it a
+ * per-target build that did nothing at all is indistinguishable from one that compiled the target
+ * clean — and "did nothing" is the normal outcome when the target is already up to date, so the
+ * distinction is not hypothetical. Found by reading run 30305889651's log and discovering it contains
+ * no `Compiling RecordingsLib` line anywhere, because successful output was being discarded: three
+ * targets were reported `ok` on no recorded evidence whatsoever.
+ *
+ * Accumulated across every phase of the job rather than per invocation, because building one target
+ * warms its dependencies, so a dependency's own later invocation legitimately prints nothing.
+ */
+export function compiledTargets(output: string): string[] {
+  const seen = new Set<string>();
+  for (const match of output.matchAll(/^(?:\[\d+\/\d+\] )?(?:Compiling|Emitting module) (\w+)\b/gm)) {
+    if (match[1]) seen.add(match[1]);
+  }
+  return [...seen].sort();
+}
+
 /** Emit a GitHub Actions step output when running under Actions; a no-op elsewhere. */
 function setOutput(name: string, value: string): void {
   const file = process.env.GITHUB_OUTPUT;
@@ -292,8 +321,12 @@ async function main(argv: string[]): Promise<void> {
   setOutput("blocked", blocked.join(", "));
   setOutput("gatedTargets", String(gated.length));
 
+  // Compile activity from every phase, starting with the whole-package attempt.
+  const compiled = new Set<string>(compiledTargets(output));
+
   const buildTarget = async (name: string) => {
     const attempt = await run(["swift", "build", "--target", name, "--package-path", packagePath]);
+    for (const seen of compiledTargets(attempt.output)) compiled.add(seen);
     return {
       clean: attempt.exitCode === 0,
       introduced: errorSignatures(attempt.output, repoRoot).filter((s) => !known.includes(s)),
@@ -303,14 +336,32 @@ async function main(argv: string[]): Promise<void> {
 
   const failures: string[] = [];
   for (const name of gated) {
-    const { clean, introduced, output } = await buildTarget(name);
+    const { clean, introduced, output: targetOutput } = await buildTarget(name);
     if (clean && introduced.length === 0) {
-      console.log(`  ok        ${name}`);
+      // Print the compile lines rather than a bare "ok". An `ok` with no evidence behind it is the
+      // same species of claim this whole workflow exists to stop accepting.
+      const evidence = targetOutput
+        .split("\n")
+        .filter((line) => /(?:Compiling|Emitting module) /.test(line))
+        .length;
+      console.log(`  ok        ${name} (${evidence} compile step(s))`);
       continue;
     }
     console.log(`  FAILED    ${name}`);
-    process.stdout.write(output);
+    process.stdout.write(targetOutput);
     failures.push(name);
+  }
+
+  // A gated target that never appeared in any compile line was not verified, whatever its exit
+  // status said. Reported as a hard failure: a gate that cannot show its work is not a gate.
+  const unproven = gated.filter((name) => !compiled.has(name));
+  if (unproven.length > 0) {
+    console.log(
+      `\n::error title=Target reported clean without compiling::${unproven.join(", ")} exited 0 but ` +
+        "SwiftPM never reported compiling or emitting a module for them, so nothing was verified. " +
+        `Targets observed compiling: ${[...compiled].sort().join(", ") || "(none)"}`,
+    );
+    process.exit(1);
   }
 
   // The baseline's expiry date, and the reason it is checked HERE. A blocked target that now builds

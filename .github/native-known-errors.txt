@@ -24,8 +24,18 @@
 #   RecordingsVerifierLauncher, RecordingsUpdateBroker, RecordingsUpdateBrokerTests   (the C errors)
 #   RecordingsUpdateProtocol, RecordingsUpdateClient, RecordingsEnvelopeSigner,
 #   RecordingsBootstrapPreflight, RecordingsUpdateProtocolTests                       (the Swift ones)
-# WHAT IS STILL GATED, i.e. required to compile cleanly on every PR:
-#   RecordingsLib, App, RecordingsTests — the bulk of the Swift, including the 21-file test target.
+# WHAT IS STILL GATED, i.e. required to compile cleanly on every PR, and required to show compile
+# activity while doing it:
+#   RecordingsLib (22 Swift files), App (10), RecordingsTests (21) = 53 of the 84 Swift files that
+#   belong to a target. The blocked Updater subtree is the other 31. So roughly 63% of the Swift is
+#   compile-checked and 37% is not; the unchecked 37% is the entire updater subsystem.
+# (src/native holds 87 .swift files in all: the 84 above, plus Package.swift and two stray
+# test_fn*.swift at the package root that belong to no target and are compiled by nothing.)
+#
+# The target lists above are DERIVED, not configured -- scripts/ci-native-build.ts maps each entry
+# below to its owning target via `swift package dump-package` and then closes over dependents. They
+# are restated here only as a reading aid; if they ever disagree with the job's output, the job is
+# right and this comment is stale.
 
 # --- Updater/VerifierLauncher (C) -------------------------------------------------------------------
 # Two missing DECLARATIONS, not missing functionality, and neither is safe to fix blind: `closefrom`
