@@ -295,7 +295,7 @@ struct VoiceShortcutRoutingTests {
     func shortcutBoundaries() async {
         let recorder = PasteRecorder()
         let engine = makeEngine(pasteRecorder: recorder)
-        let shortcuts = VoiceShortcuts()
+        let shortcuts = VoiceShortcuts(homePath: makeIsolatedTestHome("voice-shortcuts"))
         shortcuts.shortcuts = [VoiceShortcut(trigger: "add disclaimer", content: "This is not legal advice.")]
         engine.voiceShortcuts = shortcuts
 

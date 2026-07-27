@@ -20,12 +20,17 @@ public struct VoiceShortcut: Identifiable, Codable {
 public final class VoiceShortcuts: ObservableObject {
     @Published public var shortcuts: [VoiceShortcut] = []
 
-    private let storageURL: URL = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".hasna/recordings/voice-shortcuts.json")
-    }()
+    private let storageURL: URL
 
-    public init() {
+    /// Injected for the same reason as `RecordingEngine.home`, and named to match the
+    /// `homePath:` seam the rest of the package already uses: the default resolves through the
+    /// password database (`getpwuid`), not `$HOME`, so a test cannot redirect this write by
+    /// overriding the environment and has to pass a temp directory explicitly. Without it a
+    /// test that touches voice shortcuts rewrites the operator's real
+    /// `~/.hasna/recordings/voice-shortcuts.json`.
+    public init(homePath: String = FileManager.default.homeDirectoryForCurrentUser.path) {
+        storageURL = URL(fileURLWithPath: homePath)
+            .appendingPathComponent(".hasna/recordings/voice-shortcuts.json")
         load()
     }
 

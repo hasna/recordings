@@ -45,4 +45,23 @@ struct RecordingEngineHomeIsolationTests {
             #expect(logged.components(separatedBy: "RecordingEngine init").count - 1 == 1)
         }
     }
+
+    /// The engine is not the only type that roots itself at the live home. `VoiceShortcuts`
+    /// persists `voice-shortcuts.json` the same way, so a test that adds a shortcut used to
+    /// rewrite the operator's real file. Ported from the same seam work; the structural half of
+    /// this rule is enforced in `src/__tests__/native-test-log-isolation-contract.test.ts`,
+    /// which — unlike this file — can actually run without a Swift toolchain.
+    @Test("voice shortcuts persist under the injected home, not the live one")
+    func voiceShortcutsPersistUnderInjectedHome() throws {
+        let home = makeIsolatedTestHome("home-isolation-shortcuts")
+
+        let shortcuts = VoiceShortcuts(homePath: home)
+        shortcuts.add(trigger: "containment probe", content: "written to a temp home")
+
+        let text = try String(
+            contentsOfFile: "\(home)/.hasna/recordings/voice-shortcuts.json",
+            encoding: .utf8
+        )
+        #expect(text.contains("containment probe"))
+    }
 }
