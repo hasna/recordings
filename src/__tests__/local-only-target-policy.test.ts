@@ -344,6 +344,49 @@ describe("local-only approved target policy", () => {
     });
   });
 
+  test("refusing symlinks applies to the policy file itself, not to symlinked ancestors", () => {
+    // The granularity is the whole point of the previous test being safe to ship. `[ -L ]`
+    // and lstat() both inspect only the FINAL component, so a policy reached through a
+    // symlinked package root or a symlinked scripts/ directory still resolves — which is
+    // what pnpm and yarn do to every installed package. Tightening this to "no symlink
+    // anywhere on the path" (realpath comparison, say) would refuse a perfectly normal
+    // install, so pin the distinction rather than leaving it to be rediscovered.
+    const root = mkdtempSync(join(tmpdir(), "recordings-policy-ancestor-"));
+    try {
+      const real = join(root, "real");
+      mkdirSync(join(real, "scripts", "policy"), { recursive: true });
+      const policy = join(real, "scripts", "policy", "local-only-approved-targets.txt");
+      writeFileSync(policy, "station03\nstation06\n");
+
+      const linkedRoot = join(root, "linked-package-root");
+      const linkedScripts = join(root, "linked-scripts");
+      symlinkSync(real, linkedRoot);
+      symlinkSync(join(real, "scripts"), linkedScripts);
+
+      const reachedThroughSymlinkedAncestors = [
+        policy,
+        join(linkedRoot, "scripts", "policy", "local-only-approved-targets.txt"),
+        join(linkedScripts, "policy", "local-only-approved-targets.txt"),
+      ];
+      for (const path of reachedThroughSymlinkedAncestors) {
+        const shell = shellReaderVerdictAtPath(path, "station03");
+        expect(shell.ok, path).toBeTrue();
+        expect(shell.matched, path).toBeTrue();
+        expect(typeScriptReaderVerdict(path).ok, path).toBeTrue();
+        expect(localOnlyApprovedTargets(path)).toEqual(["station03", "station06"]);
+      }
+
+      // ...and the final component being a link is still refused, in the same directory,
+      // so the two outcomes are separated by exactly one thing.
+      const finalComponentLink = join(root, "policy-as-link.txt");
+      symlinkSync(policy, finalComponentLink);
+      expect(shellReaderVerdictAtPath(finalComponentLink, "station03").ok).toBeFalse();
+      expect(typeScriptReaderVerdict(finalComponentLink).ok).toBeFalse();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("the shell reader does not silently succeed when the requested target is last", () => {
     // A trailing `&& VAR=1` inside the loop makes the compound return non-zero under
     // `set -e` whenever the final line is not the requested target; assert both ends.
