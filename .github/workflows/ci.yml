@@ -1,0 +1,448 @@
+name: CI
+
+# This repository had no workflows at all until this file: zero runs in its entire history, so
+# every one of its merges was gated only by somebody running batteries by hand.
+#
+# READ THIS BEFORE TRUSTING A GREEN CHECK. The two halves of this repository are NOT equally
+# covered, and the asymmetry is structural rather than an oversight:
+#
+#   TypeScript/CLI/MCP/server — typechecked, tested and built on Linux. The whole suite, with no
+#     exemptions: .github/linux-quarantine.txt is empty, and the `typescript` job proves after the
+#     fact, against the runner's own JUnit report, that it ran exactly the discovered set.
+#   Swift/C native (87 files under src/native) — compiled on macOS, but only PARTLY, because `main`
+#     itself does not compile. Six pre-existing errors across Updater/VerifierLauncher (C) and
+#     Updater/Protocol (Swift) are recorded in .github/native-known-errors.txt, and they block 8 of
+#     the package's 11 targets. The other three — RecordingsLib, App and RecordingsTests, holding 53
+#     of the 84 Swift files that belong to a target, about 63% — are built individually and required
+#     both to be clean AND to show compile activity, since an exit status alone does not distinguish
+#     "compiled clean" from "did nothing". The unchecked 37% is the whole updater subsystem. Read that
+#     file before reading the `native` job's green tick as "the native code compiles". It does not.
+#
+# LIMITS OF THIS FILE, stated because a reader will otherwise assume the opposite:
+#   - Nothing here is REQUIRED to merge. That is branch-protection configuration on `main`, which
+#     this file cannot set. Until it is configured these checks are advisory.
+#   - The `scope` job fails when a job it depends on did not succeed, which catches a job that was
+#     skipped or cancelled. It cannot catch a job DELETED along with its `needs` entry — no workflow
+#     can assert against its own absence.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The suite is long and macOS minutes are not free in every billing configuration, so a superseded
+# push should stop paying for itself. Only for pull requests: a run on `main` is the record of what
+# that commit did and must not be cancelled by the next merge.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  typescript:
+    name: TypeScript (Linux — native/Swift NOT covered here)
+    runs-on: ubuntu-24.04
+    # Set from measurement, not from optimism. Run 30303366777 on this runner ran the whole suite —
+    # 1193 tests across 55 files — in 359.69s, for a total job time of 6m21s. Thirty minutes is
+    # ~4.7x headroom: enough to absorb a slow runner, short enough that a genuinely hung suite is not
+    # left sitting for three quarters of an hour.
+    #
+    # Nearly all of that 359s is macos-app-lifecycle, which took 358.85s on its own in run
+    # 30302342895. Combining it with the other 54 files cost essentially nothing, which also settles
+    # the question that mattered: bun runs test files sequentially in one process, so the shared-/tmp
+    # interference that breaks these suites on a busy workstation does not occur within a single run.
+    timeout-minutes: 30
+    env:
+      # Raised above bun's 5000ms default because a subprocess-spawning test that trips the default
+      # reports as `Received: ""` — a message that reads like a logic bug and has cost this
+      # repository real time. Measured headroom: the slowest of the 974 tests in the JUnit report
+      # from run 30302342895 took 1.88s, so this is ~64x the slowest observed test.
+      #
+      # It cannot rescue a test carrying its own hardcoded budget — the FIFO waits in
+      # macos-app-lifecycle reject at an internal 5000ms setTimeout that no flag reaches. Those pass
+      # on a runner and fail only on a contended machine, so the fix there is an uncontended
+      # machine, not a larger number here.
+      RECORDINGS_TEST_TIMEOUT_MS: "120000"
+      JUNIT_REPORT: gated-junit.xml
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The Diff hygiene step compares against the pull request's base commit, and the default
+          # depth-1 checkout of a merge ref does not contain it -- the step failed with
+          # `fatal: bad object <base-sha>` before this was added. This repository's whole history is
+          # small enough that full depth costs nothing measurable.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          # Pinned, not `latest`. bun.lock was written by 1.3.14 and the lockfile format is the
+          # thing --frozen-lockfile is checking against.
+          bun-version: 1.3.14
+
+      - name: Install locked dependencies
+        # --frozen-lockfile is not hygiene here, it is the fix for a recorded incident: every
+        # dependency is a caret range, and a plain `bun install` resolves @hasna/events to 0.1.14,
+        # which dropped a shipped CLI command inside the patch range and manufactured a cli.test.ts
+        # regression that cost a session to chase.
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: The lockfile is unchanged by installing it
+        # The check --frozen-lockfile cannot perform on itself. If the flag is ever dropped, or a
+        # range is widened without relocking, the drift shows up here as a diff rather than as a
+        # mystery test failure three jobs later.
+        run: git diff --exit-code -- bun.lock
+
+      - name: Record resolved dependency versions
+        # Evidence, not a gate. Every past argument about a cross-tree comparison in this repo
+        # turned on which version of a dependency was actually resolved, and nobody could answer it
+        # after the fact.
+        run: |
+          {
+            echo '### Resolved dependencies'
+            echo
+            echo '```'
+            bun pm ls 2>&1 | sed 's/^/  /'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Type check the TCC contract project
+        run: bun run typecheck:tcc-contract
+
+      - name: Type check the shortcut contract project
+        run: bun run typecheck:shortcut-contract
+
+      - name: Validate the Linux quarantine
+        # Fails when an entry names a suite that no longer exists, when a test file is untracked and
+        # therefore invisible to the gate, or when git and a filesystem walk disagree about what the
+        # suite even is. Any of those silently shrinks the gate.
+        run: bun run verify:ci-suite
+
+      - name: Test the gated suite
+        # pipefail is load-bearing: without it the pipeline reports tee's status and every test
+        # failure merges green. `2>&1` is equally load-bearing — bun writes its results and its
+        # summary to stderr, so a stdout-only capture records nothing at all.
+        shell: bash
+        run: |
+          set -o pipefail
+          bun test \
+            --timeout "$RECORDINGS_TEST_TIMEOUT_MS" \
+            --reporter=junit --reporter-outfile="$JUNIT_REPORT" \
+            $(bun scripts/ci-linux-suite.ts --gated) 2>&1 | tee gated-console.log
+
+      - name: The gated run covered exactly the gated set
+        # `bun test` matches positional arguments as SUBSTRING FILTERS, not as paths, so handing it
+        # a list is not evidence that it ran that list. This reads back the runner's own JUnit
+        # report and requires the executed set to equal the gated set — no quarantined suite pulled
+        # in, no gated suite silently unmatched. Without it the whole partition is unverified.
+        if: always()
+        run: bun run verify:ci-suite:run -- "$JUNIT_REPORT"
+
+      - name: Quarantined suites are still failing
+        # The quarantine's expiry date. Each entry is re-run and required to STILL fail: when the
+        # environmental cause is fixed the suite goes green, this step goes red, and it tells you to
+        # delete the line. Without this a quarantine is permanent by default and nobody revisits it.
+        #
+        # This has already paid for itself. The list was seeded with the three suites that
+        # src/__tests__/helpers/source-assertions.ts recorded as permanently red on Linux, and this
+        # step passed all three on the first run, which is why the list is empty today.
+        #
+        # Run one file per invocation when the list is non-empty. Several of these suites scan a
+        # shared /tmp and corrupt each other's fixtures when run concurrently — the very contention
+        # that produced the false "permanently red" record.
+        if: always()
+        shell: bash
+        run: |
+          suites="$(bun scripts/ci-linux-suite.ts --quarantined)"
+          if [ -z "$suites" ]; then
+            # Say so out loud. An empty list producing no output is indistinguishable from a step
+            # that silently failed to read the file.
+            echo "::notice title=Quarantine is empty::The Linux gate covers every discovered suite; nothing is excluded."
+            exit 0
+          fi
+          stale=0
+          for suite in $suites; do
+            if bun test --timeout "$RECORDINGS_TEST_TIMEOUT_MS" "$suite" > "quarantine.log" 2>&1; then
+              echo "::error title=Stale quarantine::$suite now passes on Linux. Delete its line from .github/linux-quarantine.txt so the gate covers it."
+              stale=1
+            else
+              echo "::warning title=NOT covered by the Linux gate::$suite is quarantined and still failing on Linux, as recorded. Its behaviour is unverified by this run."
+            fi
+            tail -20 "quarantine.log"
+          done
+          exit "$stale"
+
+      - name: Build
+        run: bun run build
+
+      - name: Release guard over package-visible files
+        # The secret-pattern and retired-cloud scan that `prepack` runs. Cheap, and it is the only
+        # automated check in the repo that looks at what would actually ship.
+        run: bun run verify:release
+
+      - name: Generated SDK is in sync with the contract
+        # WARN-ONLY, deliberately, and this is not laziness. On main at 32c5538 regenerating already
+        # produces a diff: the committed header says "Recordings V1 API 0.2.13" against a
+        # package version of 0.2.15. It is a stale version stamp in a comment with no API-surface
+        # drift, and the version triple is owned by an open version-writer PR (#37), so gating on it
+        # would make this workflow red on arrival for a defect it does not own and cannot fix.
+        # Promote to a hard failure once that lands.
+        if: always()
+        shell: bash
+        run: |
+          bun run generate:sdk > /dev/null
+          if git diff --quiet -- src/sdk; then
+            echo "generated SDK matches the contract"
+          else
+            echo "::warning title=Generated SDK is stale (NOT gated)::bun run generate:sdk produces a diff on this commit. Pre-existing on main; see the diff below."
+            git --no-pager diff -- src/sdk
+          fi
+          git checkout -- src/sdk
+
+      - name: Diff hygiene
+        # Against the BASE, not the working tree. `git diff --check` with no revisions inspects
+        # uncommitted changes, and a fresh CI checkout has none -- it printed nothing and asserted
+        # nothing. Comparing against the merge base is what actually examines the pull request's diff
+        # for whitespace errors and conflict markers.
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then
+            # A push to main has no pull_request context; the previous commit is the right comparison.
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+          fi
+          if [ -z "$base" ]; then
+            echo "::notice title=Diff hygiene skipped::No base commit to compare against (first commit)."
+            exit 0
+          fi
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # Loud rather than silent: a check that cannot run must say so, not report success.
+            echo "::error title=Diff hygiene could not run::Base commit $base is not present in this checkout, so the pull request's diff was never examined. Restore fetch-depth: 0."
+            exit 1
+          fi
+          echo "comparing $base..HEAD"
+          git diff --check "$base" HEAD
+
+      - name: Preserve the test report
+        # The JUnit report carries a per-test duration, which is the only measured basis for
+        # tightening RECORDINGS_TEST_TIMEOUT_MS and timeout-minutes above.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gated-test-report-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            gated-junit.xml
+            gated-console.log
+          if-no-files-found: error
+          retention-days: 14
+
+  native:
+    name: Native (macOS — Swift/C compile)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    outputs:
+      # Surfaced so the `scope` job can state what actually compiled, rather than inferring it from
+      # this job's green tick. The tick means "nothing NEW broke", which is a much weaker claim; see
+      # .github/native-known-errors.txt.
+      compiled: ${{ steps.compile.outputs.compiled }}
+      blocked: ${{ steps.compile.outputs.blocked }}
+      gatedTargets: ${{ steps.compile.outputs.gatedTargets }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Record the toolchain
+        # Printed before anything is built, because the failure this repository will actually hit is
+        # a runner image whose Swift predates the 6.2 the package demands, and that surfaces as a
+        # confusing parse error in Package.swift rather than as a version complaint.
+        run: |
+          {
+            echo '### macOS runner toolchain'
+            echo
+            echo '```'
+            sw_vers
+            swift --version 2>&1
+            xcodebuild -version 2>&1 || true
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The runner satisfies the toolchain the package declares
+        # Derived from Package.swift rather than hardcoded, so bumping swift-tools-version cannot
+        # leave this check silently asserting an older floor than the package requires.
+        shell: bash
+        run: |
+          required="$(sed -n 's|^// *swift-tools-version: *\([0-9][0-9.]*\).*|\1|p' src/native/Recordings/Package.swift | head -1)"
+          [ -n "$required" ] || { echo "::error::Could not read swift-tools-version from Package.swift"; exit 1; }
+          actual="$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          [ -n "$actual" ] || { echo "::error::Could not read a Swift version from this runner"; exit 1; }
+          echo "package requires swift-tools-version $required; runner has Swift $actual"
+          # Sort-based comparison: the lower of the two must be the requirement.
+          lowest="$(printf '%s\n%s\n' "$required" "$actual" | sort -V | head -1)"
+          if [ "$lowest" != "$required" ]; then
+            echo "::error title=Swift toolchain too old::Runner Swift $actual cannot build a package requiring $required. The native half is NOT verified by this run."
+            exit 1
+          fi
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Resolve the Swift dependencies
+        run: swift package resolve --package-path src/native/Recordings
+
+      - name: The Swift dependency pins are unchanged by resolving them
+        # Package.resolved is committed and both dependencies are pinned exactly (KeyboardShortcuts
+        # by version, swift-testing by revision). A diff here means resolution moved off a pin —
+        # which matters more than usual for swift-testing, whose comment in Package.swift records
+        # that a mismatched version silently corrupted `#expect` Bool evaluation and passed false
+        # assertions.
+        run: git diff --exit-code -- src/native/Recordings/Package.resolved
+
+      - name: Compile every native and native-test target
+        id: compile
+        # Compiles all products AND all test targets, then compares the compiler's error SET against
+        # .github/native-known-errors.txt. `main` does not currently compile, discovered by the first
+        # run of this workflow, so a plain build gate would be red on arrival for a defect it does
+        # not own. Comparing the set instead still catches a NEWLY introduced compile error on the
+        # first run that introduces it, and fails if the recorded errors are fixed or disappear so
+        # the exemption cannot outlive its cause. Read that file before trusting this step's tick.
+        run: bun run verify:ci-native
+
+      - name: Run the native test suites
+        # Only attempted when the package actually compiled — running it against a failed build
+        # produces the compile errors a second time and reads like a test failure.
+        #
+        # NOT a gate, and the reason is stated rather than implied: these targets touch the
+        # microphone, the clipboard and accessibility APIs, all TCC-gated with no grantable state on
+        # a headless runner. Whether that makes them wholly or only partly unrunnable has never been
+        # measured, so this records the outcome instead of asserting one.
+        if: steps.compile.outputs.compiled == 'true'
+        shell: bash
+        run: |
+          # No `continue-on-error` needed: the if/else below already absorbs the exit status. Having
+          # both invites a reader to think the flag is what makes this non-blocking.
+          set -o pipefail
+          if swift test --package-path src/native/Recordings 2>&1 | tee swift-test.log; then
+            echo "::notice title=Native tests passed::swift test is green on this runner and can become a gate."
+          else
+            echo "::warning title=Native tests NOT gated::swift test did not pass on a headless runner. The native targets COMPILE but their behaviour is unverified. See the swift-test.log artifact."
+          fi
+
+      - name: Native test suites were not attempted
+        if: steps.compile.outputs.compiled != 'true'
+        run: |
+          echo "::warning title=Native tests NOT run::The package did not compile, so swift test was not attempted. Nothing about native RUNTIME behaviour is verified by this run."
+
+      - name: Build the native filesystem guard addon
+        # scripts/build_native_fs_guard.sh exits 1 on any non-Darwin host, so this line had never
+        # been executed by any automation before this workflow. It is what `prepack` runs before a
+        # publish, which means the publish path itself was unexercised outside a developer's Mac.
+        # Independent of the Swift build: a separate clang invocation over scripts/native.
+        if: always()
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          bun run build:native-fs-guard
+
+      - name: Preserve native build logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-build-logs-${{ github.event.pull_request.head.sha || github.sha }}
+          path: swift-test.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  scope:
+    name: Coverage scope (what this run did and did not verify)
+    needs: [typescript, native]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: State the coverage scope
+        # This job exists so that no configuration of this workflow can produce an all-green run
+        # while a half of the repository went unverified. It reads the other jobs' RESULTS, not
+        # their logs, and it fails when either half did not actually run — a skipped or cancelled
+        # job is otherwise rendered as a neutral grey tick that reviewers read as "fine".
+        shell: bash
+        env:
+          TS_RESULT: ${{ needs.typescript.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          NATIVE_COMPILED: ${{ needs.native.outputs.compiled }}
+          NATIVE_BLOCKED: ${{ needs.native.outputs.blocked }}
+          NATIVE_GATED: ${{ needs.native.outputs.gatedTargets }}
+        run: |
+          # Every line below is conditioned on a job RESULT. An earlier version printed
+          # "typechecked and built" as a literal and listed everything under "Verified:"
+          # unconditionally, so a run whose Linux job had FAILED still rendered a summary asserting
+          # the suite passed — a dishonest summary in the job whose only purpose is honesty.
+          if [ "$NATIVE_RESULT" != "success" ]; then
+            native_scope="**not examined** — job result \`$NATIVE_RESULT\`"
+          elif [ "$NATIVE_COMPILED" = "true" ]; then
+            native_scope='every target and test target compiled cleanly'
+          else
+            native_scope="**partly compiled** — ${NATIVE_GATED:-0} target(s) built; \`${NATIVE_BLOCKED:-unknown}\` blocked by pre-existing errors"
+          fi
+          if [ "$TS_RESULT" = "success" ]; then
+            ts_scope='typechecked, whole suite passed, built'
+          else
+            ts_scope="**not verified** — job result \`$TS_RESULT\`"
+          fi
+          {
+            echo '## Coverage scope for this run'
+            echo
+            echo "| Half of the repository | Job | Job result | What it established |"
+            echo "| --- | --- | --- | --- |"
+            echo "| TypeScript / CLI / MCP / server | \`typescript\` (Linux) | \`$TS_RESULT\` | $ts_scope |"
+            echo "| Swift / C native (src/native) | \`native\` (macOS) | \`$NATIVE_RESULT\` | $native_scope |"
+            echo
+            if [ "$TS_RESULT" = "success" ]; then
+              echo '**Verified on Linux:** three tsc projects; the whole bun suite with no exemptions,'
+              echo 'proven against the runner'"'"'s own JUnit report to be exactly the discovered set;'
+              echo 'build; release guard; lockfile unchanged by install.'
+            else
+              echo '**Nothing is verified on Linux:** that job did not succeed.'
+            fi
+            echo
+            if [ "$NATIVE_RESULT" = "success" ] && [ "$NATIVE_COMPILED" = "true" ]; then
+              echo '**Verified on macOS:** every native target and every native test target compiles;'
+              echo 'the Swift dependency pins; the Darwin-only filesystem guard addon.'
+            elif [ "$NATIVE_RESULT" = "success" ]; then
+              echo '**Partly verified on macOS:** the Swift dependency pins and the Darwin-only'
+              echo 'filesystem guard addon built, and the targets not blocked by a pre-existing error'
+              echo 'compiled cleanly. See the `native` job log for which targets were blocked.'
+            else
+              echo '**Nothing is verified on macOS:** that job did not succeed.'
+            fi
+            echo
+            echo '**Never verified by this workflow, in any run:** the RUNTIME behaviour of the Swift'
+            echo 'test targets (TCC-gated on a headless runner — compiled, not executed); code signing'
+            echo 'and notarization; the vacuity mutation battery; and the suites listed in'
+            echo '`.github/linux-quarantine.txt`, if any.'
+            if [ "$NATIVE_RESULT" = "success" ] && [ "$NATIVE_COMPILED" != "true" ]; then
+              echo
+              echo '> A green tick on the `native` job does NOT mean the native code compiles. It does'
+              echo "> not: \`${NATIVE_BLOCKED:-unknown}\` could not be built at all, so nothing in those"
+              echo '> targets is verified. See `.github/native-known-errors.txt`.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          fail=0
+          if [ "$NATIVE_RESULT" != "success" ]; then
+            echo "::error title=Native half unverified::The macOS job result is '$NATIVE_RESULT', so the native half was not examined at all. Do not read the other checks as covering src/native."
+            fail=1
+          elif [ "$NATIVE_COMPILED" != "true" ]; then
+            echo "::warning title=Native half does not compile::The macOS job ran and introduced no new compile error, but src/native still does NOT build. Its behaviour is unverified by this run."
+          fi
+          if [ "$TS_RESULT" != "success" ]; then
+            echo "::error title=TypeScript half unverified::The Linux job result is '$TS_RESULT'."
+            fail=1
+          fi
+          exit "$fail"

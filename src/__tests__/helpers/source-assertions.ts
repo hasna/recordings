@@ -14,29 +14,43 @@ import { join } from "node:path";
  * none of it, reads exactly like a satisfied one.
  *
  * ---------------------------------------------------------------------------------------------
- * BEFORE YOU BUILD A MUTATION BATTERY: three suites are PERMANENTLY RED on Linux.
+ * BEFORE YOU BUILD A MUTATION BATTERY: three suites are RED ON A CONTENDED STATION, not on Linux.
  *
- * A mutation battery is evidence only when its clean control is GREEN. Include any of these and
- * the run was already non-zero before you changed anything, so every mutation "looks caught" and
- * every verdict is manufactured. This already produced one wrong all-clear in this repo, and the
- * list in circulation named TWO of the three.
+ * A mutation battery is evidence only when its clean control is GREEN. Include a suite that was
+ * already failing and the run was non-zero before you changed anything, so every mutation "looks
+ * caught" and every verdict is manufactured. That already produced one wrong all-clear here.
+ *
+ * These three are the suites it happens to, measured deterministically 3 of 3 runs each on `main`
+ * at 40c37b1 with `bun install --frozen-lockfile`:
  *
  *   src/__tests__/macos-app-lifecycle.test.ts             EXIT 1,  48 pass /  92 fail
  *   src/__tests__/native-app-companion-contract.test.ts   EXIT 1,  13 pass /   1 fail
  *   src/__tests__/config.test.ts                          EXIT 1,  43 pass /   1 fail
  *
- * Measured deterministically, 3 of 3 runs each, on `main` at 40c37b1 with
- * `bun install --frozen-lockfile`. Causes are environmental, not defects in the code under test:
- * BSD `stat -f` plus hardcoded macOS tool paths, a fixture server port reading `NaN`, and a
- * `getDataDir` HOME-ancestor assumption respectively.
+ * CORRECTED 2026-07-27, and the correction is the useful part. This block used to call them
+ * "PERMANENTLY RED on Linux" and attribute fixed environmental causes — BSD `stat -f`, a fixture
+ * port reading `NaN`, a `getDataDir` HOME-ancestor assumption. The first CI run this repository
+ * ever had (run 30302342895, ubuntu-24.04) re-ran all three on a clean single-tenant runner and
+ * every one of them PASSED:
+ *
+ *   macos-app-lifecycle            140 pass / 0 fail   (358.85s)
+ *   native-app-companion-contract   14 pass / 0 fail   (  4.50s)
+ *   config                          44 pass / 0 fail   (  0.10s)
+ *
+ * So the cause is not the platform. It is CONTENTION on the station, which routinely runs several
+ * full recordings suites at once out of different worktrees — the hazard this very comment warns
+ * about below. The 92 macos-app-lifecycle failures are FIFO synchronisation timeouts at an internal
+ * 5000ms budget that no `--timeout` flag reaches, and they only trip when another suite is competing
+ * for the shared /tmp. Measure on a quiet machine, or in CI, before recording a suite as red.
  *
  * `@hasna/events` MUST resolve 0.1.11, as `bun.lock` pins it. A plain `bun install` pulls 0.1.14,
  * which dropped a shipped CLI command inside the patch range and fails `cli.test.ts` — and it can
  * drift back mid-session, so re-check it before quoting any cross-tree comparison.
  *
- * Corollary, equally load-bearing: this repo has NO CI. There is no `.github/workflows/`, and
- * `bun test` on `main` is EXIT 1 (94 failing tests), so `prepublishOnly = typecheck && test`
- * cannot pass on this platform either. Nothing gates these suites except somebody running them.
+ * Corollary, also corrected: this repo NOW HAS CI. `.github/workflows/ci.yml` gates the whole
+ * suite with no exemptions on every pull request, so these suites are no longer gated only by
+ * somebody remembering to run them. What CI does NOT cover is the Swift/C half, which does not
+ * currently compile; see `.github/native-known-errors.txt`.
  * Compare failing test NAMES, never counts — the suite is nondeterministic at the margin.
  * ---------------------------------------------------------------------------------------------
  */
