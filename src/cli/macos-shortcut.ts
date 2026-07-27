@@ -21,6 +21,16 @@
 
 import { spawnSync } from "node:child_process";
 
+/**
+ * TODO(rebase, ruled by ops 2026-07-27): PR #24 introduces the canonical
+ * `RECORDINGS_BUNDLE_IDENTIFIER` in `./macos-permissions.ts`, and that module owns
+ * bundle/grant identity. This constant is the same value under a second name and must be
+ * deleted in favour of importing that one when this branch rebases onto a main that contains
+ * #24. It is not importable yet — `macos-permissions.ts` on `main` does not export it — so
+ * importing now would leave this branch uncompilable rather than merely duplicated.
+ * The same rebase reconciles `showGrantTargets()` here with #24's
+ * `describeTccAuthorizationSubject()`: both answer "which bundle does the grant apply to".
+ */
 export const RECORDINGS_BUNDLE_ID = "com.hasna.recordings";
 
 /** Matches `userDefaultsPrefix` in KeyboardShortcuts.swift. */
@@ -324,15 +334,25 @@ export function runningAppBundlePaths(probes: BundleScanProbes = {}): string[] {
 /**
  * Whether a path is a bundle of *this* app.
  *
- * The identifier is the invariant, not the name: TCC grants and the UserDefaults domain
- * both key on CFBundleIdentifier. A sibling bundle called "Hasna Recordings.app" whose id
- * is `com.hasna.recordings.launcher` ends with "Recordings.app" and exists on disk, but a
- * grant given to it does nothing for this app — naming it would send the owner to enable
- * the wrong row in the Accessibility list. Check the last path component exactly, then
- * confirm the identifier.
+ * The identifier is the *only* invariant. TCC grants and the UserDefaults domain both key on
+ * CFBundleIdentifier, so that is what decides it — and nothing else may, because every
+ * name-shaped test produces a wrong answer in one direction or the other:
+ *
+ *   - `/Applications/Hasna Recordings.app` (id `com.hasna.recordings.launcher`) ends with
+ *     "Recordings.app" and exists on disk, so a suffix test accepts a bundle a grant would
+ *     do nothing for.
+ *   - a renamed bundle (`/Applications/Dictation.app` carrying `com.hasna.recordings`) and a
+ *     case variant (`recordings.app` on case-insensitive APFS) are genuinely this app, and
+ *     an exact-name test rejects both — the readout then claims "not running" and points the
+ *     grant somewhere else entirely.
+ *
+ * `scripts/install_macos_app.sh` resolves installed copies the same way, by identifier
+ * (`mdfind kMDItemCFBundleIdentifier == 'com.hasna.recordings'`).
+ *
+ * Nothing is lost by dropping the name test: reading the identifier only succeeds for a real
+ * bundle, so a wrapper's argument text or a non-bundle path fails on its own.
  */
 function isThisApp(candidate: string, readBundleIdentifier: BundleIdentifierReader): boolean {
-  if (candidate.slice(candidate.lastIndexOf("/") + 1) !== "Recordings.app") return false;
   return readBundleIdentifier(candidate) === RECORDINGS_BUNDLE_ID;
 }
 

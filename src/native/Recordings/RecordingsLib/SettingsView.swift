@@ -59,14 +59,14 @@ public struct SettingsView: View {
                 HStack {
                     Text("Shortcut")
                     Spacer()
+                    // Re-evaluate on change, not just log: a chord the system already
+                    // reserves has to be reported the moment it is picked, not at next launch.
                     KeyboardShortcuts.Recorder(for: .toggleRecording) { _ in
-                        engine.updateStatus()
-                        engine.logResolvedTrigger()
+                        engine.refreshTriggerDiagnostics()
                     }
                     Button("Reset to F5") {
                         KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
-                        engine.updateStatus()
-                        engine.logResolvedTrigger()
+                        engine.refreshTriggerDiagnostics()
                     }
                 }
                 // No .onChange here: `RecordingEngine.useFnKey`'s own didSet re-arms the
