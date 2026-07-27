@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -99,7 +99,24 @@ export type CodesignRequirementRunner = (
 ) => PermissionHelperProcessResult;
 
 export interface TccPermissionProbe {
-  databaseExists: (dbPath: string) => boolean;
+  /**
+   * Three-valued, and it has to be. This was `databaseExists: (dbPath) => boolean` backed by
+   * `existsSync`, which returns `false` for ANY `stat` error rather than just `ENOENT`. When
+   * `stat()` on the TCC path is itself refused, the caller took the "no database here" branch,
+   * never recorded a refusal, and returned `not_determined` — which
+   * `classifyPermissionState` maps to `never_requested`, producing the operator-facing claim
+   * "the app has never requested microphone access (no TCC entry exists)" on a machine whose
+   * grant row demonstrably exists. That is the exact flagship lie this module was written to kill,
+   * reached through the one path that looked too boring to check.
+   *
+   * Demonstrated on real macOS: a file present but `open()`-refused (`/etc/master.passwd`) gives
+   * `existsSync=true` and was handled correctly, while a path whose `stat()` is refused
+   * (`/private/var/db/dslocal/nodes/Default/users/root.plist`) gives `existsSync=false` and
+   * bypassed the fix entirely.
+   *
+   * `indeterminate` must be treated as unreadable, never as absent.
+   */
+  databasePresence: (dbPath: string) => "present" | "absent" | "indeterminate";
   readAccessRow: (dbPath: string, service: string) => TccAccessLookup;
   verifyStoredRequirement: (csreqHex: string, appPath: string) => TccIdentityVerification;
   /// Renders the stored requirement blob as requirement text, or null when it cannot be
@@ -180,7 +197,17 @@ export function verifyStoredRequirementWithCodesign(
 }
 
 const defaultTccPermissionProbe: TccPermissionProbe = {
-  databaseExists: existsSync,
+  databasePresence: (dbPath) => {
+    try {
+      statSync(dbPath);
+      return "present";
+    } catch (error) {
+      // ENOENT is the only error that means "there is no database at this path". Everything else
+      // — EACCES, EPERM, ELOOP, EIO — means we were not allowed or not able to find out, which is
+      // a refusal to be reported, not an absence to be assumed.
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "indeterminate";
+    }
+  },
   readAccessRow: (dbPath, service) => {
     // `auth_value` is INTEGER NOT NULL on a real TCC db, so its ifnull is belt-and-braces for a
     // synthetic or corrupt file; `csreq` is the genuinely nullable column. Without the guards a
@@ -290,7 +317,14 @@ export function resolveTccGrant(options: {
   let sawUnreadableDatabase = false;
 
   for (const dbPath of tccDatabasePaths(options.home)) {
-    if (!probe.databaseExists(dbPath)) continue;
+    const presence = probe.databasePresence(dbPath);
+    // A path we could not stat is NOT an absent database. Collapsing it into `continue` is what
+    // let "never asked" be reported for a granted app.
+    if (presence === "indeterminate") {
+      sawUnreadableDatabase = true;
+      continue;
+    }
+    if (presence === "absent") continue;
     const lookup = probe.readAccessRow(dbPath, options.service);
     if (lookup.kind === "unreadable") {
       sawUnreadableDatabase = true;

@@ -114,7 +114,7 @@ describe("TCC state vocabulary contract (PR #24 producer x PR #25 consumer)", ()
     // Pin the constant to observed producer behaviour, not to a second copy of the literal:
     // a database that exists but cannot be read must not be reported as "never asked".
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: () => ({ kind: "unreadable", detail: "authorization denied" }),
       verifyStoredRequirement: () => "unverifiable",
     };
@@ -130,7 +130,7 @@ describe("TCC state vocabulary contract (PR #24 producer x PR #25 consumer)", ()
 
   test("a readable database with no row is the only path to never_requested", () => {
     const probe: TccPermissionProbe = {
-      databaseExists: () => true,
+      databasePresence: () => "present",
       readAccessRow: () => ({ kind: "absent" }),
       verifyStoredRequirement: () => "unverifiable",
     };
@@ -142,6 +142,80 @@ describe("TCC state vocabulary contract (PR #24 producer x PR #25 consumer)", ()
     });
     expect(report.state).toBe("not_determined");
     expect(classifyPermissionState(report.state)).toBe("never_requested");
+  });
+
+  // The blocker a third review proved by mutation: reverting the unreadable-database handling left
+  // the suite at 64 pass / 0 fail / exit 0. These four tests exist so each revert fails.
+  describe("a database that cannot be read is never reported as never-asked", () => {
+    test("a stat-refused database is unreadable, NOT absent", () => {
+      // `existsSync` returns false for ANY stat error, so an EACCES on the TCC path used to take
+      // the "no database here" branch and return not_determined -> never_requested -> the
+      // operator-facing claim "no TCC entry exists" for an app that is in fact granted.
+      const report = resolveTccGrant({
+        service: "kTCCServiceMicrophone",
+        home: "/Users/nobody",
+        appPath: null,
+        probe: {
+          databasePresence: () => "indeterminate",
+          readAccessRow: () => ({ kind: "absent" }),
+          verifyStoredRequirement: () => "unverifiable",
+        },
+      });
+      expect(report.state).toBe(TCC_DATABASE_UNREADABLE_STATE);
+      expect(report.state).not.toBe("not_determined");
+      expect(classifyPermissionState(report.state)).toBe("unknown");
+      expect(classifyPermissionState(report.state)).not.toBe("never_requested");
+    });
+
+    test("an open-refused database is unreadable, NOT absent", () => {
+      const report = resolveTccGrant({
+        service: "kTCCServiceMicrophone",
+        home: "/Users/nobody",
+        appPath: null,
+        probe: {
+          databasePresence: () => "present",
+          readAccessRow: () => ({ kind: "unreadable", detail: "authorization denied" }),
+          verifyStoredRequirement: () => "unverifiable",
+        },
+      });
+      expect(report.state).toBe(TCC_DATABASE_UNREADABLE_STATE);
+      expect(classifyPermissionState(report.state)).not.toBe("never_requested");
+    });
+
+    test("one unreadable database poisons the never-asked claim even if another is absent", () => {
+      // Both candidate paths are consulted. If EITHER was unreadable, "never asked" is unprovable.
+      const paths: string[] = [];
+      const report = resolveTccGrant({
+        service: "kTCCServiceMicrophone",
+        home: "/Users/nobody",
+        appPath: null,
+        probe: {
+          databasePresence: (dbPath) => {
+            paths.push(dbPath);
+            return paths.length === 1 ? "indeterminate" : "absent";
+          },
+          readAccessRow: () => ({ kind: "absent" }),
+          verifyStoredRequirement: () => "unverifiable",
+        },
+      });
+      expect(paths.length).toBeGreaterThan(1);
+      expect(report.state).toBe(TCC_DATABASE_UNREADABLE_STATE);
+    });
+
+    test("only every-database-readable-and-empty yields never_requested", () => {
+      const report = resolveTccGrant({
+        service: "kTCCServiceMicrophone",
+        home: "/Users/nobody",
+        appPath: null,
+        probe: {
+          databasePresence: () => "absent",
+          readAccessRow: () => ({ kind: "absent" }),
+          verifyStoredRequirement: () => "unverifiable",
+        },
+      });
+      expect(report.state).toBe("not_determined");
+      expect(classifyPermissionState(report.state)).toBe("never_requested");
+    });
   });
 
   test("all three queue branches resolve to one bundle identifier definition", () => {

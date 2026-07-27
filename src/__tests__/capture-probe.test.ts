@@ -67,7 +67,11 @@ function buildWav(samples: number[], options: BuildWavOptions = {}): Buffer {
   // assumes a fixed 44-byte header silently reads metadata as audio.
   const chunks: Buffer[] = options.omitFmt ? [] : [fmt];
   if (options.extraChunk) {
-    const listBody = Buffer.from("INFOhello!", "ascii"); // odd length -> needs pad
+    // ODD length, so the chunk really is followed by a pad byte. The fixture read
+    // `Buffer.from("INFOhello!")` with the comment "odd length -> needs pad", but that string is
+    // 10 bytes — even — so the pad path was never exercised and dropping `+ (chunkSize % 2)` from
+    // readWavPeak's chunk walk survived as a mutation. "INFOhello" is 9.
+    const listBody = Buffer.from("INFOhello", "ascii"); // odd length (9) -> needs pad
     const list = Buffer.alloc(8 + listBody.length + (listBody.length % 2));
     list.write("LIST", 0, "ascii");
     list.writeUInt32LE(listBody.length, 4);
@@ -198,6 +202,43 @@ describe("readWavPeak", () => {
   });
 });
 
+describe("SILENCE_PEAK_THRESHOLD", () => {
+  // Imported by this file but asserted nowhere, so mutating 0.001 -> 0.06 survived the suite. That
+  // matters: 0.06 sits ABOVE the ~0.0405 peak of a real quiet dictation, so that mutant makes
+  // genuine speech report "no usable signal" while every test stays green. The threshold was
+  // configured, not proven.
+  test("sits above one LSB and below a real quiet dictation peak", () => {
+    const ONE_LSB = 1 / 32768;
+    // Measured peak of a real quiet dictation on a fleet Mac. The threshold must stay below it or
+    // speech is reported as silence.
+    const QUIET_DICTATION_PEAK = 0.040466;
+
+    expect(SILENCE_PEAK_THRESHOLD).toBeGreaterThan(ONE_LSB);
+    expect(SILENCE_PEAK_THRESHOLD).toBeLessThan(QUIET_DICTATION_PEAK);
+    // The documented margins, so a future edit cannot quietly restate them wrongly: ~33 LSB of
+    // headroom over dither, and ~40x below real speech.
+    expect(SILENCE_PEAK_THRESHOLD / ONE_LSB).toBeCloseTo(32.77, 1);
+    expect(QUIET_DICTATION_PEAK / SILENCE_PEAK_THRESHOLD).toBeCloseTo(40.5, 1);
+  });
+
+  test("classifies at the boundary: 32 int16 is silence, 34 is signal", () => {
+    const dir = makeTempDir();
+
+    const belowThreshold = probeMicrophoneCapture(makeConfig(), {
+      executable: makeRecorderStub(dir, buildWav(new Array(64).fill(32))),
+    });
+    expect(belowThreshold.ok).toBe(false);
+    expect(belowThreshold.silent).toBe(true);
+
+    const dir2 = makeTempDir();
+    const aboveThreshold = probeMicrophoneCapture(makeConfig(), {
+      executable: makeRecorderStub(dir2, buildWav(new Array(64).fill(34))),
+    });
+    expect(aboveThreshold.ok).toBe(true);
+    expect(aboveThreshold.silent).toBe(false);
+  });
+});
+
 describe("probeMicrophoneCapture", () => {
   // This is the regression this whole module exists for. On station03 with
   // Microphone = not_determined, `rec` exited 0 and wrote a 64080-byte WAV whose
@@ -252,15 +293,17 @@ describe("probeMicrophoneCapture", () => {
   // value" conflation this module exists to remove. Only the amplitude branch may state a verdict.
   test("reports silent as null when no amplitude was measured at all", () => {
     const missingBinaryDir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = join(missingBinaryDir, "definitely-missing");
-    const spawnFailed = probeMicrophoneCapture(makeConfig());
+    const spawnFailed = probeMicrophoneCapture(makeConfig(), {
+      executable: join(missingBinaryDir, "definitely-missing"),
+    });
     expect(spawnFailed.ok).toBe(false);
     expect(spawnFailed.samples).toBe(0);
     expect(spawnFailed.silent).toBeNull();
 
     const noFileDir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(noFileDir, null);
-    const wroteNothing = probeMicrophoneCapture(makeConfig());
+    const wroteNothing = probeMicrophoneCapture(makeConfig(), {
+      executable: makeRecorderStub(noFileDir, null),
+    });
     expect(wroteNothing.ok).toBe(false);
     expect(wroteNothing.silent).toBeNull();
   });
