@@ -7,6 +7,11 @@ import {
   readRepositoryFile,
   runInstallerPreflight,
 } from "./helpers/installer-preflight";
+import {
+  CANDIDATE_IDENTITY_SHA256,
+  EXISTING_IDENTITY_SHA256,
+  runInstallerToIdentityGuard,
+} from "./helpers/installer-guard-execution";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const guardPath = join(repositoryRoot, IDENTITY_GUARD_RELATIVE_PATH);
@@ -347,9 +352,10 @@ describe("designated-requirement identity-migration guard", () => {
   // uses — structure rather than substring.
   //
   // Stated plainly, because it is the difference between this and a proof: reading the
-  // call site is not the same as executing it. This does not demonstrate the guard runs
-  // during a real install; the one test that would is in macos-app-lifecycle.test.ts,
-  // which is 92 of 140 red on `main` on Linux and cannot serve as a gate here.
+  // call site is not the same as executing it. These parse assertions pin the CONTRACT of
+  // the call -- its argument vector and its terminator. Whether the call is REACHED is a
+  // separate question, and a text assertion cannot answer it; the "runs the installer"
+  // block at the end of this file answers it by running the installer.
   const identityGuardInvocation = (): { argv: string[]; terminator: string } => {
     const installer = readRepositoryFile("scripts/install_macos_app.sh");
     const lines = installer.split("\n");
@@ -427,9 +433,16 @@ describe("designated-requirement identity-migration guard", () => {
     //   : $((identity_migration = 0))       -- arithmetic assignment
     //
     // Enumerating every mention and pinning the exact set is stronger than adding those two
-    // shapes to a pattern, because it does not depend on having thought of the shapes: any
-    // new line touching this flag fails here and has to be argued for. A shell script has no
-    // parser available to this suite, so an exact-set tripwire is the structural option.
+    // shapes to a pattern: any new line naming this flag fails here and has to be argued for.
+    //
+    // It is NOT shape-independent, and an earlier version of this comment claimed it was. An
+    // adversarial review defeated it four ways, all at EXIT=0, by writing the flag through a
+    // computed name so the literal token never appears — `printf -v "${_fn}migration"`,
+    // `read -r "${_fn}migration"`, `declare "${_fn}migration=0"`, and a helper taking the name
+    // as an argument. Each was confirmed to really zero the flag, not merely to pass the test.
+    // What actually closes those is the WHITELIST in the ordering test below, which requires the
+    // gap between the loop and the call to be comments only. This assertion's real job is
+    // narrower: catching a write to the flag ELSEWHERE in the file, outside that gap.
     const installer = readRepositoryFile("scripts/install_macos_app.sh");
     const uses = installer
       .split("\n")
@@ -451,9 +464,11 @@ describe("designated-requirement identity-migration guard", () => {
     // 1, the argument vector is byte-identical, the terminator is still `|| exit 1`, and the
     // two assignment lines never moved. The loop still raises the flag; nothing enforces it;
     // the install proceeds and voids the grants. It is a plausible refactor ("gate earlier,
-    // fail fast"), and the only things that could catch it were a human noticing the
-    // orphaned comment left behind, or macos-app-lifecycle.test.ts -- which is 92 of 140 red
-    // on `main` on Linux and cannot serve as a gate.
+    // fail fast"), and before this assertion existed the only things that could catch it were
+    // a human noticing the orphaned comment left behind, or macos-app-lifecycle.test.ts --
+    // which is 92 of 140 red on `main` on Linux and cannot serve as a gate. The execution
+    // block at the end of this file now catches it independently, by observing that a run
+    // with the flag raised is not refused.
     const installer = readRepositoryFile("scripts/install_macos_app.sh");
     const lines = installer.split("\n");
     const initialize = lines.findIndex((line) => line.trim() === "identity_migration=0");
@@ -476,15 +491,57 @@ describe("designated-requirement identity-migration guard", () => {
     expect(initialize).toBeLessThan(raise);
     expect(loopEnd).toBeLessThan(call);
 
-    // And nothing in the gap may stub the guard out. `eval` is called out by name because
-    // `eval 'recordings_enforce_identity_migration() { return 0; }'` evades the
-    // `starts.length` count above: that filter uses `startsWith`, and the line starts with
-    // `eval`, so the stub is never counted as an invocation.
-    const between = lines.slice(loopEnd + 1, call).join("\n");
-    expect(between).not.toMatch(/\beval\b/);
+    // The gap between the loop and the call is a WHITELIST: comments and blank lines only.
+    //
+    // This started as a denylist -- `not.toMatch(/\beval\b/)` plus an enumeration of assignment
+    // shapes -- and an adversarial review took it apart. Every one of these zeroes the flag or
+    // stubs the guard between the loop and the call, and every one passed at EXIT=0 because it
+    // never writes the literal token `identity_migration` and never uses `eval`:
+    //
+    //   _fn=identity_; printf -v "${_fn}migration" '%s' 0
+    //   _fn=identity_; read -r "${_fn}migration" <<<0
+    //   _fn=identity_; declare "${_fn}migration=0"
+    //   _zero_it() { printf -v "$1" '%s' 0; }; _x=migration; _zero_it "identity_${_x}"
+    //
+    // And worst, at EXIT=0 with 29 pass / 0 fail: wrapping the call in a never-called function,
+    // the nine lines byte-identical, so the guard is DEFINED and never EXECUTED --
+    //
+    //   _recordings_gate() {
+    //   recordings_enforce_identity_migration \
+    //     ... || exit 1
+    //   }
+    //
+    // Every one of those needs at least one non-comment line in this gap. A whitelist does not
+    // have to anticipate the shape; a denylist does, and mine did not anticipate any of the five.
+    const between = lines.slice(loopEnd + 1, call);
+    const executable = between.filter((line) => line.trim() !== "" && !line.trimStart().startsWith("#"));
+    expect(
+      executable,
+      "nothing may execute between the comparison loop and the guard call: the guard must read " +
+        "the flag the loop just finished computing, and must not be wrapped, stubbed or preceded " +
+        "by a write to the flag. If the new line is legitimate, move it ABOVE the loop or BELOW " +
+        "the guard call rather than widening this whitelist",
+    ).toEqual([]);
+
+    // A wrapper could still be opened BEFORE the flag's initialization, taking the loop and the
+    // call together. No function may be declared across that region.
+    const enclosing = lines
+      .slice(initialize, call)
+      .filter((line) => /^\s*(?:function\s+\w+|[A-Za-z_]\w*\s*\(\s*\))\s*\{?\s*$/.test(line));
+    expect(
+      enclosing,
+      "no function may be declared between the flag's initialization and the guard call",
+    ).toEqual([]);
+
+    // The installer sources the packaged guard; it must not define or eval its own.
     expect(installer).not.toMatch(/\beval\b[^\n]*recordings_enforce_identity_migration/);
-    // The installer sources the packaged guard; it must not define its own.
     expect(installer).not.toMatch(/recordings_enforce_identity_migration\s*\(\s*\)\s*\{/);
+
+    // BOUND, stated because the assertions above are text and position, not execution: none of
+    // this runs the script. A wrapper opened far enough from this region, or a `return` inserted
+    // upstream, is not visible here. That bound is now covered -- not by a further text check,
+    // which cannot close it, but by the "runs the installer" describe block at the end of this
+    // file, which executes the call site and observes whether the guard fired.
   });
 
   // A gate whose only escape hatch is undiscoverable is an outage, not a safeguard. This
@@ -682,5 +739,92 @@ describe("designated-requirement identity-migration guard", () => {
       expect(guard).not.toContain(forbidden);
     }
     expect(guard).toContain("recordings_enforce_identity_migration() {");
+  });
+
+  // Everything above this point reads the installer as TEXT. Two adversarial rounds proved
+  // that text cannot close the hole, and the second round's own comment concedes why: the
+  // strongest available check asserts the guard call sits BETWEEN two markers, so the slice
+  // it inspects can never contain the opening brace of a construct that encloses both of
+  // them. Six mutations were measured surviving at 29 pass / 0 fail, `bash -n` clean, each
+  // separately confirmed to really defeat the guard rather than merely to pass:
+  //
+  //   1. a never-invoked wrapper function around the flag and the call
+  //   2. `function _gate() {` -- a declaration shape the whitelist's pattern does not match
+  //   3. `_gate() (` -- a subshell body, so there is no `{` to find at all
+  //   4. `if false; then ... fi` around both the loop and the call
+  //   5. a never-taken `case zzz in / yyy)` arm around both
+  //   6. a bare `{ ... }` group around both -- which MUST survive, because it executes
+  //
+  // Cases 4, 5 and 6 are invisible to any function-declaration check by construction: none
+  // of them declares a function. And case 6 is the proof that shape is the wrong question --
+  // it is textually the most suspicious of the six and the only one that is harmless.
+  // A seventh, `main() { ... }` + `main "$@"`, is a legitimate refactor that survives the
+  // whitelist correctly; a check that killed it would be worse than no check.
+  //
+  // Reachability is a property of RUNNING, so this block runs the installer. One execution
+  // separates all seven correctly, because the question it asks is not "what does the call
+  // site look like" but "did the guard fire".
+  describe("the guard actually runs when the installer runs", () => {
+    const REFUSAL = "not mutually compatible";
+
+    test("a real local-only run over an incompatible installed identity is refused by the guard", () => {
+      const run = runInstallerToIdentityGuard({ identityMigration: true });
+
+      // The installer's own comparison, not an injected flag: the stubbed `codesign` refuses
+      // each app against the other's designated requirement, which is the one thing in the
+      // script that raises `identity_migration`. Asserted so a run that never got as far as
+      // the comparison cannot satisfy the refusal check below by failing early.
+      expect(
+        run.codesignInvocations.filter((invocation) => invocation.includes(" -R ")),
+        "the run never reached the designated-requirement comparison, so nothing below is about the guard",
+      ).not.toEqual([]);
+
+      // The guard's own words. A non-zero exit alone would be vacuous here -- a wrapped,
+      // never-invoked guard lets the install continue and then fail further down for an
+      // unrelated reason, also non-zero. Only this message means the gate itself denied.
+      expect(run.stderr, `exit ${run.exitCode}`).toContain(REFUSAL);
+      expect(run.stderr).toContain("--allow-adhoc-identity-migration");
+      expect(run.stderr).toContain(EXISTING_IDENTITY_SHA256);
+      expect(run.stderr).toContain(CANDIDATE_IDENTITY_SHA256);
+      expect(run.exitCode).not.toBe(0);
+
+      // And it stopped the install. `mktemp -d .Recordings-transaction.XXXXXX` is the very
+      // next thing the installer does once the guard returns 0, so its absence is a
+      // behavioural witness that execution ended at the gate. This is what catches
+      // `|| true`, where the refusal is printed in full and the install proceeds anyway --
+      // the worst measured survivor, because the log looks correct.
+      expect(
+        run.reachedTransaction,
+        "the guard printed its refusal but the install continued into the transaction",
+      ).toBeFalse();
+    });
+
+    // The control that makes the assertion above mean something. Without it, ANY early
+    // failure -- a missing stub, a Linux-only permission check -- would satisfy "refused",
+    // and every mutation would look caught. This proves the harness genuinely reaches the
+    // call site and crosses it when the guard allows.
+    test("the same run crosses the guard once the ad-hoc approval is supplied", () => {
+      const run = runInstallerToIdentityGuard({
+        identityMigration: true,
+        extraArguments: ["--allow-adhoc-identity-migration"],
+      });
+      expect(run.stderr).not.toContain(REFUSAL);
+      expect(
+        run.reachedTransaction,
+        "the approved run never reached the transaction, so the refusal test above proves nothing",
+      ).toBeTrue();
+      // It then stops on the first deliberately-inert macOS tool past the guard (`ditto`,
+      // which has no Linux equivalent), so this fixture never moves an installed app. The
+      // exit code past the gate is therefore not asserted -- only that the gate was crossed.
+    });
+
+    test("a real run with no identity change crosses the guard without an approval", () => {
+      // The flag is computed, not assumed: the same fixture with a compatible identity must
+      // pass the gate with no flags at all. A guard stubbed to always deny, or a hardcoded
+      // `identity_migration=1`, fails here rather than looking maximally safe.
+      const run = runInstallerToIdentityGuard({ identityMigration: false });
+      expect(run.stderr).not.toContain(REFUSAL);
+      expect(run.reachedTransaction).toBeTrue();
+    });
   });
 });
