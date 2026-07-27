@@ -365,7 +365,7 @@ final class PasteTransactionCoordinator {
     typealias ScheduledOperation = @MainActor @Sendable () -> Void
     typealias Scheduler = @MainActor @Sendable (TimeInterval, @escaping ScheduledOperation) -> Void
     typealias PayloadWriter = @MainActor @Sendable (String) -> PasteboardWriteResult
-    typealias PastePoster = @MainActor @Sendable () -> PasteAttempt
+    typealias PastePoster = @MainActor @Sendable () -> PasteKeystrokeAttempt
     /// Reads the target app back and reports what that read proves. Defaulted to
     /// `.unverified(.readBackNotAttempted)` at every entry point so a caller that supplies no
     /// verification gets an explicitly unverified outcome, never an assumed success.
@@ -464,7 +464,10 @@ final class PasteTransactionCoordinator {
                 completion(transaction, .clipboardOwnershipLost)
                 return
             }
-            func failNow(with outcome: PasteDeliveryOutcome) {
+            // `@MainActor` is required, not decorative: a local function does not inherit the
+            // enclosing closure's actor isolation, so without it `state` cannot be mutated and
+            // `completion`/`settlement` cannot be called from here at all.
+            @MainActor func failNow(with outcome: PasteDeliveryOutcome) {
                 settlement(transaction, outcome)
                 self.state = .idle
                 completion(transaction, outcome)

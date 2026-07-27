@@ -36,7 +36,9 @@ describe("native paste delivery verification contract", () => {
     expect(engine).not.toContain("completion(transaction, .pasted)");
     expect(engine).not.toContain("settlement(transaction, .pasted)");
     expect(engine).not.toContain("typealias PastePoster = @MainActor @Sendable () -> Bool");
-    expect(engine).toContain("typealias PastePoster = @MainActor @Sendable () -> PasteAttempt");
+    expect(engine).toContain(
+      "typealias PastePoster = @MainActor @Sendable () -> PasteKeystrokeAttempt",
+    );
 
     // The coordinator cannot name `.pasted` at all: the outcome arrives from the evidence
     // mapping, so there is no branch where a posted event becomes a delivery.

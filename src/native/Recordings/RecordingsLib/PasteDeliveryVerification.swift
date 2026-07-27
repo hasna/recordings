@@ -365,8 +365,30 @@ enum PasteDeliveryVerifier {
 
 // MARK: - What the keystroke attempt itself did
 
-/// Outcome of the posting step alone. `posted` claims nothing about delivery — it means two
-/// `CGEvent`s were constructed and handed to the window server.
+/// What a `PastePoster` is allowed to report.
+///
+/// Deliberately narrower than `PasteAttempt`: a poster runs only after the target and the
+/// clipboard have already been proved, so "the paste failed before the keystroke step" is not
+/// something it can observe. Making that unrepresentable is not tidiness — `PasteAttempt` was
+/// originally the poster's return type, and the coordinator's `switch` over it did not compile
+/// (`switch must be exhaustive`) precisely because the type offered a case the poster could
+/// never produce and no honest outcome could be mapped to.
+enum PasteKeystrokeAttempt: Equatable, Sendable {
+    /// Two `CGEvent`s were constructed and handed to the window server. Claims nothing about
+    /// delivery — `CGEvent.post` returns `Void`.
+    case posted
+    case constructionFailed
+    /// Secure event input is held, so nothing was posted. Carries the holder so the log and the
+    /// status line can name it.
+    case refusedSecureInput(SecureInputHolder)
+}
+
+/// Outcome of the posting step alone, as reported in the log. `posted` claims nothing about
+/// delivery — it means two `CGEvent`s were constructed and handed to the window server.
+///
+/// Wider than `PasteKeystrokeAttempt` by exactly one case, because this type is also derived
+/// from a finished outcome via `forOutcome(_:)`, where "never got as far as a keystroke" is a
+/// real thing to report.
 enum PasteAttempt: Equatable, Sendable {
     case posted
     case constructionFailed
@@ -381,6 +403,16 @@ enum PasteAttempt: Equatable, Sendable {
         case .constructionFailed: "construction_failed"
         case .refusedSecureInput: "not_posted_secure_input"
         case .notAttempted: "not_attempted"
+        }
+    }
+
+    /// Widen what the poster reported into the log vocabulary. One direction only, so the two
+    /// types cannot drift into two descriptions of one event.
+    init(_ keystroke: PasteKeystrokeAttempt) {
+        switch keystroke {
+        case .posted: self = .posted
+        case .constructionFailed: self = .constructionFailed
+        case .refusedSecureInput(let holder): self = .refusedSecureInput(holder)
         }
     }
 
