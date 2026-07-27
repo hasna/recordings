@@ -37,7 +37,17 @@ const targetTailscaleIdentitySha256 = Bun.CryptoHasher.hash(
 );
 const builderIdentitySha256 = Bun.CryptoHasher.hash("sha256", builderTailscaleNodeId, "hex");
 const temporaryPaths: string[] = [];
-setDefaultTimeout(30_000);
+// An in-file `setDefaultTimeout` OVERRIDES `bun test --timeout`, so this line silently made that
+// flag a no-op for this suite: a run passed `--timeout 60000` and still saw
+// "this test timed out after 30000ms". These cases spawn a real installer that copies bundles,
+// fsyncs, and takes locks, so on a contended station 30s is not a slow test, it is a lost
+// measurement -- and there is no flag that could recover it. `RECORDINGS_TEST_TIMEOUT_MS` is the
+// variable `package.json`'s `test:gated` already uses for exactly this, so it is read here too and
+// the two cannot disagree. The default is unchanged.
+// Validated rather than coerced: `Number(undefined)` is NaN and `Number("")` is 0, either of which
+// would silently make every case here time out instantly.
+const configuredTimeoutMs = Number(Bun.env.RECORDINGS_TEST_TIMEOUT_MS);
+setDefaultTimeout(Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 30_000);
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) rmSync(path, { recursive: true, force: true });
