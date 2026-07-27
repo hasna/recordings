@@ -486,14 +486,22 @@ only when post-processing actually produced enhanced output.
 
 ## Releasing
 
-The release version lives in four places: `package.json`, `src/version.ts`, and both
+The release version is hand-maintained in four places: `package.json`, `src/version.ts`, and both
 `CFBundleShortVersionString` and `CFBundleVersion` in
 `src/native/Recordings/RecordingsLib/Info.plist`. Bump them together, never by hand:
 
 ```bash
-bun run version:set 0.3.0   # rewrites every site
+bun run version:set 0.3.0   # rewrites every hand-maintained site
+bun run generate:sdk        # restamps the generated SDK's header
 bun run version:check       # exits 1 if any site disagrees with package.json
 ```
+
+A fifth copy is **generated**, not written: `src/server/openapi.ts` stamps `VERSION` into the
+OpenAPI document and `bun run generate:sdk` bakes it into the `// Source: …` header of
+`src/sdk/v1.generated.ts`. `version:set` leaves that file alone — the generator owns it, and
+patching the stamp by hand would hide real regeneration drift — so regenerate after every bump.
+`src/__tests__/version-site-guard.test.ts` fails when the committed header disagrees with
+`package.json`.
 
 `package.json` is the authority because `scripts/build_companion_cli.sh` compares the
 compiled CLI's `--version` against it and exits 1 on a mismatch. That abort propagates

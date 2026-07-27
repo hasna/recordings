@@ -86,6 +86,22 @@ describe("release version sites", () => {
     expect(plist).not.toContain("0.0.1");
   });
 
+  // The writer's OWN validation, not the exported helper's. Deleting the single
+  // `assertReleaseVersion(version)` call from `applyVersion` left every other assertion in this
+  // file green — 5 pass / 0 fail — while `bun run version:set v9.9.9` exited 0 and wrote `v9.9.9`
+  // into all four sites, where `version:check` then reported them in agreement. Testing the helper
+  // in isolation says nothing about whether the writer still calls it.
+  test("the writer refuses a version the release path refuses, and writes nothing", () => {
+    const root = stageVersionSites("0.0.1");
+    const before = versionSites.map((site) => readFileSync(join(root, site.file), "utf8"));
+
+    expect(() => applyVersion("v9.9.9", root)).toThrow(/invalid release version/);
+
+    // Asserted on the files rather than only on the throw: a validation that ran after the first
+    // write would still throw, and would still have corrupted the tree.
+    expect(versionSites.map((site) => readFileSync(join(root, site.file), "utf8"))).toEqual(before);
+  });
+
   test("rejects versions the release path already refuses", () => {
     expect(() => assertReleaseVersion("v1.2.3")).toThrow(/invalid release version/);
     expect(() => assertReleaseVersion("1.2")).toThrow(/invalid release version/);
@@ -107,5 +123,22 @@ describe("release version sites", () => {
     expect(steps.indexOf("bun run version:check")).toBeGreaterThan(-1);
     expect(steps.indexOf("bun run build")).toBeGreaterThan(-1);
     expect(steps.indexOf("bun run version:check")).toBeLessThan(steps.indexOf("bun run build"));
+  });
+
+  // A FIFTH copy of the release version, which `versionSites` deliberately does not write.
+  // `src/server/openapi.ts` stamps `VERSION` into the OpenAPI document, and `bun run generate:sdk`
+  // bakes that into the committed `src/sdk/v1.generated.ts` header. The generator owns that file
+  // ("DO NOT EDIT BY HAND"), so hand-patching the stamp from `version:set` would paper over real
+  // regeneration drift; the bump procedure regenerates instead, and this asserts it happened.
+  // Unguarded, the stamp sat at 0.2.13 against a package version of 0.2.15 —
+  // `.github/workflows/ci.yml` reports that as a warning it explicitly cannot gate on.
+  test("the generated SDK header carries the version package.json declares", () => {
+    const generated = readFileSync(join(repoRoot(), "src/sdk/v1.generated.ts"), "utf8");
+    const stamped = generated.match(/^\/\/ Source: .* (\S+)$/m)?.[1];
+
+    expect(stamped, "no `// Source: … <version>` stamp found in src/sdk/v1.generated.ts")
+      .toBeDefined();
+    expect(stamped, "stale generated SDK; refresh it with `bun run generate:sdk`")
+      .toBe(packageJson.version);
   });
 });
