@@ -299,28 +299,47 @@ describe("native capture warm-up contract", () => {
     // exit 0, and only `recordButtonIcon` was caught -- by the `not.toMatch`/`toContain` pair
     // above, which is the shape the rest of these now copy. The consequence differs per member,
     // so each carries its own failure message.
-    const warmUpAwareMembers: ReadonlyArray<readonly [string, string]> = [
+    //
+    // And each is pinned by its FULL EXPRESSION, not by the presence of the identifier. That
+    // distinction is this PR's second adversarial finding, measured: `toContain("captureIsActive")`
+    // is a presence test, and three of the four members below survived a mutation at EXIT 0 while
+    // keeping the read. `captureIsActive && !isWarmingUpCapture` masks warm-up straight back out
+    // (`statusColor`, `toggleRecording` — the latter restoring verbatim the click that silently does
+    // nothing), and swapping the title's two branches leaves the read untouched. Neither the count
+    // below nor the stray-`isRecording` sweep can see any of them: the read is still there and no
+    // `isRecording` was added. Only the expression can.
+    const warmUpAwareMembers: ReadonlyArray<readonly [string, RegExp, string]> = [
       [
         "private var statusColor: Color",
+        /^\s*if store\.engine\.captureIsActive \{ return \.red \}$/m,
         "the popover glyph stays idle-coloured through the whole warm-up window",
       ],
       [
         "private var recordButtonTitle: String",
+        /^\s*store\.engine\.captureIsActive \? "Stop and Transcribe" : "Start Recording"$/m,
         "the button reads Start Recording while it already acts as Stop",
       ],
       [
         "private var recordButtonIcon: String",
+        /^\s*store\.engine\.captureIsActive \? "stop\.fill" : "mic\.fill"$/m,
         "the button shows mic.fill while it already acts as Stop",
       ],
       [
         "private func toggleRecording()",
+        // Branch bodies included, so swapping them is caught as well as masking the condition.
+        /if store\.engine\.captureIsActive \{\s*store\.engine\.stopAndTranscribe\(\)\s*\} else \{\s*store\.engine\.startRecording\(\)/,
         "Stop pressed during warm-up calls startRecording(), the gate refuses it, and the click " +
           "silently does nothing -- verbatim the failure this suite exists to prevent",
       ],
     ];
-    for (const [declaration, consequence] of warmUpAwareMembers) {
+    for (const [declaration, expression, consequence] of warmUpAwareMembers) {
       const body = methodBody(view, declaration);
+      // Presence first, so a DELETED read fails as a missing read rather than as a shape change.
       expect(body, `${declaration}: ${consequence}`).toContain("store.engine.captureIsActive");
+      expect(
+        body,
+        `${declaration} no longer reads warm-up as its whole condition: ${consequence}`,
+      ).toMatch(expression);
     }
 
     // The button's tint lives inline in `body` rather than in a member, so it needs its own
