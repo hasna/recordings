@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { sliceBetween } from "./helpers/source-assertions";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const resolver = join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh");
@@ -374,22 +375,42 @@ describe("Tailscale CLI resolution", () => {
 
   test("keeps all test app and tool overrides after the real Darwin branch", () => {
     const source = readFileSync(resolver, "utf8");
+    // The kernel test this contract is about appears four times in the script, so every index below
+    // is only correct relative to this one function. The anchor was the unguarded operand: a renamed
+    // resolver left `resolverFunction` at -1, `indexOf(needle, -1)` clamps to 0, and the whole test
+    // silently re-anchored on the first Darwin branch in the file — a different function's.
     const resolverFunction = source.indexOf("recordings_resolve_trusted_tailscale_app_cli() {");
-    const darwinBranch = source.indexOf(
-      'if [ "$real_host_kernel" = "Darwin" ]; then',
+    expect(
       resolverFunction,
+      "resolver function is missing entirely: recordings_resolve_trusted_tailscale_app_cli",
+    ).toBeGreaterThan(-1);
+    const resolverBody = source.slice(resolverFunction);
+
+    const darwinBranch = resolverBody.indexOf('if [ "$real_host_kernel" = "Darwin" ]; then');
+    expect(darwinBranch, "the resolver has no real-kernel Darwin branch").toBeGreaterThan(-1);
+    const nonDarwinBranch = resolverBody.indexOf("else", darwinBranch);
+    expect(nonDarwinBranch, "the Darwin branch is never closed by an else").toBeGreaterThan(
+      darwinBranch,
     );
-    const nonDarwinBranch = source.indexOf("else", darwinBranch);
-    expect(darwinBranch).toBeGreaterThan(-1);
-    expect(nonDarwinBranch).toBeGreaterThan(darwinBranch);
     for (const override of [
       "RECORDINGS_TEST_TRUSTED_TAILSCALE_APP",
       "RECORDINGS_TEST_TAILSCALE_CODESIGN_EXECUTABLE",
       "RECORDINGS_TEST_TAILSCALE_DITTO_EXECUTABLE",
     ]) {
-      expect(source.indexOf(override, darwinBranch)).toBeGreaterThan(nonDarwinBranch);
+      // Each override must exist and live only after the else. The existence check is separate
+      // because the two-argument `indexOf` reports a missing override and an override that moved
+      // past the end of the region with the same -1, and only one of those is what this asserts.
+      const overrideUse = resolverBody.indexOf(override, darwinBranch);
+      expect(overrideUse, `test override is missing entirely: ${override}`).toBeGreaterThan(-1);
+      expect(overrideUse).toBeGreaterThan(nonDarwinBranch);
     }
-    const darwinSelection = source.slice(darwinBranch, nonDarwinBranch);
+    // Same two bounds, but taken through `sliceBetween` so the region below cannot be the empty or
+    // one-character string that satisfies `not.toContain("RECORDINGS_TEST_")` for free.
+    const darwinSelection = sliceBetween(
+      resolverBody,
+      'if [ "$real_host_kernel" = "Darwin" ]; then',
+      "else",
+    );
     expect(darwinSelection).toContain('/Applications/Tailscale.app');
     expect(darwinSelection).toContain('/usr/bin/codesign');
     expect(darwinSelection).toContain('/usr/bin/ditto');

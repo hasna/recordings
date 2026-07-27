@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  expectOrder,
+  sliceBetween,
+  sliceBetweenUnique,
+} from "./helpers/source-assertions";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(join(root, path), "utf8");
@@ -25,14 +30,15 @@ describe("native updater core recovery contracts", () => {
     expect(launcher).not.toContain("--archive-path");
     expect(launcher).not.toContain("--output-dir-path");
 
-    const nullSetup = launcher.indexOf('open("/dev/null"');
-    const privilegeDrop = launcher.indexOf("setgroups(1, groups)");
-    const sandbox = launcher.indexOf("sandbox_init_with_parameters");
-    const execute = launcher.indexOf("execve(VERIFIER_PATH");
-    expect(nullSetup).toBeGreaterThan(0);
-    expect(nullSetup).toBeLessThan(privilegeDrop);
-    expect(privilegeDrop).toBeLessThan(sandbox);
-    expect(sandbox).toBeLessThan(execute);
+    // The launch order *is* the security property: the standard descriptors are pinned to
+    // /dev/null, then privilege is dropped, then the sandbox closes, and only then is the fixed
+    // verifier exec'd. As four bare `indexOf` comparisons the chain held only by accident — each
+    // step was rescued from its own -1 by being the *second* operand of the previous comparison,
+    // so deleting the exec, or appending a step, would silently reopen the hole. `expectOrder`
+    // requires both operands to exist at every link and names whichever one went missing.
+    expectOrder(launcher, 'open("/dev/null"', "setgroups(1, groups)");
+    expectOrder(launcher, "setgroups(1, groups)", "sandbox_init_with_parameters");
+    expectOrder(launcher, "sandbox_init_with_parameters", "execve(VERIFIER_PATH");
     for (const limit of ["RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NOFILE", "RLIMIT_NPROC"]) {
       expect(launcher).toContain(limit);
     }
@@ -45,28 +51,38 @@ describe("native updater core recovery contracts", () => {
     const state = source("src/native/Recordings/Updater/Broker/MonotonicState.swift");
     const activation = source("src/native/Recordings/Updater/Broker/AtomicActivation.swift");
 
-    expect(broker.indexOf("recoverInterruptedTransactions()")).toBeLessThan(
-      broker.indexOf("listener.resume()"),
-    );
+    // Startup recovery must finish before the listener accepts a peer. Unguarded this was the
+    // purest form of the defect: with `indexOf(recovery) < indexOf(resume)`, deleting the recovery
+    // call made the comparison `-1 < n`, so the single assertion protecting fail-closed startup
+    // was satisfied by removing fail-closed startup.
+    expectOrder(broker, "recoverInterruptedTransactions()", "listener.resume()");
     expect(broker).toContain("requiresRecoveryRestart(after: error)");
     expect(broker).toContain("error is AtomicActivationError || error is InstallJournalError");
     expect(broker).toContain("Darwin.exit(75)");
     expect(broker).toContain(
       "A state rename whose directory fsync failed is not durable proof",
     );
-    const stagedInstallCatch = broker.slice(
-      broker.indexOf("let result = try performStagedInstall"),
-      broker.indexOf("private static func performStagedInstall"),
+    // The call site and the definition of `performStagedInstall` bracket the caller's do/catch.
+    // Both bounds have to exist for that to be true: as two bare `indexOf` calls, renaming the
+    // function put -1 on one end, which slices from the last character or to the first and yields
+    // an empty region that satisfies anything asserted about it.
+    const stagedInstallCatch = sliceBetween(
+      broker,
+      "let result = try performStagedInstall",
+      "private static func performStagedInstall",
     );
-    const preserveRecoveryEvidence = stagedInstallCatch.indexOf(
-      "if Self.requiresRecoveryRestart(after: error)",
-    );
-    const catchCleanup = stagedInstallCatch.indexOf(
+    // Inside the catch the recovery-restart check has to precede any cleanup, or a crash that
+    // needs recovery gets its evidence deleted before the restart can use it. The window has to be
+    // catch-relative because `try cleanupIfTerminalOrUnjournaled` also appears on the success path
+    // immediately above the catch — and the old `indexOf(needle, indexOf("} catch {") + 1)` form
+    // degraded to "search from 0" and matched that success-path call the moment the catch marker
+    // moved, comparing the check against a cleanup that runs before it.
+    const catchBeforeCleanup = sliceBetween(
+      stagedInstallCatch,
+      "} catch {",
       "try cleanupIfTerminalOrUnjournaled",
-      stagedInstallCatch.indexOf("} catch {") + 1,
     );
-    expect(preserveRecoveryEvidence).toBeGreaterThan(0);
-    expect(preserveRecoveryEvidence).toBeLessThan(catchCleanup);
+    expect(catchBeforeCleanup).toContain("if Self.requiresRecoveryRestart(after: error)");
     expect(activation).toContain("throw AtomicActivationError.recoveryRequired");
     expect(broker).toContain("withExclusiveTransactionLock");
     expect(broker).toContain("ensureTransactionQuota");
@@ -111,16 +127,23 @@ describe("native updater core recovery contracts", () => {
       "src/native/Recordings/Updater/BrokerTests/ActivationRecoveryPolicyTests.swift",
     );
 
-    const bootstrapBranch = broker.slice(
-      broker.indexOf('if payload.purpose == "bootstrap"'),
-      broker.indexOf("let verifierOutput"),
+    // Only the bootstrap branch may answer for the bootstrap contract, so both bounds are required
+    // and each must appear once. A missing `let verifierOutput` used to leave the end bound at -1,
+    // which slices to the last character and stretched this region across the whole verifier-driven
+    // update path; every `toContain` below would then have been satisfied by the update branch's
+    // own journal calls, while the bootstrap branch was free of them.
+    const bootstrapBranch = sliceBetweenUnique(
+      broker,
+      'if payload.purpose == "bootstrap"',
+      "let verifierOutput",
     );
-    const perform = bootstrapBranch.indexOf("stateStore.perform(");
-    const prepare = bootstrapBranch.indexOf("prepare: { decision in", perform);
-    const operation = bootstrapBranch.indexOf(") { decision in", prepare);
-    expect(perform).toBeGreaterThan(0);
-    expect(prepare).toBeGreaterThan(perform);
-    expect(operation).toBeGreaterThan(prepare);
+    // `prepare:` runs inside `stateStore.perform(` and before its trailing operation closure, which
+    // is what journals bootstrap intent ahead of the state advance. Both closure markers occur
+    // exactly once inside this region, so first-match ordering walks the same window the old
+    // `indexOf(needle, fromIndex)` chain did — without that chain's dependence on the anchor index
+    // never being -1 (a -1 `fromIndex` clamps to 0 and searches from the top of the region).
+    expectOrder(bootstrapBranch, "stateStore.perform(", "prepare: { decision in");
+    expectOrder(bootstrapBranch, "prepare: { decision in", ") { decision in");
     expect(bootstrapBranch).toContain("prepareBootstrapCommit(");
     expect(bootstrapBranch).toContain("requirePreparedBootstrapCommit(");
     expect(bootstrapBranch).toContain("finalizeBootstrapCommit(");
@@ -142,17 +165,28 @@ describe("native updater core recovery contracts", () => {
     expect(recovery).toContain("BootstrapRecoveryPolicy.action(");
     expect(recovery).toContain("stateStore.finalizeRecoveredCommit(journal: journal)");
     expect(recovery).toContain("CanonicalTree.digest(at: journal.applicationPath)");
-    const bootstrapRecovery = recovery.slice(
-      recovery.indexOf("private static func recoverBootstrapCommit("),
-      recovery.indexOf("private static func recoverPreparedWithSeenBarrier("),
+    // Three absence claims follow, and an absence claim is only as good as the region it is made
+    // over: an empty or misdirected region satisfies all three. `sliceBetweenUnique` requires both
+    // function markers to exist exactly once and the end to follow the start, so reordering these
+    // two declarations — which would have produced a start > end slice, i.e. "" — now fails loudly
+    // instead of certifying that bootstrap recovery never replays an envelope.
+    const bootstrapRecovery = sliceBetweenUnique(
+      recovery,
+      "private static func recoverBootstrapCommit(",
+      "private static func recoverPreparedWithSeenBarrier(",
     );
     expect(bootstrapRecovery).not.toContain("envelope.json");
     expect(bootstrapRecovery).not.toContain("SignedReleaseEnvelope");
     expect(bootstrapRecovery).not.toContain("verify(");
     expect(state).toContain("current.purpose == journal.expectedPurpose");
-    const bootstrapCleanup = broker.slice(
-      broker.indexOf("journal.resolvedOperation == .bootstrapCommit"),
-      broker.indexOf('if let journal, journal.phase == "committed"'),
+    // `sliceBetween` rather than `sliceBetweenUnique`: the bootstrap-commit test occurs twice in
+    // the broker (cleanup and a later guard), so only first-match is correct here. What was wrong
+    // before is the end bound — a missing committed-phase branch left it at -1, widening the region
+    // to the rest of the file, where both `toContain` needles exist in unrelated cleanup code.
+    const bootstrapCleanup = sliceBetween(
+      broker,
+      "journal.resolvedOperation == .bootstrapCommit",
+      'if let journal, journal.phase == "committed"',
     );
     expect(bootstrapCleanup).toContain("throw IngestError.couldNotCleanup");
     expect(bootstrapCleanup).toContain(
@@ -206,29 +240,30 @@ describe("native updater core recovery contracts", () => {
     expect(journal).toContain('"previous-retaining"');
     expect(journal).toContain('"first-install-pending"');
 
-    const prepareHook = state.indexOf("try prepare(decision)");
-    const seenWrite = state.indexOf(
+    // The prepare hook runs before the seen barrier is written, so a prepared journal always
+    // precedes durable proof that the release was seen. Both halves must exist: deleting the hook
+    // used to leave `-1 < seenWrite`, certifying an ordering that no longer had a first term.
+    expectOrder(
+      state,
+      "try prepare(decision)",
       'writeState(payload: payload, payloadDigest: payloadDigest, phase: "seen")',
     );
-    expect(prepareHook).toBeGreaterThan(0);
-    expect(prepareHook).toBeLessThan(seenWrite);
     expect(broker).toContain("prepare: { decision in");
     expect(broker).toContain("prepareActivation(");
     expect(broker).toContain("activatePrepared(");
     expect(state).toContain('phase: "aborted"');
     expect(state).toContain("mayDurablyAbortSeenBarrier");
-    const rollbackRecovery = recovery.indexOf('case "rollback-started":');
-    const rollbackJournal = recovery.indexOf(
+    // Recovering a rollback journals "rolled-back" before it finalizes the abort in the state
+    // store, so the durable journal never lags the state. Both needles occur twice in this file
+    // (the other pair belongs to the forward rollback path), which is why the old form threaded a
+    // `fromIndex` through — and why a -1 anchor, clamped to 0, would have compared the wrong pair.
+    // Bounding the switch case instead makes the region carry the disambiguation.
+    const rollbackStartedCase = sliceBetween(recovery, 'case "rollback-started":', "default:");
+    expectOrder(
+      rollbackStartedCase,
       'journal.phase = "rolled-back"',
-      rollbackRecovery,
-    );
-    const rollbackAbort = recovery.indexOf(
       "stateStore.finalizeRecoveredAbort(journal: journal)",
-      rollbackJournal,
     );
-    expect(rollbackRecovery).toBeGreaterThan(0);
-    expect(rollbackJournal).toBeGreaterThan(rollbackRecovery);
-    expect(rollbackAbort).toBeGreaterThan(rollbackJournal);
     expect(recovery).toContain(
       '(current.phase == "committed" || current.phase == "aborted")',
     );
@@ -245,9 +280,15 @@ describe("native updater core recovery contracts", () => {
       "rolledBackSeenBarrierSecondCrash",
     ]) expect(faultTests).toContain(boundary);
 
-    const preparedBinding = activation.slice(
-      activation.indexOf("guard var journal = try durableJournal.read()"),
-      activation.indexOf("let namespace: ApplicationNamespace"),
+    // The prepared-journal guard must fail into recovery, never into `invalidPreparedState`, which
+    // would treat an interrupted install as garbage and discard it. Both error cases exist
+    // elsewhere in this file, so the absence claim is only meaningful over this exact guard: an
+    // empty region (either bound at -1, or the two declarations reordered) would have asserted that
+    // the wrong error is absent from nothing at all.
+    const preparedBinding = sliceBetweenUnique(
+      activation,
+      "guard var journal = try durableJournal.read()",
+      "let namespace: ApplicationNamespace",
     );
     expect(preparedBinding).toContain("AtomicActivationError.recoveryRequired");
     expect(preparedBinding).not.toContain("AtomicActivationError.invalidPreparedState");
@@ -285,12 +326,17 @@ describe("native updater core recovery contracts", () => {
     expect(namespace).not.toMatch(/\.candidateExecutableMode\b/);
     expect(namespace).not.toMatch(/\.previousExecutableMode\b/);
     expect(activation).toContain("requiresCommitRecovery(phase: journal.phase)");
-    const barrierHeld = activation.indexOf('journal.phase = "launch-barrier-held"');
-    const finalScan = activation.indexOf("requireQuiescence(", barrierHeld);
-    const swap = activation.indexOf("exchangeCandidateAndLive()", finalScan);
-    expect(barrierHeld).toBeGreaterThan(0);
-    expect(finalScan).toBeGreaterThan(barrierHeld);
-    expect(swap).toBeGreaterThan(finalScan);
+    // The last quiescence scan has to happen with the launch barrier already held and before the
+    // swap, so no process can start in the gap between the scan and the exchange. Stating that as a
+    // region is what makes it real: `requireQuiescence(` appears three times here, so the old index
+    // chain depended entirely on `barrierHeld` being found — a -1 there clamps `fromIndex` to 0 and
+    // silently re-satisfies the test with the *first* scan, the one that runs before the barrier.
+    const barrierHeldToSwap = sliceBetween(
+      activation,
+      'journal.phase = "launch-barrier-held"',
+      "exchangeCandidateAndLive()",
+    );
+    expect(barrierHeldToSwap).toContain("requireQuiescence(");
   });
 
   test("bounds staging and prunes only descriptor-relative protected transactions", () => {

@@ -24,6 +24,7 @@ import {
   RELEASE_PUBLICATION_COMPLETE_FILENAME,
   snapshotRegularFile,
 } from "../../scripts/macos_artifact";
+import { expectOrder } from "./helpers/source-assertions";
 
 const build = readFileSync("src/native/Recordings/build.sh", "utf8");
 const pkg = readFileSync("packaging/macos/build_release_pkg.sh", "utf8");
@@ -399,13 +400,28 @@ describe("release output publication contract", () => {
   });
 
   test("package notarization also verifies the log digest before stapling", () => {
-    const submittedDigest = pkg.indexOf('SUBMITTED_PKG_SHA256="$(sha256_file "$PKG")"');
-    const canonicalValidation = pkg.indexOf('"$STAGED_VERIFIER" assert-notary-log');
-    const equality = pkg.indexOf('--submitted-archive-sha256 "$SUBMITTED_PKG_SHA256"');
-    const staple = pkg.indexOf("/usr/bin/xcrun stapler staple");
-    expect(submittedDigest).toBeGreaterThan(-1);
-    expect(canonicalValidation).toBeGreaterThan(submittedDigest);
-    expect(equality).toBeGreaterThan(canonicalValidation);
-    expect(staple).toBeGreaterThan(equality);
+    const submittedDigest = 'SUBMITTED_PKG_SHA256="$(sha256_file "$PKG")"';
+    const notaryLogAssertion = '"$STAGED_VERIFIER" assert-notary-log';
+    const byteBinding = '--submitted-archive-sha256 "$SUBMITTED_PKG_SHA256"';
+    const staple = "/usr/bin/xcrun stapler staple";
+    // Three ordered claims: the digest is taken from the bytes that were submitted, the verifier
+    // is handed that digest, and the staple is applied after the verdict rather than before it.
+    // Written as a chain of raw `indexOf` comparisons these read the same but say less — a needle
+    // that is gone answers -1, and -1 sorts before everything, so the deletion of a step
+    // satisfies the assertion whose only job is to require that step. `expectOrder` names the
+    // absent operand instead of ranking it first.
+    expectOrder(pkg, submittedDigest, notaryLogAssertion);
+    expectOrder(pkg, notaryLogAssertion, byteBinding);
+    expectOrder(pkg, byteBinding, staple);
+    // Ordering still cannot say the byte binding is an argument OF that invocation rather than a
+    // line that happens to sit between it and the staple, so pin the invocation whole. Split the
+    // flag off onto some other verifier call and the notary log is no longer bound to the package
+    // that was submitted, while all three orderings above continue to hold.
+    expect(pkg).toContain(
+      `${notaryLogAssertion} \\\n` +
+        '  --notary-log "$NOTARY_LOG" \\\n' +
+        '  --submission-id "$NOTARY_ID" \\\n' +
+        `  ${byteBinding}`,
+    );
   });
 });

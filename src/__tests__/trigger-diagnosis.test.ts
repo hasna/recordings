@@ -30,6 +30,7 @@ import {
   readAppLogTail,
   resolveHotkeyBinding,
 } from "../cli/trigger-probe.js";
+import { sliceBetweenUnique } from "./helpers/source-assertions";
 
 const temporaryDirectories: string[] = [];
 /** `check` must make no network call, and only strace can settle that; see the test below. */
@@ -258,13 +259,18 @@ describe("the parser consumes what the Swift log statement produces", () => {
       join(repoRoot, "src/native/Recordings/RecordingsLib/RecordingEngine.swift"),
       "utf8",
     );
-    const functionStart = engineSource.indexOf("public func logResolvedTrigger()");
-    expect(functionStart).toBeGreaterThan(-1);
-    const functionEnd = engineSource.indexOf("private func logIgnoredTrigger(");
-    expect(functionEnd).toBeGreaterThan(functionStart);
-    const functionBody = engineSource.slice(functionStart, functionEnd);
+    // Bounded by the next declaration rather than by brace counting, and required to be unique.
+    // The -1 checks were already here; uniqueness is what was missing, and it is the part that
+    // matters in a 5,270-line file: `indexOf` takes the FIRST match, so a second — stale, or dead
+    // — `logResolvedTrigger()` above line 1211 would silently aim the render at the copy nothing
+    // calls, and every parse assertion below would pass on a format string that never ships.
+    const functionBody = sliceBetweenUnique(
+      engineSource,
+      "public func logResolvedTrigger()",
+      "private func logIgnoredTrigger(",
+    );
     const logCallStart = functionBody.indexOf("log(");
-    expect(logCallStart).toBeGreaterThan(-1);
+    expect(logCallStart, "logResolvedTrigger() no longer calls log(...)").toBeGreaterThan(-1);
 
     const rendered = renderSwiftInterpolatedString(functionBody.slice(logCallStart), [
       // Keyed on a distinctive part of each interpolated expression. An interpolation that

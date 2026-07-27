@@ -20,6 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ensureNativeFsGuardAddon } from "./helpers/native-fs-guard";
+import { expectOrder, sliceBetween, sliceBetweenUnique } from "./helpers/source-assertions";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 process.env.RECORDINGS_TEST_FS_GUARD_ADDON = ensureNativeFsGuardAddon(repositoryRoot);
@@ -929,9 +930,16 @@ describe("macOS finalized artifact installer", () => {
       join(repositoryRoot, "scripts", "install_macos_app.sh"),
       "utf8",
     );
-    expect(
-      installer.indexOf('"$CP_EXECUTABLE" "$MANIFEST_PATH" "$MANIFEST_SNAPSHOT"'),
-    ).toBeLessThan(installer.indexOf('"$ARTIFACT_TOOL" verify-archive'));
+    // The private snapshot has to be taken before the first verification reads it. As two bare
+    // `indexOf` results this claim was satisfied by DELETING the `cp`: `indexOf` answers -1 for a
+    // missing needle and `-1 < anything` is true, so an installer that verified the caller's still
+    // mutable manifest directly would have passed. `expectOrder` refuses -1 on both operands, by
+    // name, before it compares them.
+    expectOrder(
+      installer,
+      '"$CP_EXECUTABLE" "$MANIFEST_PATH" "$MANIFEST_SNAPSHOT"',
+      '"$ARTIFACT_TOOL" verify-archive',
+    );
     expect(installer).not.toContain('manifest-get --manifest "$MANIFEST_PATH"');
   });
 
@@ -1124,13 +1132,35 @@ describe("macOS finalized artifact installer", () => {
 
   test("trusted Tailscale resolver keeps its test override unreachable on Darwin", () => {
     const source = readFileSync(join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh"), "utf8");
-    const resolverFunction = source.indexOf("recordings_resolve_trusted_tailscale_app_cli() {");
-    const darwinBranch = source.indexOf('if [ "$real_host_kernel" = "Darwin" ]; then', resolverFunction);
-    const standardCandidate = source.indexOf("source_app='/Applications/Tailscale.app'", darwinBranch);
-    const testOverride = source.indexOf('RECORDINGS_TEST_TRUSTED_TAILSCALE_APP', darwinBranch);
-    expect(darwinBranch).toBeGreaterThan(-1);
-    expect(standardCandidate).toBeGreaterThan(darwinBranch);
-    expect(testOverride).toBeGreaterThan(standardCandidate);
+    // "Unreachable on Darwin" is a claim about which BRANCH the override lives in, and text order is
+    // a bad proxy for it: the override appearing after the standard assignment is equally true if
+    // someone moves the override INTO the Darwin branch below it, which is the one regression that
+    // matters here. So slice the two branches and assert the override is absent from the branch
+    // Darwin takes and present in the branch it cannot reach — the positive half is what stops the
+    // `not.toContain` from passing on an override that was merely renamed.
+    const resolver = sliceBetweenUnique(
+      source,
+      "recordings_resolve_trusted_tailscale_app_cli() {",
+      "\nrecordings_run_trusted_tailscale_status() {",
+    );
+    const darwinBranch = sliceBetweenUnique(
+      resolver,
+      'if [ "$real_host_kernel" = "Darwin" ]; then',
+      "\n  else\n",
+    );
+    const testOnlyBranch = sliceBetween(resolver, "\n  else\n", "\n  fi\n");
+    expect(darwinBranch).toContain("source_app='/Applications/Tailscale.app'");
+    expect(darwinBranch).toContain("codesign_executable='/usr/bin/codesign'");
+    expect(darwinBranch).not.toContain("RECORDINGS_TEST_");
+    expect(testOnlyBranch).toContain('source_app="${RECORDINGS_TEST_TRUSTED_TAILSCALE_APP:-');
+    // The branch is selected by an absolute kernel probe, and selected before either assignment: an
+    // override confined to the else branch is still reachable if the value being branched on can
+    // itself be influenced by the caller.
+    expectOrder(
+      resolver,
+      'real_host_kernel="$(recordings_real_host_kernel)"',
+      'if [ "$real_host_kernel" = "Darwin" ]; then',
+    );
   });
 
   test("Tailscale-bound local install fails closed when the packaged resolver is missing", async () => {
@@ -3072,7 +3102,13 @@ printf '%s\\n' "$*" >> "$REJECTED_OPEN_LOG"
       const second = await runInstaller(fixture);
       expect(second.exitCode).not.toBe(0);
       expect(second.stderr).toContain("owns the active install lock");
-      expect(readFileSync(bunLog, "utf8").slice(beforeSecond.length)).not.toContain("verify-archive");
+      // The tail is the blocked installer's own log. An empty tail satisfies `not.toContain` without
+      // proving anything about where the second run stopped, so pin what a lock-blocked run IS
+      // expected to have logged: the native guard check is invoked before the lock is contended,
+      // while archive verification is reached only after the lock is held.
+      const secondRunLog = readFileSync(bunLog, "utf8").slice(beforeSecond.length);
+      expect(secondRunLog).toContain(" native-fs-guard-check");
+      expect(secondRunLog).not.toContain("verify-archive");
     } finally {
       first.kill();
       await first.exited;
@@ -3240,10 +3276,23 @@ SQL
       if (replaceCanonicalDatabase) {
         const artifactTool = join(fixture.root, "scripts", "macos_artifact.ts");
         const source = readFileSync(artifactTool, "utf8");
+        // This control is only evidence if the excised region is exactly the recovery function. A -1
+        // end bound would splice the entire file back in behind the replacement, and a bound that
+        // overshoots would delete an unrelated function; either way the tool stops parsing and the
+        // inode assertions below would be measuring a broken fixture rather than a path-replacing
+        // recovery. `sliceBetween` refuses either bound by name and floors the region length, and the
+        // extra check is that no second top-level `function` was swept into the region.
+        const originalRecovery = sliceBetween(
+          source,
+          "function restoreStatePreservingDatabase(",
+          "\nfunction recoverJournal(",
+        );
+        expect(
+          originalRecovery.split("\nfunction ").length - 1,
+          "the excised region reaches past restoreStatePreservingDatabase",
+        ).toBe(0);
         const restoreStart = source.indexOf("function restoreStatePreservingDatabase(");
-        const restoreEnd = source.indexOf("\nfunction recoverJournal(", restoreStart);
-        expect(restoreStart).toBeGreaterThan(0);
-        expect(restoreEnd).toBeGreaterThan(restoreStart);
+        const restoreEnd = restoreStart + originalRecovery.length;
         const inodeReplacingRecovery = `function restoreStatePreservingDatabase(
   journal: InstallJournal,
   _capabilities: RecoveryCapabilities,
@@ -3431,12 +3480,43 @@ exit 73
     const result = await runInstaller(fixture);
     expect(result.exitCode).toBe(0);
     const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
-    expect(commands.indexOf("fsync-tree")).toBeLessThan(commands.indexOf("journal-write"));
-    const movedFsync = commands.indexOf("fsync-tree", commands.indexOf("originals-moving"));
-    expect(movedFsync).toBeGreaterThan(commands.indexOf("originals-moving"));
-    expect(movedFsync).toBeLessThan(commands.indexOf("originals-moved"));
-    const candidateFsync = commands.lastIndexOf("fsync-tree");
-    expect(candidateFsync).toBeLessThan(commands.indexOf("candidate-installed"));
+    // Each needle carries the rendered argument shape — ` fsync-tree --path `, ` --phase <phase> ` —
+    // so a recorded path that happens to contain a command or phase name cannot stand in for the
+    // command that was supposed to run. Every offset is then checked for -1 before it is compared or
+    // used as an anchor: `indexOf` answers -1 for a command that never ran, `-1 < anything` is true,
+    // and an unguarded -1 anchor silently restarts the search at byte 0, so the untreated forms of
+    // these three claims were all satisfied by an installer that fsynced nothing at all.
+    const fsyncTree = " fsync-tree --path ";
+    expectOrder(commands, fsyncTree, " journal-write ");
+    const movingPhase = commands.indexOf(" --phase originals-moving ");
+    const movedPhase = commands.indexOf(" --phase originals-moved ");
+    expect(movingPhase, "no journal write announced the originals-moving phase").toBeGreaterThan(-1);
+    expect(movedPhase, "no journal write announced the originals-moved phase").toBeGreaterThan(-1);
+    // Anchoring at the announcing phase is what makes "after" mean this move rather than the state
+    // snapshot far above it; the search is bounded from below by construction, so the claim left to
+    // assert is that the fsync lands before the phase that declares the move finished.
+    const movedFsync = commands.indexOf(fsyncTree, movingPhase);
+    expect(movedFsync, "the moved original bundle was never fsynced").toBeGreaterThan(-1);
+    expect(movedFsync).toBeLessThan(movedPhase);
+    // The published candidate gets the same treatment, anchored at its publication rather than taken
+    // as `lastIndexOf` over the whole log: an unanchored last-fsync is satisfied by the state or
+    // backup fsync far above, so deleting the candidate's own fsync left the claim standing.
+    const candidatePublished = commands.indexOf(" install-publish-candidate ");
+    const candidateInstalled = commands.indexOf(" --phase candidate-installed ");
+    expect(candidatePublished, "the candidate was never published").toBeGreaterThan(-1);
+    expect(
+      candidateInstalled,
+      "no journal write announced the candidate-installed phase",
+    ).toBeGreaterThan(-1);
+    const candidateFsync = commands.indexOf(fsyncTree, candidatePublished);
+    expect(candidateFsync, "the published candidate was never fsynced").toBeGreaterThan(-1);
+    expect(candidateFsync).toBeLessThan(candidateInstalled);
+    // And it is the last fsync of the run: nothing may be fsynced after the phase that journals the
+    // installed candidate, or that durable phase would be advertising a bundle whose bytes were
+    // still in flight. `lastIndexOf` carries the identical -1 hole, so it is guarded too.
+    const lastFsync = commands.lastIndexOf(fsyncTree);
+    expect(lastFsync, "nothing was fsynced at all").toBeGreaterThan(-1);
+    expect(lastFsync).toBeLessThan(candidateInstalled);
   });
 
   test("rolls back when post-activation packaged helper verification fails", async () => {
@@ -3447,7 +3527,22 @@ exit 73
     expect(result.exitCode).not.toBe(0);
     expect(readFileSync(join(installed, "Contents", "MacOS", "Recordings"), "utf8")).toBe("installed");
     const commands = readFileSync(join(fixture.markers, "bun.log"), "utf8");
-    expect(commands.indexOf("verify-active")).toBeGreaterThan(commands.indexOf("verify-app"));
+    // Post-activation verification runs in addition to the bundle verification of the ACTIVATED app,
+    // not instead of it. Two things were wrong with comparing bare indexes: `toBeGreaterThan` is
+    // satisfied by deleting its second operand (-1 is below any real offset), and the unanchored
+    // `verify-app` matched the preflight verification of the unpacked archive, so the claim held
+    // even with no verification of the installed bundle at all. Anchor both at the durable phase
+    // that publishes the candidate, which is the sequence this rollback test is about.
+    const candidateInstalled = commands.indexOf(" --phase candidate-installed ");
+    expect(
+      candidateInstalled,
+      "no journal write announced the candidate-installed phase",
+    ).toBeGreaterThan(-1);
+    const bundleVerify = commands.indexOf(" verify-app ", candidateInstalled);
+    const activeVerify = commands.indexOf(" verify-active ", candidateInstalled);
+    expect(bundleVerify, "the installed bundle was never verified").toBeGreaterThan(-1);
+    expect(activeVerify, "the activated app was never verified").toBeGreaterThan(-1);
+    expect(bundleVerify).toBeLessThan(activeVerify);
   });
 
   test("runtime smoke rejects evidence from a process that already exited", async () => {
@@ -4577,11 +4672,14 @@ fi
       existsSync(join(outputRoot, `${basename}-updater.compatible-cohort.json`)),
     ).toBeFalse();
     expect(existsSync(join(fixture.markers, "release-pkg.log"))).toBeFalse();
-    expect(
-      readFileSync(join(fixture.markers, "envelope-signer.log"), "utf8")
-        .trim()
-        .split("\n"),
-    ).toHaveLength(1);
+    // `"".trim().split("\n")` is `[""]`, not `[]`, so a length check on its own is satisfied by an
+    // EMPTY signer log: a signer that never ran would read as a signer that ran exactly once. Bind
+    // the one recorded run to the sidecar it was asked to emit.
+    const envelopeSignerRuns = readFileSync(join(fixture.markers, "envelope-signer.log"), "utf8")
+      .trim()
+      .split("\n");
+    expect(envelopeSignerRuns).toHaveLength(1);
+    expect(envelopeSignerRuns[0]).toContain(`${basename}.update-envelope.json`);
   });
 
   test("requires a pinned Team ID", async () => {
@@ -4654,14 +4752,18 @@ fi
       join(repositoryRoot, "src", "native", "Recordings", "build.sh"),
       "utf8",
     );
-    const helperSigning = buildScript.indexOf(
-      '"$CODESIGN_EXECUTABLE" "${HELPER_SIGN_ARGUMENTS[@]}"',
-    );
-    const provenance = buildScript.indexOf('macos_artifact.ts" provenance');
-    const appSigning = buildScript.indexOf("--entitlements", provenance);
-    expect(helperSigning).toBeGreaterThan(-1);
-    expect(provenance).toBeGreaterThan(helperSigning);
-    expect(appSigning).toBeGreaterThan(provenance);
+    // Helper signing, then provenance, then app signing. `toBeGreaterThan` over two `indexOf` results
+    // is satisfied by deleting the SECOND operand (-1 is less than any real offset), so these links
+    // stayed honest only because each operand happened to be guarded by the link before it. The
+    // app-signing link was weak for a different reason: it searched for a bare `--entitlements` from
+    // the provenance offset, so any later codesign call at all satisfied it. Name the app-signing
+    // invocation, and bind the entitlements file to that call.
+    const helperSigning = '"$CODESIGN_EXECUTABLE" "${HELPER_SIGN_ARGUMENTS[@]}"';
+    const provenance = 'macos_artifact.ts" provenance';
+    const appSigning = 'run_codesign "${APP_SIGN_ARGUMENTS[@]}"';
+    expectOrder(buildScript, helperSigning, provenance);
+    expectOrder(buildScript, provenance, appSigning);
+    expectOrder(buildScript, appSigning, '--entitlements "$APP_ENTITLEMENTS"');
     expect(
       existsSync(
         join(

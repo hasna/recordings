@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { expectOrder, sliceBetween, sliceBetweenUnique } from "./helpers/source-assertions";
 
 const buildScript = readFileSync("src/native/Recordings/build.sh", "utf8");
 const companionScript = readFileSync("scripts/build_companion_cli.sh", "utf8");
@@ -40,6 +41,18 @@ function collectShellScripts(root: string): string[] {
 function writeExecutable(path: string, source: string): void {
   writeFileSync(path, source);
   chmodSync(path, 0o755);
+}
+
+// The body of `run_release_sensitive_tool`, bounded by its own closing brace. Slicing this on
+// raw indexOf results made every absence claim about it vacuous: rename the function and the
+// start index is -1, `indexOf("\n}", -1)` then finds the first closing brace in the file, and
+// the region collapses to the empty string — at which point "does not forward
+// DYLD_INSERT_LIBRARIES" is a true statement about nothing. The length floor covers the other
+// half of the same hole, a body gutted down to a passthrough.
+function releaseSensitiveToolBody(): string {
+  return sliceBetween(buildScript, "run_release_sensitive_tool() {", "\n}", {
+    minimumLength: 200,
+  });
 }
 
 describe("native release build hardening contract", () => {
@@ -75,18 +88,33 @@ describe("native release build hardening contract", () => {
     expect(nativeGuardLoader).toContain(
       '"prebuilds",\n      "darwin-universal",\n      "recordings_fs_guard.node"',
     );
-    expect(nativeGuardLoader.indexOf('if (process.platform === "darwin")')).toBeLessThan(
-      nativeGuardLoader.indexOf("RECORDINGS_TEST_FS_GUARD_ADDON"),
+    expectOrder(
+      nativeGuardLoader,
+      'if (process.platform === "darwin")',
+      "RECORDINGS_TEST_FS_GUARD_ADDON",
     );
     expect(buildScript).toContain(
       '"$SOURCE_PACKAGE_ROOT/scripts/native/prebuilds/darwin-universal/recordings_fs_guard.node"',
     );
-    const archivedRequirements = buildScript.slice(
-      buildScript.indexOf("for required_snapshot_input in"),
-      buildScript.indexOf("RUN_BUN_TEST_ENVIRONMENT"),
+    // Bound the requirement scan to the `for required_snapshot_input in ... ; do` word list
+    // itself. The previous end bound was `RUN_BUN_TEST_ENVIRONMENT`, ~3.5 KB further on, which
+    // swept in `generate_and_verify_native_fs_guard` — a function that legitimately names the
+    // prebuild — so the absence claim had to carry a `"; do` suffix and therefore only caught
+    // the guard being added as the LAST entry of the list. Scoped to the word list, the bare
+    // path can be forbidden anywhere in it. The two positive entries prove the region is the
+    // real list rather than a coincidentally guard-free stretch of script: the C source is the
+    // input that must be archived, the built .node is the one that must not.
+    const archivedRequirements = sliceBetween(
+      buildScript,
+      "for required_snapshot_input in",
+      "; do",
+    );
+    expect(archivedRequirements).toContain('"$SOURCE_NATIVE_DIR/Package.swift"');
+    expect(archivedRequirements).toContain(
+      '"$SOURCE_PACKAGE_ROOT/scripts/native/recordings_fs_guard.c"',
     );
     expect(archivedRequirements).not.toContain(
-      'prebuilds/darwin-universal/recordings_fs_guard.node"; do',
+      "prebuilds/darwin-universal/recordings_fs_guard.node",
     );
     expect(buildScript).toContain("generate_and_verify_native_fs_guard");
     expect(buildScript).toContain('run_bun pm pack --destination "$pack_root" --ignore-scripts');
@@ -99,12 +127,9 @@ describe("native release build hardening contract", () => {
     );
     expect(buildScript).toContain("Packed release tarball contains native filesystem guard intermediates");
 
-    const preflight = installerScript.indexOf(
-      '"$BUN_EXECUTABLE" "$ARTIFACT_TOOL" native-fs-guard-check',
-    );
-    expect(preflight).toBeGreaterThan(-1);
-    expect(preflight).toBeLessThan(installerScript.indexOf('DATA_DIR="${HOME}/.hasna/recordings"'));
-    expect(preflight).toBeLessThan(installerScript.indexOf('"$MKDIR_EXECUTABLE" -m 700 "$APP_PARENT"'));
+    const guardPreflight = '"$BUN_EXECUTABLE" "$ARTIFACT_TOOL" native-fs-guard-check';
+    expectOrder(installerScript, guardPreflight, 'DATA_DIR="${HOME}/.hasna/recordings"');
+    expectOrder(installerScript, guardPreflight, '"$MKDIR_EXECUTABLE" -m 700 "$APP_PARENT"');
   });
 
   test("does not compile the Darwin descriptor guard on a non-Darwin target", () => {
@@ -149,14 +174,13 @@ describe("native release build hardening contract", () => {
     expect(nativeGuardBuild).toContain('-isysroot "$SDK_PATH"');
     expect(nativeGuardBuild).toContain('[ -f "$SDK_PATH/usr/include/dirent.h" ]');
 
-    const firstCompile = nativeGuardBuild.indexOf('"$CLANG" "${COMMON[@]}" -arch arm64');
-    expect(firstCompile).toBeGreaterThan(-1);
+    const firstCompile = '"$CLANG" "${COMMON[@]}" -arch arm64';
     for (const guard of [
       'SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"',
       '[ -f "$SDK_PATH/usr/include/dirent.h" ]',
       '-isysroot "$SDK_PATH"',
     ]) {
-      expect(nativeGuardBuild.indexOf(guard)).toBeLessThan(firstCompile);
+      expectOrder(nativeGuardBuild, guard, firstCompile);
     }
   });
 
@@ -282,26 +306,30 @@ describe("native release build hardening contract", () => {
       rmSync(root, { recursive: true, force: true });
     }
 
-    const provenance = buildScript.indexOf(
-      'run_bun "$SOURCE_PACKAGE_ROOT/scripts/macos_artifact.ts" provenance',
-    );
-    const normalize = buildScript.indexOf('normalize_unsigned_app_bundle_modes "$APP_DIR"');
-    const helperSign = buildScript.indexOf('run_codesign "${HELPER_SIGN_ARGUMENTS[@]}"');
-    const appSign = buildScript.indexOf('run_codesign "${APP_SIGN_ARGUMENTS[@]}"');
-    expect(provenance).toBeGreaterThan(-1);
-    expect(normalize).toBeLessThan(helperSign);
-    expect(provenance).toBeGreaterThan(helperSign);
-    expect(normalize).toBeLessThan(appSign);
-    expect(provenance).toBeLessThan(appSign);
+    // Each step is named once and every pairing goes through expectOrder, which requires both
+    // operands to exist. Comparing raw indexOf results let a step satisfy the ordering it was
+    // supposed to be pinned by simply by not being there: only `provenance` and `appSign` were
+    // anchored, so deleting `normalize_unsigned_app_bundle_modes "$APP_DIR"` (-1 is less than
+    // both signing offsets) or `run_codesign "${HELPER_SIGN_ARGUMENTS[@]}"` (provenance is
+    // greater than -1) left this test green while removing the mode normalization that the
+    // umask-077 staging fix exists for, or the nested helper signature itself.
+    const provenance = 'run_bun "$SOURCE_PACKAGE_ROOT/scripts/macos_artifact.ts" provenance';
+    const normalize = 'normalize_unsigned_app_bundle_modes "$APP_DIR"';
+    const helperSign = 'run_codesign "${HELPER_SIGN_ARGUMENTS[@]}"';
+    const appSign = 'run_codesign "${APP_SIGN_ARGUMENTS[@]}"';
+    expectOrder(buildScript, normalize, helperSign);
+    expectOrder(buildScript, helperSign, provenance);
+    expectOrder(buildScript, normalize, appSign);
+    expectOrder(buildScript, provenance, appSign);
     expect(buildScript).toContain(
       'normalize_unsigned_app_data_file_mode "$PROVENANCE_FILE" "App build provenance"',
     );
-    expect(buildScript.indexOf('normalize_unsigned_app_data_file_mode "$PROVENANCE_FILE"')).toBeGreaterThan(
+    expectOrder(
+      buildScript,
       provenance,
+      'normalize_unsigned_app_data_file_mode "$PROVENANCE_FILE"',
     );
-    expect(buildScript.indexOf('verify_app_bundle_modes "$APP_DIR"')).toBeLessThan(
-      appSign,
-    );
+    expectOrder(buildScript, 'verify_app_bundle_modes "$APP_DIR"', appSign);
     expect(buildScript).toContain('verify_app_bundle_modes "$OUTPUT_APP_DIR"');
     expect(buildScript).toContain('require_app_tree_without_extended_acl "$OUTPUT_APP_DIR"');
     expect(buildScript).toContain('"$LS_EXECUTABLE" -laeR "$tree"');
@@ -309,16 +337,13 @@ describe("native release build hardening contract", () => {
     expect(buildScript).toContain(
       'run_codesign --verify --deep --strict --verbose=2 "$OUTPUT_APP_DIR"',
     );
-    const publishCopy = buildScript.indexOf(
-      'run_sensitive_tool "$DITTO_EXECUTABLE" "$APP_DIR" "$OUTPUT_APP_DIR"',
-    );
-    expect(publishCopy).toBeGreaterThan(-1);
-    expect(buildScript.indexOf('verify_app_bundle_modes "$OUTPUT_APP_DIR"')).toBeGreaterThan(
+    const publishCopy = 'run_sensitive_tool "$DITTO_EXECUTABLE" "$APP_DIR" "$OUTPUT_APP_DIR"';
+    expectOrder(buildScript, publishCopy, 'verify_app_bundle_modes "$OUTPUT_APP_DIR"');
+    expectOrder(
+      buildScript,
       publishCopy,
+      'require_app_tree_without_extended_acl "$OUTPUT_APP_DIR"',
     );
-    expect(
-      buildScript.indexOf('require_app_tree_without_extended_acl "$OUTPUT_APP_DIR"'),
-    ).toBeGreaterThan(publishCopy);
     expect(buildScript).toContain("App bundle tree contains a symbolic link or special file");
     expect(buildScript).toContain("App bundle tree contains a multiply-linked regular file");
   });
@@ -392,34 +417,36 @@ describe("native release build hardening contract", () => {
   });
 
   test("pins bootstrap path tools before deriving the source tree", () => {
-    const unamePin = buildScript.indexOf('HOST_UNAME_EXECUTABLE="/usr/bin/uname"');
-    const dirnamePin = buildScript.indexOf('SYSTEM_DIRNAME_EXECUTABLE="/usr/bin/dirname"');
-    const pwdPin = buildScript.indexOf('SYSTEM_PWD_EXECUTABLE="/bin/pwd"');
-    const scriptDirectory = buildScript.indexOf('SCRIPT_DIR="$(cd');
+    const unamePin = 'HOST_UNAME_EXECUTABLE="/usr/bin/uname"';
+    const dirnamePin = 'SYSTEM_DIRNAME_EXECUTABLE="/usr/bin/dirname"';
+    const pwdPin = 'SYSTEM_PWD_EXECUTABLE="/bin/pwd"';
 
-    expect(unamePin).toBeGreaterThan(-1);
-    expect(dirnamePin).toBeGreaterThan(unamePin);
-    expect(pwdPin).toBeGreaterThan(dirnamePin);
-    expect(scriptDirectory).toBeGreaterThan(pwdPin);
+    expectOrder(buildScript, unamePin, dirnamePin);
+    expectOrder(buildScript, dirnamePin, pwdPin);
+    expectOrder(buildScript, pwdPin, 'SCRIPT_DIR="$(cd');
     expect(buildScript).toContain('HOST_PLATFORM="$("$HOST_UNAME_EXECUTABLE" -s)"');
     expect(buildScript).not.toMatch(/SCRIPT_DIR=.*\$\(dirname\b/);
     expect(buildScript).not.toMatch(/SCRIPT_DIR=.*&& pwd\b/);
   });
 
   test("pins a clean full source revision before native compilation", () => {
-    const sourcePreflight = buildScript.indexOf('SOURCE_SHA="$(read_source_sha)"');
-    const swiftTest = buildScript.indexOf('run_swift test -c "$BUILD_CONFIGURATION"');
-    const swiftBuild = buildScript.indexOf('run_swift build -c "$BUILD_CONFIGURATION"');
+    const swiftTest = 'run_swift test -c "$BUILD_CONFIGURATION"';
+    const swiftBuild = 'run_swift build -c "$BUILD_CONFIGURATION"';
 
     expect(buildScript).toContain("git revision is not a full 40-character commit SHA");
     expect(buildScript).toContain("Source worktree must be clean before building");
     expect(buildScript).toContain('readonly SOURCE_SHA');
     expect(buildScript).toContain("status --porcelain=v1 --untracked-files=all");
-    expect(sourcePreflight).toBeGreaterThan(-1);
-    expect(swiftTest).toBeGreaterThan(sourcePreflight);
-    expect(swiftBuild).toBeGreaterThan(swiftTest);
-    expect(buildScript.slice(swiftTest - 300, swiftTest)).toContain('[ "$MODE" = "release" ]');
-    expect(buildScript.slice(swiftTest, swiftBuild)).toContain(
+    expectOrder(buildScript, 'SOURCE_SHA="$(read_source_sha)"', swiftTest);
+    expectOrder(buildScript, swiftTest, swiftBuild);
+    // The release gate is asserted as rendered text rather than as `[ "$MODE" = "release" ]`
+    // appearing somewhere in a 300-character window behind the invocation: that condition
+    // appears 22 times in build.sh, so the window only ever proved that some mode check was
+    // nearby. Pinning the `then` to the invocation proves it gates this specific run.
+    expect(buildScript).toMatch(
+      /if \[ "\$MODE" = "release" \]; then\n\s+run_swift test -c "\$BUILD_CONFIGURATION"/,
+    );
+    expect(sliceBetween(buildScript, swiftTest, swiftBuild)).toContain(
       '--scratch-path "$SWIFT_SCRATCH_PATH/tests"',
     );
   });
@@ -526,8 +553,10 @@ describe("native release build hardening contract", () => {
     expect(companionScript).toContain("--minimum-release-age=604800");
     expect(companionScript).toContain('"$CP_EXECUTABLE" -R "$ROOT/src" "$STAGED_ROOT/src"');
     expect(companionScript).not.toContain("${ROOT}/node_modules");
-    expect(companionScript.indexOf('ACTUAL_VERSION="$(run_output --version)"')).toBeLessThan(
-      companionScript.indexOf('PUBLISH_OUTPUT="$($MKTEMP_EXECUTABLE'),
+    expectOrder(
+      companionScript,
+      'ACTUAL_VERSION="$(run_output --version)"',
+      'PUBLISH_OUTPUT="$($MKTEMP_EXECUTABLE',
     );
     expect(companionScript).toContain('if [ -d "$OUTPUT" ]; then');
     expect(companionScript).toContain("renameSync(process.argv[1], process.argv[2]);");
@@ -598,11 +627,8 @@ describe("native release build hardening contract", () => {
   });
 
   test("runs every release signing and assessment command through a clean allowlisted environment", () => {
-    const releaseToolStart = buildScript.indexOf("run_release_sensitive_tool() {");
-    const releaseToolEnd = buildScript.indexOf("\n}", releaseToolStart);
-    const releaseTool = buildScript.slice(releaseToolStart, releaseToolEnd + 2);
+    const releaseTool = releaseSensitiveToolBody();
 
-    expect(releaseToolStart).toBeGreaterThan(-1);
     expect(releaseTool).toContain('"$ENV_EXECUTABLE" -i');
     expect(releaseTool).toContain('HOME="$OPERATOR_HOME"');
     expect(releaseTool).toContain('PATH="$SANITIZED_PATH"');
@@ -641,9 +667,7 @@ describe("native release build hardening contract", () => {
   });
 
   test("does not forward hostile runtime or signing controls into release-sensitive children", () => {
-    const releaseToolStart = buildScript.indexOf("run_release_sensitive_tool() {");
-    const releaseToolEnd = buildScript.indexOf("\n}", releaseToolStart);
-    const releaseTool = buildScript.slice(releaseToolStart, releaseToolEnd + 2);
+    const releaseTool = releaseSensitiveToolBody();
     const hostileControls = [
       "CODESIGN_ALLOCATE",
       "DYLD_INSERT_LIBRARIES",
@@ -661,12 +685,17 @@ describe("native release build hardening contract", () => {
       expect(releaseTool).not.toContain(`${control}=`);
       expect(buildScript).not.toContain(`${control}=\${${control}`);
     }
-    expect(buildScript).toMatch(
-      /if \[ "\$HOST_PLATFORM" != "Darwin" \]; then[\s\S]*?RELEASE_SENSITIVE_TEST_ENVIRONMENT\+=\(/,
+    const fixtureEnvironmentSetup = sliceBetweenUnique(
+      buildScript,
+      "RUN_BUN_TEST_ENVIRONMENT=()",
+      "\nrun_bun()",
     );
-    const fixtureEnvironmentSetup = buildScript.slice(
-      buildScript.indexOf("RUN_BUN_TEST_ENVIRONMENT=()"),
-      buildScript.indexOf("\nrun_bun()"),
+    // Both halves of the claim are now scoped to the fixture block. The positive half used to
+    // run against all of build.sh, where the lazy `[\s\S]*?` could bridge any `!= "Darwin"`
+    // guard in the file to the append 60 KB later; inside the block it can only match the real
+    // one, and it doubles as proof that the region is the fixture setup and not empty text.
+    expect(fixtureEnvironmentSetup).toMatch(
+      /if \[ "\$HOST_PLATFORM" != "Darwin" \]; then[\s\S]*?RELEASE_SENSITIVE_TEST_ENVIRONMENT\+=\(/,
     );
     expect(fixtureEnvironmentSetup).not.toMatch(
       /if \[ "\$HOST_PLATFORM" = "Darwin" \]; then[\s\S]*?RELEASE_SENSITIVE_TEST_ENVIRONMENT\+=\(/,
@@ -723,7 +752,11 @@ describe("native release build hardening contract", () => {
           .trim()
           .split("\n")
           .map((line) => {
+            // A line carrying no "=" answers -1 here, and slice(0, -1)/slice(0) would then
+            // fabricate a plausible key/value pair out of the malformed line rather than
+            // failing, so the malformed case has to be named rather than silently reshaped.
             const separator = line.indexOf("=");
+            expect(separator, `child environment line is malformed: ${line}`).toBeGreaterThan(0);
             return [line.slice(0, separator), line.slice(separator + 1)];
           }),
       );
@@ -781,7 +814,11 @@ describe("native release build hardening contract", () => {
           .trim()
           .split("\n")
           .map((line) => {
+            // A line carrying no "=" answers -1 here, and slice(0, -1)/slice(0) would then
+            // fabricate a plausible key/value pair out of the malformed line rather than
+            // failing, so the malformed case has to be named rather than silently reshaped.
             const separator = line.indexOf("=");
+            expect(separator, `child environment line is malformed: ${line}`).toBeGreaterThan(0);
             return [line.slice(0, separator), line.slice(separator + 1)];
           }),
       );

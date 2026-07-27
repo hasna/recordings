@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sliceBetweenUnique } from "./helpers/source-assertions";
 
 const temporaryDirectories: string[] = [];
 const testOnNonDarwin = process.platform === "darwin" ? test.skip : test;
@@ -36,9 +37,17 @@ describe("macOS artifact command pinning", () => {
       join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
       "utf8",
     );
-    const requirementDigestSource = source.slice(
-      source.indexOf("function requirementDigest("),
-      source.indexOf("function assertFilesystemTree("),
+    // Scoping to one function is the whole point of the region assertion below: the file has four
+    // `run(CODESIGN_EXECUTABLE, ...)` call sites and only this one may compute a production
+    // requirement digest. With an unguarded `indexOf`, renaming `assertFilesystemTree` answers -1,
+    // `slice(start, -1)` keeps everything to the end of this 5,414-line file, and the assertion
+    // stops being about `requirementDigest` at all — any codesign call downstream would satisfy
+    // it. Uniqueness closes the mirror hole: `indexOf` takes the first match, so a duplicated
+    // start marker would aim the region at the wrong copy of the function.
+    const requirementDigestSource = sliceBetweenUnique(
+      source,
+      "function requirementDigest(",
+      "function assertFilesystemTree(",
     );
     expect(source).toContain(
       'const CODESIGN_EXECUTABLE = process.platform === "darwin"\n  ? "/usr/bin/codesign"',

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compareUnsignedUtf8 } from "../../scripts/macos_artifact";
+import { expectOrder } from "./helpers/source-assertions";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(join(root, path), "utf8");
@@ -184,12 +185,16 @@ describe("native privileged updater broker contract", () => {
     ]) {
       expect(policyTests).toContain(evidence);
     }
-    const hostCheck = broker.indexOf("HostOSVersionPolicy.validate(");
-    const bootstrapState = broker.indexOf("let result = try stateStore.perform(");
-    const updateState = broker.indexOf("return try MonotonicReleaseStateStore().perform(");
-    expect(hostCheck).toBeGreaterThan(0);
-    expect(hostCheck).toBeLessThan(bootstrapState);
-    expect(hostCheck).toBeLessThan(updateState);
+    // The host-version gate has to run before either state store advances, so an unsupported
+    // candidate can never leave a monotonic mark behind. Written as `indexOf(gate) < indexOf(store)`
+    // the gate was the operand that could vanish: -1 is less than every real offset, so deleting
+    // the only call to `HostOSVersionPolicy.validate(` satisfied both comparisons.
+    expectOrder(broker, "HostOSVersionPolicy.validate(", "let result = try stateStore.perform(");
+    expectOrder(
+      broker,
+      "HostOSVersionPolicy.validate(",
+      "return try MonotonicReleaseStateStore().perform(",
+    );
   });
 
   test("gates managed bootstrap compatibility and bounds compatibility probe subprocesses", () => {
@@ -209,22 +214,26 @@ describe("native privileged updater broker contract", () => {
       "src/native/Recordings/Updater/Broker/CodeValidation.swift",
     );
 
-    const envelopeVerification = bootstrap.indexOf(
+    // Preflight order: the envelope signature is verified first, then host compatibility is gated,
+    // and only then is the manifest trusted; separately the client's architectures are checked
+    // before its tree is digested. Each of these was one deleted needle away from passing —
+    // `toBeGreaterThan` is satisfied by removing its *second* operand and `toBeLessThan` by removing
+    // its first, so the chain only survived because every index happened to appear on both sides.
+    expectOrder(
+      bootstrap,
       "let payload = try envelope.verify(publicKeyData: key.data)",
+      "HostOSVersionPolicy.validate(",
     );
-    const hostCompatibility = bootstrap.indexOf("HostOSVersionPolicy.validate(");
-    const manifestValidation = bootstrap.indexOf(
+    expectOrder(
+      bootstrap,
+      "HostOSVersionPolicy.validate(",
       "try validateManifest(manifest, payload: payload)",
     );
-    const clientArchitecture = bootstrap.indexOf(
+    expectOrder(
+      bootstrap,
       "try requireArchitectures(client, expected: payload.architectures)",
+      "let actualTreeDigest",
     );
-    const treeValidation = bootstrap.indexOf("let actualTreeDigest");
-    expect(envelopeVerification).toBeGreaterThan(0);
-    expect(hostCompatibility).toBeGreaterThan(envelopeVerification);
-    expect(hostCompatibility).toBeLessThan(manifestValidation);
-    expect(clientArchitecture).toBeGreaterThan(0);
-    expect(clientArchitecture).toBeLessThan(treeValidation);
 
     expect(runner).toContain("public enum BoundedProcessRunner");
     expect(runner).toContain("F_SETFL, existingFlags | O_NONBLOCK");
@@ -237,9 +246,18 @@ describe("native privileged updater broker contract", () => {
     expect(runner).toContain("Darwin.kill(processIdentifier, SIGKILL)");
     expect(runner).toContain("case timedOut");
     expect(runner).toContain("case outputTooLarge");
-    expect(runner.indexOf("while !reachedEOF")).toBeLessThan(
-      runner.lastIndexOf("process.waitUntilExit()"),
-    );
+    // The bounded drain loop has to run before the child is reaped, or the runner blocks in
+    // `waitUntilExit()` on a child still holding the pipe. `expectOrder` does not fit: the last
+    // match is needed on the *second* operand, not the first, because `process.waitUntilExit()`
+    // also appears in the O_NONBLOCK setup failure path above the loop, and its `firstMatch`
+    // option only selects `lastIndexOf` for the first operand. So both operands are guarded by
+    // hand — deleting `while !reachedEOF` used to leave `-1 < n`, which passed while the runner
+    // had stopped draining at all.
+    const drainLoop = runner.indexOf("while !reachedEOF");
+    const finalReap = runner.lastIndexOf("process.waitUntilExit()");
+    expect(drainLoop, "the bounded drain loop is missing entirely").toBeGreaterThan(-1);
+    expect(finalReap, "the child is never reaped: process.waitUntilExit()").toBeGreaterThan(-1);
+    expect(drainLoop).toBeLessThan(finalReap);
     expect(brokerHost).toContain("BoundedProcessRunner.run(");
     expect(brokerValidation).toContain("BoundedProcessRunner.run(");
     expect(bootstrap.match(/BoundedProcessRunner\.run\(/g)?.length).toBe(3);
@@ -311,12 +329,15 @@ describe("native privileged updater broker contract", () => {
     expect(validator).toContain(
       "descriptorIsSafeRootOwnedDirectory(child, exactPath: currentPath)",
     );
-    const pathAdvance = validator.indexOf('currentPath = currentPath == "/"');
-    const childValidation = validator.indexOf(
+    // `currentPath` is advanced to the child before the child is validated, so the exact-path
+    // argument names the directory actually being checked rather than its parent. Deleting the
+    // advance used to satisfy `-1 < childValidation`, i.e. every ancestor would have been validated
+    // against the wrong path while the assertion still passed.
+    expectOrder(
+      validator,
+      'currentPath = currentPath == "/"',
       "descriptorIsSafeRootOwnedDirectory(child, exactPath: currentPath)",
     );
-    expect(pathAdvance).toBeGreaterThan(0);
-    expect(pathAdvance).toBeLessThan(childValidation);
 
     const activation = source(
       "src/native/Recordings/Updater/Broker/AtomicActivation.swift",
@@ -363,13 +384,21 @@ describe("native privileged updater broker contract", () => {
     const policy = source("src/native/Recordings/Updater/Protocol/MonotonicReleasePolicy.swift");
     const peer = source("src/native/Recordings/Updater/Broker/PeerIdentity.swift");
     const broker = source("src/native/Recordings/Updater/Broker/BrokerMain.swift");
-    const preparation = state.indexOf("try prepare(decision)");
-    const seen = state.indexOf('writeState(payload: payload, payloadDigest: payloadDigest, phase: "seen")');
-    const operation = state.indexOf("result = try operation(decision)");
-    expect(preparation).toBeGreaterThan(0);
-    expect(preparation).toBeLessThan(seen);
-    expect(seen).toBeGreaterThan(0);
-    expect(seen).toBeLessThan(operation);
+    // prepare -> seen -> operation is the durability order the whole monotonic store rests on: the
+    // highest-seen mark is persisted before the mutation it authorizes runs. The `toBeGreaterThan(0)`
+    // guards only covered the first two terms; the operation callback could be deleted and
+    // `seen < -1` would fail, but the intermediate seen write could not be checked in isolation.
+    // `expectOrder` names whichever term is gone.
+    expectOrder(
+      state,
+      "try prepare(decision)",
+      'writeState(payload: payload, payloadDigest: payloadDigest, phase: "seen")',
+    );
+    expectOrder(
+      state,
+      'writeState(payload: payload, payloadDigest: payloadDigest, phase: "seen")',
+      "result = try operation(decision)",
+    );
     expect(peer).toContain("allowedKeyEpochs == [initialKeyEpoch]");
     expect(state).toContain("MonotonicReleasePolicy.assess");
     expect(policy).toContain("allowedKeyEpochs == [initialKeyEpoch]");
@@ -408,10 +437,10 @@ describe("native privileged updater broker contract", () => {
   test("separates bootstrap initialization from verifier-driven update activation", () => {
     const broker = source("src/native/Recordings/Updater/Broker/BrokerMain.swift");
     const state = source("src/native/Recordings/Updater/Broker/MonotonicState.swift");
-    const bootstrap = broker.indexOf('payload.purpose == "bootstrap"');
-    const verifier = broker.indexOf("ArtifactVerifierRunner().materialize");
-    expect(bootstrap).toBeGreaterThan(0);
-    expect(bootstrap).toBeLessThan(verifier);
+    // Bootstrap is decided before the verifier is ever run, so initialization never materializes an
+    // artifact. Deleting the purpose test used to make `-1 < verifier` true — the assertion that
+    // separates the two lifecycles was satisfied by merging them.
+    expectOrder(broker, 'payload.purpose == "bootstrap"', "ArtifactVerifierRunner().materialize");
     expect(broker).toContain("readBootstrapMarker");
     expect(broker).toContain("validateProtectedComponents");
     expect(broker).toContain("MonotonicReleaseStateStore().perform");

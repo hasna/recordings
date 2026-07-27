@@ -33,6 +33,7 @@ import {
   verifyAndExtractArchiveDescriptors,
   writeManifestAtomically,
 } from "../../scripts/macos_artifact";
+import { expectOrder, sliceBetweenUnique } from "./helpers/source-assertions";
 
 const temporaryDirectories: string[] = [];
 
@@ -279,20 +280,21 @@ describe("macOS release artifact binding", () => {
       join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
       "utf8",
     );
-    const boundedReaderSource = source.slice(
-      source.indexOf("function readRegularFileBounded"),
-      source.indexOf("export function sha256File"),
+    // Both bounds have to exist for the claim to mean "inside readRegularFileBounded". Losing
+    // the end bound to a rename left `from` intact and `to` at -1, so the region silently grew
+    // to the remaining ~190 KB of the file and the three assertions below degraded from "this
+    // function checks the size before it allocates" to "the file mentions these in this order".
+    const boundedReaderSource = sliceBetweenUnique(
+      source,
+      "function readRegularFileBounded",
+      "export function sha256File",
     );
-    expect(boundedReaderSource.indexOf("openRegularFile")).toBeGreaterThanOrEqual(0);
-    expect(boundedReaderSource.indexOf("snapshot.size > maximumBytes")).toBeGreaterThan(
-      boundedReaderSource.indexOf("openRegularFile"),
-    );
-    expect(boundedReaderSource.indexOf("Buffer.allocUnsafe")).toBeGreaterThan(
-      boundedReaderSource.indexOf("snapshot.size > maximumBytes"),
-    );
-    const inspectSource = source.slice(
-      source.indexOf("export function inspectZipArchive"),
-      source.indexOf("export function withPrivatelyExtractedArchiveApp"),
+    expectOrder(boundedReaderSource, "openRegularFile", "snapshot.size > maximumBytes");
+    expectOrder(boundedReaderSource, "snapshot.size > maximumBytes", "Buffer.allocUnsafe");
+    const inspectSource = sliceBetweenUnique(
+      source,
+      "export function inspectZipArchive",
+      "export function withPrivatelyExtractedArchiveApp",
     );
     expect(inspectSource).toContain("readRegularFileBounded");
     expect(inspectSource).not.toContain("readFileSync(archivePath)");
@@ -620,27 +622,28 @@ describe("macOS release artifact binding", () => {
       join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
       "utf8",
     );
+    // Every consumer region is bounded by the declaration that follows it, and each bound is
+    // required to exist exactly once. The two negative claims below are the whole point of this
+    // test, and a negative claim about a region that came out empty — which is what a renamed
+    // end bound used to produce — is true of every source file ever written.
     const manifestConsumers = [
-      source.slice(
-        source.indexOf("export function verifyArchiveManifest("),
-        source.indexOf("function assertProvenanceMatchesManifest("),
+      sliceBetweenUnique(
+        source,
+        "export function verifyArchiveManifest(",
+        "function assertProvenanceMatchesManifest(",
       ),
-      source.slice(
-        source.indexOf("function assertExpectedRelease("),
-        source.indexOf("function versionParts("),
+      sliceBetweenUnique(source, "function assertExpectedRelease(", "function versionParts("),
+      sliceBetweenUnique(
+        source,
+        "export function verifyExtractedApp(",
+        "function assertMatchingAppEvidence(",
       ),
-      source.slice(
-        source.indexOf("export function verifyExtractedApp("),
-        source.indexOf("function assertMatchingAppEvidence("),
+      sliceBetweenUnique(
+        source,
+        "function assertInstallTransition(",
+        "function requirementDigest(",
       ),
-      source.slice(
-        source.indexOf("function assertInstallTransition("),
-        source.indexOf("function requirementDigest("),
-      ),
-      source.slice(
-        source.indexOf("function manifestGet("),
-        source.indexOf("function argument("),
-      ),
+      sliceBetweenUnique(source, "function manifestGet(", "function argument("),
     ];
 
     for (const consumer of manifestConsumers) {
@@ -649,9 +652,10 @@ describe("macOS release artifact binding", () => {
       expect(consumer).not.toContain("readJson<MacOSArtifactManifest>(manifestPath)");
     }
 
-    const reader = source.slice(
-      source.indexOf("export function readAuthenticatedManifest<"),
-      source.indexOf("function writeJson("),
+    const reader = sliceBetweenUnique(
+      source,
+      "export function readAuthenticatedManifest<",
+      "function writeJson(",
     );
     expect(reader.match(/readRegularFileBounded\(/g)).toHaveLength(1);
     expect(reader).toContain("JSON_INPUT_LIMIT_BYTES");
@@ -769,31 +773,31 @@ describe("macOS release artifact binding", () => {
       join(import.meta.dir, "..", "..", "scripts", "macos_artifact.ts"),
       "utf8",
     );
-    const releaseFinalize = source.slice(
-      source.indexOf("function finalizeArtifact("),
-      source.indexOf("function finalizeLocalArtifact("),
+    const releaseFinalize = sliceBetweenUnique(
+      source,
+      "function finalizeArtifact(",
+      "function finalizeLocalArtifact(",
     );
-    const localFinalize = source.slice(
-      source.indexOf("function finalizeLocalArtifact("),
-      source.indexOf("function assertExpectedRelease("),
+    const localFinalize = sliceBetweenUnique(
+      source,
+      "function finalizeLocalArtifact(",
+      "function assertExpectedRelease(",
     );
     for (const finalizeSource of [releaseFinalize, localFinalize]) {
-      expect(finalizeSource.indexOf("verifySuppliedAndArchivedApps(")).toBeGreaterThan(-1);
       expect(finalizeSource.indexOf("assertCurrentSourceRevision(", 1)).toBeGreaterThan(-1);
-      expect(finalizeSource.indexOf("writeManifestAtomically(")).toBeGreaterThan(
-        finalizeSource.indexOf("verifySuppliedAndArchivedApps("),
-      );
+      expectOrder(finalizeSource, "verifySuppliedAndArchivedApps(", "writeManifestAtomically(");
     }
-    const atomicWriter = source.slice(
-      source.indexOf("export function writeManifestAtomically("),
-      source.indexOf("function isHex("),
+    const atomicWriter = sliceBetweenUnique(
+      source,
+      "export function writeManifestAtomically(",
+      "function isHex(",
     );
-    expect(atomicWriter.indexOf("fsyncSync(descriptor)")).toBeLessThan(
-      atomicWriter.indexOf("linkSync(temporaryPath, path)"),
-    );
-    expect(atomicWriter.indexOf("fsyncDirectory(parent)")).toBeGreaterThan(
-      atomicWriter.indexOf("linkSync(temporaryPath, path)"),
-    );
+    // The durability ordering was the one assertion here that a deletion satisfied: with
+    // `fsyncSync(descriptor)` removed, indexOf answered -1, -1 is less than the linkSync
+    // offset, and the test still passed — so the check that the manifest bytes reach disk
+    // before the hard link publishes them was enforced by nothing at all.
+    expectOrder(atomicWriter, "fsyncSync(descriptor)", "linkSync(temporaryPath, path)");
+    expectOrder(atomicWriter, "linkSync(temporaryPath, path)", "fsyncDirectory(parent)");
     expect(atomicWriter).toContain("unlinkSync(temporaryPath)");
     expect(atomicWriter).toContain("console.log(`manifest_sha256=${digest}`)");
   });
