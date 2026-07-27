@@ -21,9 +21,16 @@ import { join } from "node:path";
  * every verdict is manufactured. This already produced one wrong all-clear in this repo, and the
  * list in circulation named TWO of the three.
  *
- *   src/__tests__/macos-app-lifecycle.test.ts             EXIT 1,  48 pass /  92 fail
+ *   src/__tests__/macos-app-lifecycle.test.ts             EXIT 1,  49 pass /  91 fail
  *   src/__tests__/native-app-companion-contract.test.ts   EXIT 1,  13 pass /   1 fail
  *   src/__tests__/config.test.ts                          EXIT 1,  43 pass /   1 fail
+ *
+ * The first file's SPLIT drifts and the earlier version of this comment stated it as fixed. It was
+ * recorded here as 48/91+1 and measures 49/91 now, deterministically 3 of 3 runs, because one timing
+ * test (`runtime smoke timeout does not wait forever on a live open process`) sits on the margin and
+ * flips with load. The TOTAL of red files is stable; the per-file split is not. This is the concrete
+ * reason for the rule below: compare failing test NAMES, never counts. A count comparison across two
+ * trees will show a phantom delta from this file alone.
  *
  * Measured deterministically, 3 of 3 runs each, on `main` at 40c37b1 with
  * `bun install --frozen-lockfile`. Causes are environmental, not defects in the code under test:
@@ -138,6 +145,20 @@ export function withoutComments(source: string): string {
  * Handles the three kinds Swift has — `"`, `"""`, and raw `#…"` with a matching pound count whose
  * escape introducer is `\#…` — and returns null when the literal does not close, so callers decide
  * whether that is fatal rather than silently running to end of input.
+ *
+ * KNOWN DEFECT, filed rather than fixed here, and stated so nobody re-derives it: a PLAIN `"` literal
+ * whose interpolation contains a nested literal is measured wrong. For `{ log("v=\(f("}"))") }` this
+ * returns 14 where the true close is 21 — the nested literal's opening quote is taken as the outer
+ * terminator, and the `}` inside it is then counted as structure. The raw-string form
+ * (`#"v=\#(f("}"))"#`) is correct, because its terminator cannot be confused with a bare quote.
+ *
+ * It is fail-CLOSED at both call sites today, which is why it is filed and not rushed:
+ * `withoutAnyComments` throws on an unterminated literal, so quote parity is always even by the time
+ * a caller reaches the brace matcher, and the arithmetic can then only land EARLY (the adjacency
+ * slice is non-empty and the assertion fires) or LATE (`tableClose > guardAt` and the assertion
+ * fires). Both directions fail the test rather than passing it. The proper fix is to scan
+ * interpolations as code — the same treatment `withoutAnyComments` gives them — rather than treating
+ * the literal body as opaque.
  */
 function stringLiteralEnd(source: string, index: number): number | null {
   let hashes = 0;
