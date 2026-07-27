@@ -360,7 +360,7 @@ struct CLIRunnerTests {
         // commandCLI closure on a detached task, budgeted by commandRewriteTimeout — the
         // observable wall time must stay inside the budget even though the helper never
         // exits on its own and ignores SIGTERM.
-        let runCLI = RecordingEngine().commandCLI
+        let runCLI = RecordingEngine(homePath: home.path).commandCLI
         let homePath = home.path
         let startedAt = ContinuousClock.now
         let output = await Task.detached {
@@ -454,7 +454,7 @@ struct CLIRunnerTests {
         // also runs to exhaustion. The observable wall time must still land under the
         // public ceiling — the return margin absorbs spawn, poll overshoot, capture
         // shutdown, and the task hops.
-        let runCLI = RecordingEngine().commandCLI
+        let runCLI = RecordingEngine(homePath: home.path).commandCLI
         let homePath = home.path
         let startedAt = ContinuousClock.now
         let output = await Task.detached {
@@ -1113,7 +1113,7 @@ struct CLIRunnerTests {
         // SIGTERM and the silent holder keeps both pipes open, so every deadline in the
         // chain — execution window, termination grace, drain wait — runs to exhaustion
         // with zero bytes ever arriving to wake a reader.
-        let runCLI = RecordingEngine().commandCLI
+        let runCLI = RecordingEngine(homePath: home.path).commandCLI
         let homePath = home.path
         let startedAt = ContinuousClock.now
         let output = await Task.detached {
