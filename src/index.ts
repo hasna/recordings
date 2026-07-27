@@ -81,6 +81,7 @@ export {
   captureProbePrecondition,
   captureProbeSubject,
   microphoneGrantInstruction,
+  permissionStateProvesRequest,
   readWavPeak,
   DEFAULT_PROBE_SECONDS,
   RECORDINGS_BUNDLE_IDENTIFIER,

@@ -140,6 +140,21 @@ describe("describeActiveStore", () => {
     expect(description.local_db_present).toBe(true);
     expect(description.local_db_recordings).toBeNull();
   });
+
+  // An uncountable file must not read as "no second dataset". Reporting a silent
+  // divergent:false there is the same failure as reporting the wrong count.
+  test("says UNKNOWN, not none, when a present local DB cannot be counted", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+    writeFileSync(dbPath, "this is not a sqlite database");
+
+    const description = describeActiveStore(makeConfig(dbPath), {
+      HASNA_RECORDINGS_API_URL: "https://recordings.example.test",
+      HASNA_RECORDINGS_API_KEY: FAKE_API_KEY,
+    });
+
+    expect(description.local_db_recordings).toBeNull();
+    expect(description.warning).toContain("UNKNOWN");
+  });
 });
 
 interface FakeStoreOptions {

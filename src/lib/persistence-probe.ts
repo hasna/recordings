@@ -114,6 +114,19 @@ export function describeActiveStore(
 
   const warnings: string[] = [];
   if (resolution.warning) warnings.push(resolution.warning);
+  // An uncountable local file must not read as "no second dataset". A read-only
+  // open fails on, among other things, a WAL database whose -shm cannot be
+  // created, and silently reporting 0 there would hide the divergence.
+  if (
+    resolution.transport === "cloud-http" &&
+    localDbPresent &&
+    localDbRecordings === null
+  ) {
+    warnings.push(
+      `writes go to ${resolution.baseUrl}, and ${localDbPath} exists but could not be counted, ` +
+        "so whether a second dataset is sitting there is UNKNOWN — not 'none'."
+    );
+  }
   if (divergent) {
     warnings.push(
       `writes go to ${resolution.baseUrl}, but ${localDbPath} still holds ` +

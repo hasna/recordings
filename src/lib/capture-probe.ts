@@ -288,6 +288,24 @@ export interface MicrophoneGrantInstruction {
 export const RECORDINGS_BUNDLE_IDENTIFIER = "com.hasna.recordings";
 
 /**
+ * Whether a reported permission state proves the app has ever asked for consent.
+ *
+ * Only a definite authorization decision does. `not_determined` means it never
+ * asked; so does anything the reporter could not resolve — including the
+ * `ambiguous_multiple_installations` value emitted when several bundles exist,
+ * which REPLACES the permission value rather than qualifying it. Treating an
+ * unresolved state as "already asked" suppresses the one line that explains why
+ * the Settings list has no Recordings row, which is the loop people get stuck in.
+ */
+export function permissionStateProvesRequest(permissionState: string): boolean {
+  return (
+    permissionState.startsWith("allowed") ||
+    permissionState.startsWith("denied") ||
+    permissionState.startsWith("limited")
+  );
+}
+
+/**
  * Build the instruction a human must follow at the keyboard, naming the exact
  * pane, section, control and bundle.
  *
