@@ -80,6 +80,10 @@ describe("release version sites", () => {
       const match = plist.match(new RegExp(`<key>${key}</key>\\s*<string>([^<]+)</string>`));
       expect(match?.[1]).toBe("9.8.7");
     }
+    // Kept alongside the per-key checks rather than replaced by them: those two name the keys, so
+    // a stale 0.0.1 left anywhere else in the file would slip past. Neither assertion subsumes the
+    // other, and the per-key form alone would have been a quiet reduction in coverage.
+    expect(plist).not.toContain("0.0.1");
   });
 
   test("rejects versions the release path already refuses", () => {
