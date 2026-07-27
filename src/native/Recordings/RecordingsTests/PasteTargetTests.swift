@@ -46,7 +46,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postedPayloads.append(pasteboardText)
-                return true
+                return .posted
             }
         )
 
@@ -96,7 +96,7 @@ struct PasteTargetTests {
         let coordinator = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
         coordinator.pendingTransactionWillChange = { announcements += 1 }
 
@@ -115,7 +115,7 @@ struct PasteTargetTests {
         let failing = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { _ in PasteboardWriteResult(verified: false, ownershipChangeCount: 1) },
-            postPaste: { false }
+            postPaste: { .eventConstructionFailed }
         )
         var failureAnnouncements = 0
         failing.pendingTransactionWillChange = { failureAnnouncements += 1 }
@@ -123,6 +123,53 @@ struct PasteTargetTests {
         scheduled.removeFirst()()
         #expect(failureAnnouncements == 2)
         #expect(!failing.hasPendingTransaction)
+    }
+
+    @Test("secure input is reported as blocked, never as a successful paste")
+    @MainActor
+    func secureInputIsNotReportedAsPasted() {
+        // The regression this locks: the poster used to return Bool, and building the Cmd-V
+        // events succeeds even while secure input is held — so the coordinator settled on
+        // .pasted and the app told the owner it had typed text that macOS had discarded.
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        var completions: [PasteDeliveryOutcome] = []
+        var settlements: [PasteDeliveryOutcome] = []
+        let coordinator = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
+            postPaste: { .secureInputActive }
+        )
+
+        #expect(coordinator.submit(text: "hello", generation: 1, delay: 0) { _, outcome in
+            completions.append(outcome)
+        } settlement: { _, outcome in
+            settlements.append(outcome)
+        })
+        scheduled.removeFirst()()
+
+        #expect(completions == [.secureInputBlocked])
+        #expect(settlements == [.secureInputBlocked])
+        #expect(!completions.contains(.pasted), "a discarded keystroke must never read as pasted")
+        #expect(!coordinator.hasPendingTransaction)
+    }
+
+    @Test("a failure to build the paste events stays distinguishable from secure input")
+    @MainActor
+    func constructionFailureIsDistinctFromSecureInput() {
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        var completions: [PasteDeliveryOutcome] = []
+        let coordinator = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
+            postPaste: { .eventConstructionFailed }
+        )
+        #expect(coordinator.submit(text: "hello", generation: 1, delay: 0) { _, outcome in
+            completions.append(outcome)
+        })
+        scheduled.removeFirst()()
+        // Two different causes with two different remedies must not collapse into one outcome.
+        #expect(completions == [.eventConstructionFailed])
+        #expect(completions != [.secureInputBlocked])
     }
 
     @Test("paste failures complete once with exact write and post outcomes")
@@ -137,7 +184,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in PasteboardWriteResult(verified: false, ownershipChangeCount: 1) },
             postPaste: {
                 postCalls += 1
-                return false
+                return .eventConstructionFailed
             }
         )
 
@@ -159,7 +206,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
             postPaste: {
                 postCalls += 1
-                return false
+                return .eventConstructionFailed
             }
         )
         #expect(postFailureCoordinator.submit(text: "B", generation: 2, delay: 0) { _, outcome in
@@ -170,8 +217,8 @@ struct PasteTargetTests {
         let postFailure = scheduled.removeFirst()
         postFailure()
         postFailure()
-        #expect(outcomes == [.clipboardWriteFailed, .eventPostFailed])
-        #expect(settlements == [.clipboardWriteFailed, .eventPostFailed])
+        #expect(outcomes == [.clipboardWriteFailed, .eventConstructionFailed])
+        #expect(settlements == [.clipboardWriteFailed, .eventConstructionFailed])
         #expect(postCalls == 1)
         #expect(!postFailureCoordinator.hasPendingTransaction)
     }
@@ -192,7 +239,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postCalls += 1
-                return true
+                return .posted
             }
         )
 
@@ -230,7 +277,7 @@ struct PasteTargetTests {
                 writeCalls += 1
                 return PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -265,7 +312,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postCalls += 1
-                return true
+                return .posted
             }
         )
 
@@ -302,7 +349,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postCalls += 1
-                return true
+                return .posted
             }
         )
 
@@ -587,7 +634,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in
                 PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -632,7 +679,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in
                 PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -686,9 +733,9 @@ struct PasteTargetTests {
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { text in RecordingEngine.writeClipboardAttempt(text, to: pasteboard) },
             postPaste: {
-                guard let payload = pasteboard.string(forType: .string) else { return false }
+                guard let payload = pasteboard.string(forType: .string) else { return .eventConstructionFailed }
                 postedPayloads.append(payload)
-                return true
+                return .posted
             }
         )
 
@@ -717,7 +764,7 @@ struct PasteTargetTests {
         let coordinator = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { text in RecordingEngine.writeClipboardAttempt(text, to: pasteboard) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -767,7 +814,7 @@ struct PasteTargetTests {
                     ownershipChangeCount: attempted.ownershipChangeCount
                 )
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -815,7 +862,7 @@ struct PasteTargetTests {
         let coordinator = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { text in RecordingEngine.writeClipboardAttempt(text, to: pasteboard) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(

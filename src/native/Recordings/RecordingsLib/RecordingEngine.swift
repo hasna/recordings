@@ -1,5 +1,7 @@
 import AVFoundation
 @preconcurrency import ApplicationServices
+// IsSecureEventInputEnabled lives in Carbon's HIToolbox, not AppKit.
+import Carbon.HIToolbox
 import Darwin
 import SwiftUI
 @preconcurrency import KeyboardShortcuts
@@ -307,7 +309,25 @@ enum PasteDeliveryOutcome: Equatable, Sendable {
     case targetUnavailable
     case clipboardOwnershipLost
     case clipboardWriteFailed
-    case eventPostFailed
+    /// The Cmd-V events could not be *built*. Named for what it actually detects: the
+    /// previous name, `eventPostFailed`, implied the post itself was checked, and
+    /// `CGEvent.post` returns Void, so no code ever learned that.
+    case eventConstructionFailed
+    /// Some process holds secure event input (a password field, a password manager, certain
+    /// lock states). macOS then discards synthetic keystrokes and reports nothing, so the
+    /// paste cannot land. The transcript stays on the clipboard for a manual Cmd-V.
+    case secureInputBlocked
+}
+
+/// What actually happened when the paste keystroke was attempted.
+///
+/// This exists because a Bool could not tell "the events would not build" apart from "the
+/// events were built and discarded by secure input" — and the old poster returned `true` for
+/// the second case, so the app reported a successful paste while nothing was typed.
+enum PastePostResult: Equatable, Sendable {
+    case posted
+    case eventConstructionFailed
+    case secureInputActive
 }
 
 struct PasteboardWriteResult: Equatable, Sendable {
@@ -334,7 +354,7 @@ final class PasteTransactionCoordinator {
     typealias ScheduledOperation = @MainActor @Sendable () -> Void
     typealias Scheduler = @MainActor @Sendable (TimeInterval, @escaping ScheduledOperation) -> Void
     typealias PayloadWriter = @MainActor @Sendable (String) -> PasteboardWriteResult
-    typealias PastePoster = @MainActor @Sendable () -> Bool
+    typealias PastePoster = @MainActor @Sendable () -> PastePostResult
     typealias WriteObserver = @MainActor @Sendable (PasteboardWriteResult) -> Void
     typealias Completion = @MainActor @Sendable (PasteDeliveryTransaction, PasteDeliveryOutcome) -> Void
     typealias Settlement = @MainActor @Sendable (PasteDeliveryTransaction, PasteDeliveryOutcome) -> Void
@@ -421,10 +441,18 @@ final class PasteTransactionCoordinator {
                 completion(transaction, .clipboardOwnershipLost)
                 return
             }
-            guard self.postPaste() else {
-                settlement(transaction, .eventPostFailed)
+            switch self.postPaste() {
+            case .posted:
+                break
+            case .eventConstructionFailed:
+                settlement(transaction, .eventConstructionFailed)
                 self.state = .idle
-                completion(transaction, .eventPostFailed)
+                completion(transaction, .eventConstructionFailed)
+                return
+            case .secureInputActive:
+                settlement(transaction, .secureInputBlocked)
+                self.state = .idle
+                completion(transaction, .secureInputBlocked)
                 return
             }
             completion(transaction, .pasted)
@@ -642,6 +670,14 @@ public final class RecordingEngine: ObservableObject {
     /// background recovery refresh the Library even after that pane has been unmounted.
     @Published public private(set) var persistedRecordingRevision: UInt64 = 0
     @Published public var statusMessage = "Starting..."
+    /// Why the app currently cannot deliver, when the reason outlives one status write.
+    ///
+    /// `updateDeliveryStatus` writes `statusMessage`, and `updateStatus()` rewrites it to
+    /// "Ready" on the next return to idle — which is exactly what happens once a delivery
+    /// settles. A transient success message can afford that; "this field blocks typing, press
+    /// Cmd-V" cannot, because it is the only thing telling the owner their transcript is
+    /// recoverable. Held here so the idle status keeps carrying it until the next delivery.
+    @Published public private(set) var blockedReason: String?
     @Published public var isTranscribing = false
     @Published public var recordingDuration: TimeInterval = 0
     @Published public var liveTranscriptionText = ""
@@ -754,16 +790,23 @@ public final class RecordingEngine: ObservableObject {
             return RecordingEngine.writeClipboardAttempt(text, to: pasteboard)
         },
         postPaste: {
+            // Secure input is a global system state: while any process holds it, macOS
+            // discards synthetic keyboard events and `CGEvent.post` still returns Void. It
+            // is checked twice on purpose — a password field can take secure input between
+            // the check and the post, and a pre-check alone would just narrow the window in
+            // which the app claims a paste that never happened.
+            if IsSecureEventInputEnabled() { return .secureInputActive }
             let source = CGEventSource(stateID: .hidSystemState)
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
                   let up = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-                return false
+                return .eventConstructionFailed
             }
             down.flags = .maskCommand
             up.flags = .maskCommand
             down.post(tap: .cgSessionEventTap)
             up.post(tap: .cgSessionEventTap)
-            return true
+            if IsSecureEventInputEnabled() { return .secureInputActive }
+            return .posted
         }
     )
 
@@ -990,6 +1033,11 @@ public final class RecordingEngine: ObservableObject {
 
     public func updateStatus() {
         if isRecording || isTranscribing || deliveryIsPending { return }
+        if let blockedReason {
+            statusMessage = blockedReason
+            flowPhase = .idle
+            return
+        }
         statusMessage = "Ready"
         flowPhase = .idle
     }
@@ -3340,10 +3388,17 @@ public final class RecordingEngine: ObservableObject {
             )
             case .clipboardOwnershipLost: "Paste cancelled because the clipboard changed"
             case .clipboardWriteFailed: "Paste failed because the clipboard could not be updated"
-            case .eventPostFailed: restoreClipboard
-                ? "Paste failed because the paste event could not be posted"
-                : "Copied, but paste event could not be posted"
+            case .eventConstructionFailed: restoreClipboard
+                ? "Paste failed because the paste event could not be built"
+                : "Copied, but the paste event could not be built"
+            // The transcript is deliberately left on the clipboard here, so the instruction
+            // is something the owner can actually act on rather than a dead end.
+            case .secureInputBlocked:
+                "This field blocks typing (secure input) — transcript copied, press Cmd-V"
             }
+            // Only a blocker the owner must act on is persisted. Everything else clears it,
+            // so a stale explanation can never outlive the condition it described.
+            self.blockedReason = outcome == .secureInputBlocked ? message : nil
             self.updateDeliveryStatus(
                 message,
                 kind: posted ? .success : .failure,
@@ -3368,8 +3423,13 @@ public final class RecordingEngine: ObservableObject {
             let shouldRestore = switch outcome {
             case .clipboardWriteFailed:
                 stillOwnsChangeCount
-            case .targetUnavailable, .clipboardOwnershipLost, .eventPostFailed, .pasted:
+            case .targetUnavailable, .clipboardOwnershipLost, .eventConstructionFailed, .pasted:
                 stillOwnsPayload
+            // Never restore over a secure-input failure: the status line just told the owner
+            // to press Cmd-V, and restoring the previous clipboard would delete the very
+            // transcript they were told to paste.
+            case .secureInputBlocked:
+                false
             }
             if shouldRestore {
                 previousClipboard.restore(to: pasteboard)
