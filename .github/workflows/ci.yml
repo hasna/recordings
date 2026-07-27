@@ -10,9 +10,11 @@ name: CI
 #     exemptions: .github/linux-quarantine.txt is empty, and the `typescript` job proves after the
 #     fact, against the runner's own JUnit report, that it ran exactly the discovered set.
 #   Swift/C native (87 files under src/native) — compiled on macOS, but only PARTLY, because `main`
-#     itself does not compile. Two pre-existing errors in Updater/VerifierLauncher are recorded in
-#     .github/native-known-errors.txt; every target NOT blocked by them is built individually and
-#     required to be clean. Read that file before reading the `native` job's tick as "it compiles".
+#     itself does not compile. Six pre-existing errors across Updater/VerifierLauncher (C) and
+#     Updater/Protocol (Swift) are recorded in .github/native-known-errors.txt, and they block 8 of
+#     the package's 11 targets. The other three — RecordingsLib, App and RecordingsTests, i.e. the
+#     bulk of the Swift — are built individually and required to be clean. Read that file before
+#     reading the `native` job's green tick as "the native code compiles". It does not.
 #
 # LIMITS OF THIS FILE, stated because a reader will otherwise assume the opposite:
 #   - Nothing here is REQUIRED to merge. That is branch-protection configuration on `main`, which
@@ -65,6 +67,12 @@ jobs:
       JUNIT_REPORT: gated-junit.xml
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The Diff hygiene step compares against the pull request's base commit, and the default
+          # depth-1 checkout of a merge ref does not contain it -- the step failed with
+          # `fatal: bad object <base-sha>` before this was added. This repository's whole history is
+          # small enough that full depth costs nothing measurable.
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -209,6 +217,11 @@ jobs:
           if [ -z "$base" ]; then
             echo "::notice title=Diff hygiene skipped::No base commit to compare against (first commit)."
             exit 0
+          fi
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # Loud rather than silent: a check that cannot run must say so, not report success.
+            echo "::error title=Diff hygiene could not run::Base commit $base is not present in this checkout, so the pull request's diff was never examined. Restore fetch-depth: 0."
+            exit 1
           fi
           echo "comparing $base..HEAD"
           git diff --check "$base" HEAD

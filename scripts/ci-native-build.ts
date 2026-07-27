@@ -113,15 +113,11 @@ export function verdict(succeeded: boolean, observed: string[], known: string[])
         "error(s). Delete the file's entries so this becomes a plain build gate.",
     };
   }
-  const disappeared = known.filter((signature) => !observed.includes(signature));
-  if (disappeared.length > 0) {
-    return {
-      kind: "stale-baseline",
-      reason:
-        "These recorded errors no longer appear, so the baseline overstates what is broken. " +
-        `Remove them from ${KNOWN_ERRORS_FILE}:\n${disappeared.map((s) => `  ${s}`).join("\n")}`,
-    };
-  }
+  // Deliberately NOT reporting recorded errors that failed to appear. The whole-package build stops
+  // scheduling after its first failure, so most recorded errors are never REACHED and their absence
+  // says nothing about whether they are fixed. An earlier version treated that as a stale baseline
+  // and failed the job for bookkeeping every single run. Staleness is detected per target instead,
+  // where a target that builds clean is real evidence its entries are gone.
   return { kind: "quarantined", observed };
 }
 
@@ -271,12 +267,17 @@ async function main(argv: string[]): Promise<void> {
     process.exit(1);
   }
   const targets = targetsFromDump(JSON.parse(dump.output), packagePath);
-  const blocked = blockedTargets(targets, observed.map(signatureFile));
+  // Blocked is derived from the BASELINE, not from what this build happened to report. The build
+  // aborts early, so `observed` names only the errors in whatever compiled first — on this package
+  // that is the C launcher, and deriving from it left the four recorded Swift errors in
+  // Updater/Protocol unblocked, so the gate demanded that a known-broken target build cleanly.
+  const blocked = blockedTargets(targets, known.map(signatureFile));
   const gated = targets.filter((target) => !blocked.includes(target.name)).map((t) => t.name);
 
   console.log(
-    `\nWhole-package build stopped at the recorded errors. Building the ${gated.length} target(s) ` +
-      `not blocked by them, individually.\n  blocked: ${blocked.join(", ") || "(none)"}\n`,
+    `\nWhole-package build stopped at the recorded errors. Building each target individually: ` +
+      `${gated.length} gated, ${blocked.length} blocked by the baseline.\n` +
+      `  blocked: ${blocked.join(", ") || "(none)"}\n`,
   );
   if (gated.length === 0) {
     console.log(
@@ -291,31 +292,57 @@ async function main(argv: string[]): Promise<void> {
   setOutput("blocked", blocked.join(", "));
   setOutput("gatedTargets", String(gated.length));
 
+  const buildTarget = async (name: string) => {
+    const attempt = await run(["swift", "build", "--target", name, "--package-path", packagePath]);
+    return {
+      clean: attempt.exitCode === 0,
+      introduced: errorSignatures(attempt.output, repoRoot).filter((s) => !known.includes(s)),
+      output: attempt.output,
+    };
+  };
+
   const failures: string[] = [];
   for (const name of gated) {
-    const attempt = await run(["swift", "build", "--target", name, "--package-path", packagePath]);
-    const introduced = errorSignatures(attempt.output, repoRoot).filter((s) => !known.includes(s));
-    if (attempt.exitCode === 0 && introduced.length === 0) {
+    const { clean, introduced, output } = await buildTarget(name);
+    if (clean && introduced.length === 0) {
       console.log(`  ok        ${name}`);
       continue;
     }
     console.log(`  FAILED    ${name}`);
-    process.stdout.write(attempt.output);
+    process.stdout.write(output);
     failures.push(name);
   }
+
+  // The baseline's expiry date, and the reason it is checked HERE. A blocked target that now builds
+  // clean is real evidence that its recorded errors are gone, unlike their mere absence from an
+  // early-aborting whole-package build. Without this the baseline is permanent by default.
+  const revived: string[] = [];
+  for (const name of blocked) {
+    const { clean } = await buildTarget(name);
+    console.log(`  ${clean ? "NOW CLEAN" : "blocked  "} ${name}`);
+    if (clean) revived.push(name);
+  }
+
   if (failures.length > 0) {
     console.log(
-      `\n::error title=Native target failed to compile::${failures.join(", ")}. These targets are ` +
-        "not blocked by any recorded pre-existing error, so this is a break introduced by this change.",
+      `\n::error title=Native target failed to compile::${failures.join(", ")}. Not blocked by any ` +
+        `error recorded in ${KNOWN_ERRORS_FILE}, so this is a break introduced by this change.`,
+    );
+    process.exit(1);
+  }
+  if (revived.length > 0) {
+    console.log(
+      `\n::error title=Stale native baseline::${revived.join(", ")} now build cleanly. Delete their ` +
+        `entries from ${KNOWN_ERRORS_FILE} so these targets become gated instead of exempt.`,
     );
     process.exit(1);
   }
 
   console.log(
     `\n::warning title=Native half only PARTLY verified::${gated.length} target(s) compile cleanly ` +
-      `(${gated.join(", ")}), but ${blocked.join(", ")} could NOT be compiled because of ` +
-      `${observed.length} pre-existing error(s) recorded in ${KNOWN_ERRORS_FILE}. Nothing in those ` +
-      "blocked targets is verified by this run.",
+      `(${gated.join(", ")}), but ${blocked.length} could NOT be compiled at all ` +
+      `(${blocked.join(", ")}) because of ${known.length} pre-existing error(s) recorded in ` +
+      `${KNOWN_ERRORS_FILE}. Nothing in those blocked targets is verified by this run.`,
   );
 }
 

@@ -18,9 +18,14 @@ import {
  *
  * The mechanism it protects is the only regression protection the Swift/C half has: `main` does not
  * compile, so a plain build gate would be red on arrival and a soft-failing build would assert
- * nothing at all. Both failure directions are therefore tested explicitly — a NEW error must be
- * caught while the build is already failing, and a FIXED error must invalidate its own baseline
- * entry. A baseline verified only on the state it was recorded from proves nothing.
+ * nothing at all. The failure directions are therefore tested explicitly — a NEW error must be caught
+ * while the build is already failing, a build that fails for an UNPARSED reason must not be mistaken
+ * for the recorded state, and a recorded error that merely went unreached must NOT be reported as
+ * fixed. A baseline verified only on the state it was recorded from proves nothing.
+ *
+ * Note which direction is NOT this file's business: whether a baseline entry has actually been fixed
+ * is decided by building that target on a real toolchain, in `main()`, because only a target that
+ * compiles cleanly proves it. `verdict` cannot know it from an early-aborting whole-package build.
  */
 const repoRoot = join(import.meta.dir, "..", "..");
 
@@ -119,16 +124,19 @@ describe("verdict", () => {
     });
   });
 
-  test("a fixed error invalidates its own baseline entry", () => {
-    const result = verdict(false, [SANDBOX_INIT], known);
-    expect(result.kind).toBe("stale-baseline");
-    expect(result.kind === "stale-baseline" && result.reason).toContain("closefrom");
+  test("a recorded error that did not appear is NOT reported as stale", () => {
+    // Compilation stops after the first failure, so most recorded errors are never REACHED and their
+    // absence is evidence of nothing. An earlier version returned `stale-baseline` here and failed
+    // the job for bookkeeping on every single run, because the whole-package build can only ever
+    // reach the first broken target. Staleness is detected per target instead, where a target that
+    // builds clean really does prove its entries are gone.
+    expect(verdict(false, [SANDBOX_INIT], known)).toEqual({
+      kind: "quarantined",
+      observed: [SANDBOX_INIT],
+    });
   });
 
   test("a NEW error is reported instead of the recorded one it prevented from being emitted", () => {
-    // Compilation stops early, so a new error in an earlier translation unit can keep a recorded
-    // one from ever being printed. Reporting the baseline as stale here would bury the regression
-    // under a bookkeeping complaint and send someone to edit a list rather than fix their code.
     const introduced = "src/native/Recordings/App/RecordingsApp.swift: cannot find 'foo' in scope";
     expect(verdict(false, [introduced], known)).toEqual({ kind: "regression", introduced: [introduced] });
   });
@@ -272,9 +280,20 @@ describe("the committed native baseline", () => {
     }
   });
 
-  test("the recorded errors are exactly what the first native CI run produced", () => {
-    // Pins the baseline to measured output rather than to a transcription of it.
-    const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8")).sort();
-    expect(entries).toEqual([CLOSEFROM, SANDBOX_INIT].sort());
+  test("records the two C errors measured in the first native CI run", () => {
+    // Pins the baseline to measured output rather than to a transcription of it. The Swift entries
+    // alongside them came from run 30305062756, which reached Updater/Protocol only because targets
+    // are now built individually -- the whole-package build never got that far.
+    const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8"));
+    expect(entries).toContain(CLOSEFROM);
+    expect(entries).toContain(SANDBOX_INIT);
+  });
+
+  test("every recorded error names a file inside src/native", () => {
+    // An entry pointing anywhere else would block a target by accident, or none at all.
+    const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8"));
+    for (const entry of entries) {
+      expect(signatureFile(entry), `outside src/native: ${entry}`).toStartWith("src/native/");
+    }
   });
 });
