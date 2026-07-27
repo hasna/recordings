@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,15 +38,32 @@ function withPolicyFile<T>(contents: string, run: (path: string) => T): T {
   }
 }
 
+/// Writes `contents` to a real file and additionally exposes a symlink pointing at it,
+/// so the two readers can be compared on a policy path that is not a regular file.
+function withPolicySymlink<T>(
+  contents: string,
+  run: (symlinkPath: string, targetPath: string) => T,
+): T {
+  const directory = mkdtempSync(join(tmpdir(), "recordings-target-policy-link-"));
+  const target = join(directory, "real-policy.txt");
+  const link = join(directory, "local-only-approved-targets.txt");
+  writeFileSync(target, contents);
+  symlinkSync(target, link);
+  try {
+    return run(link, target);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /// Runs the real sourced shell reader so its verdict can be compared against the
 /// TypeScript reader. A divergence between them would let a target pass the build
 /// and then fail the install, which is the failure this contract exists to prevent.
-function shellReaderVerdict(
-  policyContents: string,
+function shellReaderVerdictAtPath(
+  path: string,
   requested: string,
 ): { ok: boolean; matched: boolean; list: string; stderr: string } {
-  return withPolicyFile(policyContents, (path) => {
-    const script = `
+  const script = `
 set -euo pipefail
 . ${JSON.stringify(join(repositoryRoot, readerRelativePath))}
 LIST=""
@@ -45,16 +71,40 @@ MATCHED=0
 read_local_only_targets ${JSON.stringify(path)} LIST MATCHED ${JSON.stringify(requested)}
 printf 'LIST=%s\\nMATCHED=%s\\n' "$LIST" "$MATCHED"
 `;
-    const result = Bun.spawnSync(["bash", "-c", script]);
-    const stdout = result.stdout.toString();
-    return {
-      ok: result.exitCode === 0,
-      matched: /^MATCHED=1$/m.test(stdout),
-      list: stdout.match(/^LIST=(.*)$/m)?.[1] ?? "",
-      stderr: result.stderr.toString(),
-    };
-  });
+  const result = Bun.spawnSync(["bash", "-c", script]);
+  const stdout = result.stdout.toString();
+  return {
+    ok: result.exitCode === 0,
+    matched: /^MATCHED=1$/m.test(stdout),
+    list: stdout.match(/^LIST=(.*)$/m)?.[1] ?? "",
+    stderr: result.stderr.toString(),
+  };
 }
+
+function shellReaderVerdict(
+  policyContents: string,
+  requested: string,
+): { ok: boolean; matched: boolean; list: string; stderr: string } {
+  return withPolicyFile(policyContents, (path) => shellReaderVerdictAtPath(path, requested));
+}
+
+/// The TypeScript reader's verdict in the same shape, so a case can assert that both
+/// readers rejected *for the same reason* rather than merely that both rejected. "Both
+/// fail" is a weaker property than this contract claims: two readers can fail the same
+/// input for unrelated reasons and still disagree on the next input.
+function typeScriptReaderVerdict(path: string): { ok: boolean; message: string } {
+  try {
+    localOnlyApprovedTargets(path);
+    return { ok: true, message: "" };
+  } catch (error) {
+    return { ok: false, message: (error as Error).message };
+  }
+}
+
+/// Both readers print the same sentences with different capitalisation, so compare them
+/// case-insensitively and without trailing punctuation.
+const normalizeReaderMessage = (message: string): string =>
+  message.trim().toLowerCase().replace(/\.$/, "");
 
 describe("local-only approved target policy", () => {
   test("both shell entry points use the one sourced reader, not their own parser", () => {
@@ -76,6 +126,21 @@ describe("local-only approved target policy", () => {
     const builder = readRepositoryFile("src/native/Recordings/build.sh");
     expect(builder).toContain(`"$SOURCE_PACKAGE_ROOT/${policyRelativePath}"`);
     expect(builder).toContain(`"$SOURCE_PACKAGE_ROOT/${readerRelativePath}"`);
+  });
+
+  test("the builder's gate resolves the policy and the reader from the archived snapshot", () => {
+    // The assertion above is satisfied by the required-snapshot-input loop alone, and was:
+    // it passed while the gate itself read ${PACKAGE_ROOT} — the mutable working tree. So
+    // pin the gate's own two assignments, and forbid $PACKAGE_ROOT in either of them.
+    const builder = readRepositoryFile("src/native/Recordings/build.sh");
+    expect(builder).toContain(
+      `LOCAL_TARGET_POLICY="\${SOURCE_PACKAGE_ROOT}/${policyRelativePath}"`,
+    );
+    expect(builder).toContain(
+      `LOCAL_TARGET_READER="\${SOURCE_PACKAGE_ROOT}/${readerRelativePath}"`,
+    );
+    expect(builder).not.toContain(`LOCAL_TARGET_POLICY="\${PACKAGE_ROOT}`);
+    expect(builder).not.toContain(`LOCAL_TARGET_READER="\${PACKAGE_ROOT}`);
   });
 
   test("actually ships the policy and the reader in the published tarball", () => {
@@ -166,12 +231,75 @@ describe("local-only approved target policy", () => {
       "station03\u0000station99\n",
       "station03\u0000\n",
     ];
-    for (const contents of rejected) {
+    // ASCII control whitespace that is inside [[:space:]] but outside /[\t ]/, and a BOM
+    // anywhere but offset 0. These are the shapes on which the two readers actually
+    // disagreed while the matrix above passed, which is why they are called out here:
+    //   * VT (U+000B) and FF (U+000C): the shell reader trimmed them and ACCEPTED
+    //     "station03\v"; the TypeScript reader trims /[\t ]/ only and rejected it.
+    //   * A BOM on any line after the first: the shell reader stripped one per line and
+    //     accepted it; the TypeScript reader strips only at offset 0 and rejected it.
+    // Neither reader trims or strips them now, so the hostname shape refuses both ends.
+    const divergentByteShapes = [
+      "station03\u000b\nstation06\n",
+      "\u000bstation03\nstation06\n",
+      "station03\u000c\nstation06\n",
+      "\u000cstation03\nstation06\n",
+      "station03\n\ufeffstation06\n",
+      "# comment\n\ufeffstation03\n",
+      // A NUL on a COMMENT line. The TypeScript reader had no NUL scan at all and only
+      // ever refused one that happened to land inside a would-be hostname, so it dropped
+      // "# comment\u0000" as a comment and ACCEPTED a file the shell gate refuses to read.
+      // The old matrix missed this because it only placed NUL inside hostnames, where both
+      // readers rejected — for different reasons, which is why this loop compares reasons.
+      "# comment\u0000\nstation03\nstation06\n",
+      "\u0000\nstation03\n",
+    ];
+
+    for (const contents of [...rejected, ...divergentByteShapes]) {
       const shell = shellReaderVerdict(contents, "station03");
       expect(shell.ok).toBeFalse();
+      expect(shell.matched).toBeFalse();
       expect(shell.stderr).not.toBe("");
-      expect(() => withPolicyFile(contents, (path) => localOnlyApprovedTargets(path))).toThrow();
+      const typeScript = withPolicyFile(contents, (path) => typeScriptReaderVerdict(path));
+      expect(typeScript.ok).toBeFalse();
+      // Same refusal, not merely two refusals. "Both threw" is weaker than this contract
+      // claims: two parsers can reject one input for unrelated reasons and still diverge
+      // on the next. Comparing the reason is what makes this one policy.
+      expect(normalizeReaderMessage(typeScript.message)).toBe(
+        normalizeReaderMessage(shell.stderr),
+      );
     }
+  });
+
+  test("both readers refuse a symlinked policy instead of following it", () => {
+    // The chosen semantics is REJECT in both, and the direction matters: `[ -L ]` already
+    // refused here while readFileSync() followed the link there, so a policy symlinked at
+    // a widened allowlist was blocked by the shell gate and silently honoured by the
+    // TypeScript validator that re-checks the target at install time. A symlink is never a
+    // legitimate shape for package-local policy data shipped inside the tarball, and the
+    // policy file's own header already documented "regular file, not a symlink" — so the
+    // TypeScript reader was the side that had broken the stated rule.
+    withPolicySymlink("station03\nstation06\nattacker\n", (link, target) => {
+      const shell = shellReaderVerdictAtPath(link, "attacker");
+      expect(shell.ok).toBeFalse();
+      expect(shell.matched).toBeFalse();
+      expect(shell.stderr).toContain("policy is missing");
+
+      const typeScript = typeScriptReaderVerdict(link);
+      expect(typeScript.ok).toBeFalse();
+      expect(typeScript.message).toContain("policy is missing");
+      expect(normalizeReaderMessage(typeScript.message)).toBe(
+        normalizeReaderMessage(shell.stderr),
+      );
+
+      // The link target is a perfectly readable regular file listing "attacker", so the
+      // refusal is about the symlink and not about unreadable content. Without this the
+      // assertions above would also pass on a simply broken fixture — and it pins what
+      // the old TypeScript reader returned, which was this widened list.
+      expect(typeScriptReaderVerdict(target).ok).toBeTrue();
+      expect(localOnlyApprovedTargets(target)).toContain("attacker");
+      expect(shellReaderVerdictAtPath(target, "attacker").matched).toBeTrue();
+    });
   });
 
   test("the shell reader does not silently succeed when the requested target is last", () => {
@@ -188,17 +316,39 @@ describe("local-only approved target policy", () => {
     expect(unapproved.matched).toBeFalse();
   });
 
-  test("the shell reader rejects a missing or symlinked policy", () => {
-    const missing = Bun.spawnSync([
-      "bash",
-      "-c",
-      `set -euo pipefail
-. ${JSON.stringify(join(repositoryRoot, readerRelativePath))}
-L=""; M=0
-read_local_only_targets /nonexistent/policy.txt L M station03`,
-    ]);
-    expect(missing.exitCode).not.toBe(0);
-    expect(missing.stderr.toString()).toContain("policy is missing");
+  test("the shell reader rejects a missing, symlinked, or non-regular policy", () => {
+    // This test's name promised symlink coverage and asserted only the missing case, so
+    // the `[ -L ]` arm of the reader's first guard was never executed by anything. It is
+    // the arm the TypeScript reader disagreed with, so "unexercised" was not harmless.
+    const missing = shellReaderVerdictAtPath("/nonexistent/policy.txt", "station03");
+    expect(missing.ok).toBeFalse();
+    expect(missing.stderr).toContain("policy is missing");
+
+    withPolicySymlink("station03\nstation06\n", (link) => {
+      const symlinked = shellReaderVerdictAtPath(link, "station03");
+      expect(symlinked.ok).toBeFalse();
+      expect(symlinked.matched).toBeFalse();
+      expect(symlinked.stderr).toContain("policy is missing");
+    });
+
+    // A directory and a dangling link are also not regular files; both readers refuse
+    // them by the same rule rather than by whatever error reading them would raise.
+    const directory = mkdtempSync(join(tmpdir(), "recordings-target-policy-dir-"));
+    try {
+      const asDirectory = shellReaderVerdictAtPath(directory, "station03");
+      expect(asDirectory.ok).toBeFalse();
+      expect(asDirectory.stderr).toContain("policy is missing");
+      expect(typeScriptReaderVerdict(directory).message).toContain("policy is missing");
+
+      const dangling = join(directory, "dangling.txt");
+      symlinkSync(join(directory, "does-not-exist.txt"), dangling);
+      const asDangling = shellReaderVerdictAtPath(dangling, "station03");
+      expect(asDangling.ok).toBeFalse();
+      expect(asDangling.stderr).toContain("policy is missing");
+      expect(typeScriptReaderVerdict(dangling).message).toContain("policy is missing");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   // The installer's own gate, actually executed. The macOS-only tool set is stubbed
@@ -337,5 +487,155 @@ read_local_only_targets /nonexistent/policy.txt L M station03`,
   test("resolves the policy path independently of the working directory", () => {
     expect(LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH.endsWith(policyRelativePath)).toBeTrue();
     expect(localOnlyApprovedTargets(LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH).length).toBeGreaterThan(0);
+  });
+
+  // The builder's own gate, actually executed, against a fixture whose working tree and
+  // whose archived source disagree about the policy. Everything here is pre-compilation:
+  // `build.sh local` reaches this gate before it invokes swift, codesign or ditto, all of
+  // which are stubbed, so no Darwin toolchain is required.
+  //
+  // Making the two roots differ is the whole point and it is not free. build.sh forces
+  // SOURCE_PACKAGE_ROOT="$PACKAGE_ROOT" whenever RECORDINGS_TEST_GIT_EXECUTABLE is set on
+  // a non-Darwin host, so this fixture deliberately does NOT set it: the run performs a
+  // real `git archive` of the fixture repository and the two roots are genuinely distinct.
+  // A fixture that sets the git override cannot observe this defect at all.
+  //
+  // The divergence itself uses `git update-index --skip-worktree`, which is the only way
+  // to hold a tracked file's on-disk content different from HEAD while `git status
+  // --porcelain --untracked-files=all` still reports clean — and build.sh's
+  // require_clean_source refuses to build a dirty tree, so nothing weaker survives it.
+  // It is also a realistic shape: skip-worktree is exactly how a local policy edit hides
+  // from `git status`.
+  const requiredSnapshotInputs = [
+    "src/native/Recordings/Package.swift",
+    "src/native/Recordings/RecordingsLib/Info.plist",
+    "src/native/Recordings/RecordingsLib/Recordings.entitlements",
+    "src/native/Recordings/RecordingsLib/RecordingsCLI.entitlements",
+    "scripts/build_companion_cli.sh",
+    "scripts/smoke_macos_app.sh",
+    "scripts/macos_artifact.ts",
+    "scripts/native_fs_guard.ts",
+    "scripts/build_native_fs_guard.sh",
+    "scripts/native/recordings_fs_guard.c",
+    "packaging/macos/build_release_pkg.sh",
+    "packaging/macos/release_lifecycle.ts",
+    "packaging/macos/Verifier.entitlements",
+    "packaging/macos/Empty.entitlements",
+    "packaging/macos/artifact-verifier.sb",
+    "packaging/macos/Library/LaunchDaemons/com.hasna.recordings.updater.plist",
+    "packaging/macos/scripts/preinstall",
+    "packaging/macos/scripts/postinstall",
+    "bun.lock",
+    "bunfig.toml",
+  ];
+
+  function runBuilderTargetGate(
+    approvedTarget: string,
+    policy: { archived: string; workingTree: string },
+  ): { exitCode: number; stderr: string } {
+    const root = mkdtempSync(join(tmpdir(), "recordings-builder-gate-"));
+    try {
+      const packageRoot = join(root, "pkg");
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      for (const relativePath of requiredSnapshotInputs) {
+        const destination = join(packageRoot, relativePath);
+        mkdirSync(join(destination, ".."), { recursive: true });
+        writeFileSync(destination, "fixture\n");
+      }
+      // Real JSON: build.sh runs bun against the package root, and a non-JSON
+      // package.json makes it print a parse error that has nothing to do with the gate.
+      writeFileSync(join(packageRoot, "package.json"), '{ "name": "fixture" }\n');
+      for (const relativePath of [
+        "src/native/Recordings/build.sh",
+        readerRelativePath,
+        "scripts/resolve_tailscale_cli.sh",
+      ]) {
+        const destination = join(packageRoot, relativePath);
+        mkdirSync(join(destination, ".."), { recursive: true });
+        cpSync(join(repositoryRoot, relativePath), destination);
+      }
+      chmodSync(join(packageRoot, "src", "native", "Recordings", "build.sh"), 0o755);
+
+      const policyPath = join(packageRoot, policyRelativePath);
+      mkdirSync(join(policyPath, ".."), { recursive: true });
+      writeFileSync(policyPath, policy.archived);
+
+      const git = (...args: string[]): void => {
+        const result = Bun.spawnSync(["git", ...args], {
+          cwd: packageRoot,
+          env: {
+            PATH: process.env["PATH"] ?? "",
+            HOME: home,
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_AUTHOR_NAME: "fixture",
+            GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+            GIT_COMMITTER_NAME: "fixture",
+            GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+          },
+        });
+        if (result.exitCode !== 0) {
+          throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
+        }
+      };
+      git("init", "-q", "-b", "main", ".");
+      git("add", "-A");
+      git("commit", "-q", "-m", "fixture");
+      git("update-index", "--skip-worktree", policyRelativePath);
+      writeFileSync(policyPath, policy.workingTree);
+      // If this ever reports changes, require_clean_source aborts the build before the
+      // gate and every assertion below becomes vacuous, so prove the tree looks clean.
+      const status = Bun.spawnSync(["git", "status", "--porcelain=v1", "--untracked-files=all"], {
+        cwd: packageRoot,
+        env: { PATH: process.env["PATH"] ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+      expect(status.stdout.toString()).toBe("");
+
+      const result = Bun.spawnSync(
+        ["bash", join(packageRoot, "src", "native", "Recordings", "build.sh"), "local"],
+        {
+          env: {
+            PATH: "/usr/bin:/bin",
+            HOME: home,
+            TMPDIR: tmpdir(),
+            BUN_EXECUTABLE: process.execPath,
+            RECORDINGS_LOCAL_APPROVED_TARGET: approvedTarget,
+            // Only the macOS-only tools build.sh insists on before the gate. Note the
+            // absence of RECORDINGS_TEST_GIT_EXECUTABLE — see the comment above.
+            RECORDINGS_TEST_SWIFT_EXECUTABLE: "/bin/true",
+            RECORDINGS_TEST_CODESIGN_EXECUTABLE: "/bin/true",
+            RECORDINGS_TEST_DITTO_EXECUTABLE: "/bin/true",
+            RECORDINGS_TEST_PLIST_BUDDY_EXECUTABLE: "/bin/true",
+            RECORDINGS_TEST_PLUTIL_EXECUTABLE: "/bin/true",
+          },
+        },
+      );
+      return { exitCode: result.exitCode, stderr: result.stderr.toString() };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("the builder's gate reads the archived policy, not the working tree", () => {
+    const policy = { archived: "station06\n", workingTree: "attacker\n" };
+
+    // The working tree alone approves "attacker". Reading it would let a target the
+    // archived source never authorized through the gate, so the gate must refuse — and
+    // must name the archived list, not the working-tree one, when it does.
+    const forged = runBuilderTargetGate("attacker", policy);
+    expect(forged.exitCode).not.toBe(0);
+    expect(forged.stderr).toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
+    expect(forged.stderr).toContain("(station06)");
+    expect(forged.stderr).not.toContain("(attacker)");
+
+    // ...and the converse, which is what makes this a two-sided proof rather than an
+    // assertion that the build fails: the target the ARCHIVED policy authorizes must get
+    // past the target gate, and then stop at the next check for a different reason.
+    const archived = runBuilderTargetGate("station06", policy);
+    expect(archived.stderr).not.toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
+    expect(archived.stderr).toContain(
+      "require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256",
+    );
   });
 });
