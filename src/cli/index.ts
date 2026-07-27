@@ -25,7 +25,14 @@ import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
-import { runMacOSPermissionRequest } from "./macos-permissions.js";
+import {
+  describeTccAuthorizationSubject,
+  RECORDINGS_BUNDLE_IDENTIFIER,
+  resolveTccGrant,
+  runMacOSPermissionRequest,
+  type TccGrantDurability,
+  type TccGrantReport,
+} from "./macos-permissions.js";
 import { currentMachineId } from "../lib/machine.js";
 import { recordingCreateIdentity } from "../lib/recording-create-identity.js";
 import {
@@ -1004,9 +1011,14 @@ appCommand
     const status = getMacOSAppStatus();
     const permissions = {
       platform: status.platform,
-      bundle_id: "com.hasna.recordings",
+      bundle_id: RECORDINGS_BUNDLE_IDENTIFIER,
       installed_app_path: status.installed_app_path,
+      // A machine consumer needs the same caveats the text output prints, or it reads the
+      // states below as describing installed code that may not exist.
+      installed: status.installed,
       legacy_install_paths: status.legacy_install_paths,
+      // The grants below belong to this bundle, not to the terminal running this command.
+      permission_subject: describeTccAuthorizationSubject(status.installed_app_path),
       microphone: status.microphone_permission,
       accessibility: status.accessibility_permission,
       app_code_hash: status.app_code_hash,
@@ -1014,14 +1026,28 @@ appCommand
       signing_identifier: status.signing_identifier,
       team_identifier: status.team_identifier,
       designated_requirement: status.designated_requirement,
+      // Durability is per service because each service stores its own requirement.
+      microphone_grant_durability: status.microphone_grant_durability,
+      accessibility_grant_durability: status.accessibility_grant_durability,
+      microphone_stored_requirement: status.microphone_stored_requirement,
+      accessibility_stored_requirement: status.accessibility_stored_requirement,
+      ambiguous_installations: status.ambiguous_installations,
+      // The same conditions the text output warns about, as data rather than prose.
+      warnings: buildPermissionWarnings(status),
       log_path: status.log_path,
     };
     if (program.opts().json) {
       console.log(JSON.stringify(permissions, null, 2));
       return;
     }
-    console.log(`Microphone: ${permissions.microphone}`);
-    console.log(`Accessibility: ${permissions.accessibility}`);
+    console.log(`Subject: ${permissions.permission_subject}`);
+    console.log(`Microphone: ${permissions.microphone} (${permissions.microphone_grant_durability})`);
+    console.log(
+      `Accessibility: ${permissions.accessibility} (${permissions.accessibility_grant_durability})`,
+    );
+    for (const warning of permissions.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
     console.log(`Log: ${permissions.log_path}`);
   });
 
@@ -2007,22 +2033,44 @@ type MacOSAppStatus = {
   signature_authorities: string[];
   microphone_permission: string;
   accessibility_permission: string;
+  ambiguous_installations: boolean;
+  microphone_grant_durability: TccGrantDurability;
+  accessibility_grant_durability: TccGrantDurability;
+  microphone_stored_requirement: string | null;
+  accessibility_stored_requirement: string | null;
   log_path: string;
 };
 
 function getMacOSAppStatus(): MacOSAppStatus {
   const packageRoot = findPackageRoot();
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  const installedAppPath = pathJoin(home, "Applications", "Recordings.app");
+  const canonicalAppPath = pathJoin(home, "Applications", "Recordings.app");
+  const legacyInstallPaths = findLegacyMacOSAppPaths(home, canonicalAppPath);
+  // Report on the bundle that is actually on disk. Pinning the canonical path meant that on a
+  // machine where the app lives anywhere else, every permission answer described a bundle that
+  // did not exist — so the grants of the bundle actually holding them were never examined.
+  const installedAppPath = resolveInstalledAppPath(home, canonicalAppPath, legacyInstallPaths);
+  // A grant belongs to a bundle, so a state can only be reported for one that exists. Passing
+  // a path that is not there produced `allowed_identity_unverified` — an "allowed" string for
+  // a machine with nothing installed.
+  const installedAppPathForGrants = existsSync(installedAppPath) ? installedAppPath : null;
   const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
   const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
   const installerPath = getMacOSInstallerPath(packageRoot);
   const nativeSourcesPath = pathJoin(packageRoot, "src", "native", "Recordings");
   const signingInfo = getCodeSigningInfo(installedAppPath);
-  const legacyInstallPaths = findLegacyMacOSAppPaths(home, installedAppPath);
-  const permissionStatus = legacyInstallPaths.length > 0
-    ? "ambiguous_multiple_installations"
-    : null;
+  // Ambiguity is a warning about WHICH bundle answered, not a substitute for the answer.
+  // Replacing the permission state with it discarded the one fact the operator needed.
+  // It must be flagged whenever more than one bundle exists — especially when the canonical
+  // path is absent, which is exactly when the answer comes from a bundle nobody named.
+  const ambiguousInstallations =
+    [canonicalAppPath, ...legacyInstallPaths].filter((path) => existsSync(path)).length > 1;
+  const microphoneGrant = getTccGrant("kTCCServiceMicrophone", home, installedAppPathForGrants);
+  const accessibilityGrant = getTccGrant(
+    "kTCCServiceAccessibility",
+    home,
+    installedAppPathForGrants,
+  );
 
   return {
     platform: process.platform,
@@ -2042,10 +2090,85 @@ function getMacOSAppStatus(): MacOSAppStatus {
     team_identifier: signingInfo.teamIdentifier,
     designated_requirement: signingInfo.designatedRequirement,
     signature_authorities: signingInfo.authorities,
-    microphone_permission: permissionStatus ?? getTccPermission("kTCCServiceMicrophone", home),
-    accessibility_permission: permissionStatus ?? getTccPermission("kTCCServiceAccessibility", home),
+    microphone_permission: microphoneGrant.state,
+    accessibility_permission: accessibilityGrant.state,
+    ambiguous_installations: ambiguousInstallations,
+    microphone_grant_durability: microphoneGrant.durability,
+    accessibility_grant_durability: accessibilityGrant.durability,
+    microphone_stored_requirement: microphoneGrant.storedRequirement,
+    accessibility_stored_requirement: accessibilityGrant.storedRequirement,
     log_path: logPath,
   };
+}
+
+/// Every caveat that qualifies a reported permission state, built once so the text output and
+/// `--json` cannot drift apart. `--json` consumers previously received none of these.
+function buildPermissionWarnings(status: MacOSAppStatus): string[] {
+  const warnings: string[] = [];
+  if (status.platform !== "darwin") return warnings;
+
+  if (!status.installed) {
+    warnings.push(
+      `no app bundle exists at ${status.installed_app_path}, so the states above describe no `
+        + "installed code — install the app before trusting them",
+    );
+  }
+  if (status.ambiguous_installations) {
+    warnings.push(
+      "more than one Recordings.app is installed, so the states above may describe a bundle "
+        + `other than the one macOS granted: reporting on ${status.installed_app_path}, also `
+        + `present are ${status.legacy_install_paths.join(", ")}`,
+    );
+  }
+  for (const [service, durability] of [
+    ["Microphone", status.microphone_grant_durability],
+    ["Accessibility", status.accessibility_grant_durability],
+  ] as const) {
+    if (durability === "dies_on_rebuild_cdhash_pinned") {
+      warnings.push(
+        `the ${service} grant is pinned to one exact build, so the next rebuild will silently `
+          + "revoke it — re-sign with a stable certificate identity to keep it",
+      );
+    }
+  }
+  for (const [service, state] of [
+    ["Microphone", status.microphone_permission],
+    ["Accessibility", status.accessibility_permission],
+  ] as const) {
+    if (state === "undetermined_tcc_database_unreadable") {
+      warnings.push(
+        `the TCC database holding the ${service} decision could not be read, so that state is `
+          + "unknown rather than ungranted — the usual cause is that this process lacks Full "
+          + "Disk Access",
+      );
+    }
+  }
+  return warnings;
+}
+
+/// Picks the bundle to report on when the canonical install is absent.
+///
+/// The order is deliberate rather than lexicographic: sorting picked whichever path sorted
+/// first, so `/Applications/Recordings.app` could silently answer for a grant held by the
+/// bundle in `~/.hasna/recordings`. Preference follows the installer's own policy —
+/// `install_macos_app.sh` installs to `$HOME/Applications` and classifies the
+/// `~/.hasna/recordings` copy as a duplicate to archive — so a real install location wins over
+/// one the installer treats as stale. Callers must still surface `ambiguous_installations`:
+/// this returns a defensible choice, not a certainty.
+function resolveInstalledAppPath(
+  home: string,
+  canonicalPath: string,
+  legacyPaths: string[],
+): string {
+  const preference = [
+    canonicalPath,
+    pathJoin("/", "Applications", "Recordings.app"),
+    pathJoin(home, ".hasna", "recordings", "Recordings.app"),
+  ];
+  for (const candidate of preference) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return legacyPaths.find((candidate) => existsSync(candidate)) ?? canonicalPath;
 }
 
 function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] {
@@ -2069,9 +2192,14 @@ function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] 
 function resetMacOSPermissions(): void {
   const services = ["Microphone", "Accessibility"];
   for (const service of services) {
-    const result = spawnSync("tccutil", ["reset", service, "com.hasna.recordings"], {
-      stdio: "inherit",
-    });
+    // Absolute path: this is the one command here that destroys grants, and `security` on a
+    // Hasna station already resolves to a shadowing CLI ahead of /usr/bin. Resolving a
+    // grant-destroying tool through PATH is not a risk worth carrying.
+    const result = spawnSync(
+      "/usr/bin/tccutil",
+      ["reset", service, RECORDINGS_BUNDLE_IDENTIFIER],
+      { stdio: "inherit" },
+    );
     if (result.error) {
       console.error(chalk.red(result.error.message));
       process.exit(1);
@@ -2111,45 +2239,14 @@ function getCodeSigningInfo(appPath: string): {
   return { cdHash, adHoc, identifier, teamIdentifier, designatedRequirement, authorities };
 }
 
-function getTccPermission(service: string, home: string): string {
-  if (process.platform !== "darwin") return "unsupported";
-
-  const dbPaths = [
-    pathJoin(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-    pathJoin("/", "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-  ];
-  const sql =
-    "select auth_value from access where service = '" +
-    service.replace(/'/g, "''") +
-    "' and client = 'com.hasna.recordings' order by last_modified desc limit 1;";
-
-  for (const dbPath of dbPaths) {
-    if (!existsSync(dbPath)) continue;
-    const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const value = result.stdout.trim();
-    if (!value) continue;
-    return `${tccAuthValueLabel(value)}_identity_unverified`;
+/// Reports the authorization state for one TCC service. An `allowed` row is only reported
+/// as `allowed` when the grant's stored code requirement still validates against the
+/// installed bundle — see `resolveTccPermission`.
+function getTccGrant(service: string, home: string, appPath: string | null): TccGrantReport {
+  if (process.platform !== "darwin") {
+    return { state: "unsupported", storedRequirement: null, durability: "unknown" };
   }
-
-  return "not_determined";
-}
-
-function tccAuthValueLabel(value: string): string {
-  switch (value) {
-    case "0":
-      return "denied";
-    case "1":
-      return "unknown";
-    case "2":
-      return "allowed";
-    case "3":
-      return "limited";
-    default:
-      return `unknown(${value})`;
-  }
+  return resolveTccGrant({ service, home, appPath });
 }
 
 function findPackageRoot(): string {
