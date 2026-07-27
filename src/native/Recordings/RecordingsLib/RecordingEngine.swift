@@ -2540,7 +2540,11 @@ public final class RecordingEngine: ObservableObject {
         transcript: String,
         hasSelection: Bool,
         intentDetectionEnabled: Bool,
-        enhanceTriggersJSON: String = "[]"
+        // No default: "[]" decodes successfully to "no configured triggers", which
+        // silently fails OPEN for a caller that forgets the argument — the opposite
+        // of the fail-closed contract documented on EnhancementScreen. Every caller
+        // must state the configured triggers explicitly (review F2 on #30).
+        enhanceTriggersJSON: String
     ) -> Bool {
         switch PostProcessingMode(rawValue: postProcessingMode) {
         case .off:
