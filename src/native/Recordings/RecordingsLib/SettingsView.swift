@@ -78,11 +78,40 @@ public struct SettingsView: View {
                 // A trigger that is switched on but cannot arm must say so next to its own
                 // switch. Silence here is what made 51 recorded hotkey presses look like a
                 // working trigger while nothing was delivered.
-                if let blocked = engine.blockedReason {
-                    Label(blocked, systemImage: "exclamationmark.triangle.fill")
+                //
+                // Scoped to the trigger sources, and the button keyed to each reason's own
+                // remedy. Rendering the composed `engine.blockedReason` here instead meant a
+                // secure-input paste failure showed "transcript copied, press Cmd-V" under
+                // Recording Shortcut beside an "Open Accessibility Settings" button — wrong
+                // remedy, wrong section, wrong cause. A hotkey collision took that button too,
+                // and the Accessibility pane does nothing for a chord clash either.
+                ForEach(engine.blockedReasonEntries.filter(\.isTriggerHealth)) { entry in
+                    Label(entry.message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Button("Open Accessibility Settings") {
-                        engine.openAccessibilitySettings()
+                    // `switch`, not `==`. This file's engine forbids `==` against an enum case in
+                    // three separate comments for the same reason: it answers `false` for every
+                    // case added later, so a fourth remedy carrying a button would silently render
+                    // none. Exhaustive here means adding one forces the decision.
+                    switch entry.remedy {
+                    case .openAccessibilitySettings:
+                        Button("Open Accessibility Settings") {
+                            engine.openAccessibilitySettings()
+                        }
+                    case .chooseAnotherShortcut, .messageOnly:
+                        EmptyView()
+                    }
+                }
+            }
+
+            // Delivery reasons are not trigger health, but they are the ONLY message telling the
+            // owner their transcript is still recoverable — so they need a surface here, not just
+            // a wordless warning triangle in the menu bar and a caption behind a click. Scoping
+            // the trigger section was right; dropping these entirely was not.
+            if !engine.blockedReasonEntries.filter({ !$0.isTriggerHealth }).isEmpty {
+                Section("Last Delivery") {
+                    ForEach(engine.blockedReasonEntries.filter { !$0.isTriggerHealth }) { entry in
+                        Label(entry.message, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                     }
                 }
             }

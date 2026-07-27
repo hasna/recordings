@@ -266,6 +266,60 @@ export interface PersistenceProbeResult {
 }
 
 /**
+ * How a probe outcome must READ, separated from the colour so it can be asserted without a
+ * terminal.
+ *
+ * `PersistenceProbeResult.outcome` already documents that "the rendered marker must distinguish
+ * all three" — and nothing asserted it, so flipping the `skipped` arm of the CLI's inline ternary
+ * from `chalk.yellow("?")` to `chalk.green("✓")` put a green tick back on the word SKIPPED and
+ * survived the entire suite with a byte-identical failure set. The mapping lives here, is
+ * exhaustive, and is the only thing the CLI is allowed to key its colour off.
+ */
+export type ProbeMarkerSeverity = "pass" | "warn" | "fail";
+
+/** Glyph per severity. `?` for warn, because it is not a tick and not a cross. */
+export const PROBE_SEVERITY_GLYPHS: Record<ProbeMarkerSeverity, string> = {
+  pass: "✓",
+  warn: "?",
+  fail: "✗",
+};
+
+/**
+ * Severity of a persistence outcome. `skipped` is `warn`, never `pass`: declining to measure is
+ * not a measurement that passed.
+ *
+ * Exhaustive on `outcome` so a fourth state has to make its own decision instead of falling into
+ * a tick by default.
+ */
+export function persistenceOutcomeSeverity(
+  outcome: PersistenceProbeResult["outcome"],
+): ProbeMarkerSeverity {
+  switch (outcome) {
+    case "proved":
+      return "pass";
+    case "skipped":
+      return "warn";
+    case "failed":
+      return "fail";
+  }
+}
+
+/**
+ * The marker the CLI prints for a persistence outcome.
+ *
+ * `paint` is injected rather than imported so the whole mapping — outcome to severity to glyph to
+ * colour — is one testable expression instead of a ternary chain inside a 2900-line command file
+ * that no test could reach.
+ */
+export function renderPersistenceMarker(
+  outcome: PersistenceProbeResult["outcome"],
+  paint: Record<ProbeMarkerSeverity, (text: string) => string>,
+): string {
+  const severity = persistenceOutcomeSeverity(outcome);
+  return paint[severity](PROBE_SEVERITY_GLYPHS[severity]);
+}
+
+/**
  * Tag carried by probe rows so a leftover marker is identifiable.
  *
  * Do not rely on it alone to find one: the deployed 0.2.10 server ignores the
