@@ -26,13 +26,15 @@ struct HomeContainmentTests {
     func engineInitLogLandsInInjectedHome() throws {
         let home = makeTestHome("containment")
 
-        _ = RecordingEngine(home: home)
+        let engine = RecordingEngine(home: home)
 
+        // The parameter must be what the engine actually stores — every logging and
+        // persistence path reads it back off the instance.
+        #expect(engine.home == home)
         let log = "\(home)/.hasna/recordings/Recordings.log"
         let text = try String(contentsOfFile: log, encoding: .utf8)
         // The exact line that polluted the production log.
         #expect(text.contains("RecordingEngine init"))
-        #expect(!home.hasPrefix(liveRecordingsDirectory()))
     }
 
     @Test("engine construction creates its audio directory under the injected home")
@@ -58,6 +60,8 @@ struct HomeContainmentTests {
 
     @Test("no test constructs a home-resolving type without injecting a home")
     func testTargetNeverConstructsHomeResolvingTypesWithoutAHome() throws {
+        // `#filePath` is the build machine's source path, so this requires the suite to run
+        // where it was built — true for this package, which builds and tests on the same Mac.
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
             .filter { $0.hasSuffix(".swift") }

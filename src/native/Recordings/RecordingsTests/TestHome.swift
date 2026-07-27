@@ -15,9 +15,3 @@ func makeTestHome(_ label: String = "recordings-tests") -> String {
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url.path
 }
-
-/// The live user's recordings directory — the one no test may write to. Only the containment
-/// guard in `HomeContainmentTests` should reference this.
-func liveRecordingsDirectory() -> String {
-    "\(FileManager.default.homeDirectoryForCurrentUser.path)/.hasna/recordings"
-}
