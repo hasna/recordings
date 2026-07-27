@@ -22,18 +22,27 @@
 #     followed it, so a symlink pointing at a widened allowlist was rejected by the
 #     shell and silently honoured by TypeScript. Both now refuse; a symlink is never a
 #     legitimate shape for package-local policy data shipped inside the tarball.
-#   * ASCII-ONLY TRIM. This used to trim [[:space:]], which also covers VT (0x0b) and FF
-#     (0x0c) and is locale-dependent, while TypeScript trims /[\t ]/ only. "station03\v"
-#     was therefore accepted here and rejected there. Both now trim space and tab only,
-#     and everything else is left in place for the hostname shape to reject.
+#     ASCII-ONLY TRIM. This used to trim [[:space:]], while TypeScript trims /[\t ]/
+#     only. Enumerated, that split 21 of 36 whitespace rows, and in every one of them
+#     THIS reader accepted a target TypeScript rejects — build gate open, install
+#     validator closed. [[:space:]] covers VT (0x0b), FF (0x0c) and CR, and in a UTF-8
+#     locale it also matched U+1680, U+2000, U+2002, U+2009, U+205F, U+2028, U+2029 and
+#     U+3000. Both now trim space and tab only and leave everything else in place for the
+#     hostname shape to reject. This one change closes all 21 rows on its own.
 #   * BOM POSITION. This used to strip a BOM from every line while TypeScript strips one
 #     only at offset 0, so a BOM on the second line was accepted here and rejected there.
 #     A U+FEFF anywhere but the very start of the file is a zero-width no-break space,
 #     not a byte-order mark, and both readers now reject it.
 #
-# LC_ALL/LANG are pinned to C for the duration of this function because every rule below
-# is a byte rule: `[a-z0-9-]` and `[[:space:]]` are both collation- and locale-dependent
-# in bash patterns, so without the pin the caller's locale silently redefines the policy.
+# LC_ALL/LANG are pinned to C for the duration of this function as defence in depth, and
+# NOT as the fix for anything above. Measured on glibc/bash: with the ASCII-only trim in
+# place, removing this pin changes no verdict in the whitespace table, and `[a-z0-9-]`
+# rejected uppercase identically under C, C.UTF-8 and en_US.UTF-8 — so no divergence here
+# is attributable to it. What it does buy is that the rules below are byte rules stated as
+# byte rules: bracket expressions in bash patterns are collation- and locale-dependent in
+# principle (restoring [[:space:]] under this pin still leaves 5 divergent rows, versus 21
+# without it), so pinning keeps a future edit that reaches for a character class from
+# quietly handing the caller's locale a say in the policy.
 
 # read_local_only_targets <policy-path> <out-list-var> <out-match-var> <requested-target>
 # Sets <out-list-var> to a comma-separated list for error messages and

@@ -271,6 +271,48 @@ describe("local-only approved target policy", () => {
     }
   });
 
+  test("the two readers trim exactly ASCII space and tab, and agree on every whitespace codepoint", () => {
+    // An enumerated table rather than a handful of cases, because the hand-picked corpus
+    // was what let this drift: on the unpinned [[:space:]] reader, 21 of these 36 rows
+    // diverged, and the shell side ACCEPTED a target the TypeScript validator rejects in
+    // every one of them. Most were Unicode whitespace that bash's [[:space:]] matches in
+    // the caller's ambient UTF-8 locale (U+1680, U+2000, U+2002, U+2009, U+205F, U+2028,
+    // U+2029, U+3000), and none were reachable from a corpus that only tried NBSP and BOM.
+    //
+    // Attribution, measured rather than assumed: the ASCII-only trim closes all 21 rows by
+    // itself, and removing the reader's LC_ALL=C pin changes no verdict in this table. So
+    // this table is not evidence for that pin and does not claim to be.
+    //
+    // Only U+0020 and U+0009 may be trimmed. U+000D is trimmed at end of line only, as a
+    // CRLF line ending, so it is the one row whose two positions legitimately differ.
+    const trimmable = new Set(["\u0020", "\u0009"]);
+    const whitespaceCodepoints = [
+      "\u0020", "\u0009", "\u000b", "\u000c", "\u000d", "\u0000",
+      "\u0085", "\u00a0", "\u1680", "\u2000", "\u2002", "\u2009",
+      "\u202f", "\u205f", "\u2028", "\u2029", "\u3000", "\ufeff",
+    ];
+
+    for (const codepoint of whitespaceCodepoints) {
+      const positions: [string, string][] = [
+        ["leading", `${codepoint}station06\n`],
+        ["trailing", `station06${codepoint}\n`],
+      ];
+      for (const [position, contents] of positions) {
+        const shell = shellReaderVerdict(contents, "station06");
+        const typeScript = withPolicyFile(contents, (path) => typeScriptReaderVerdict(path));
+        const where = `U+${codepoint.codePointAt(0)!.toString(16).padStart(4, "0")} ${position}`;
+        // The property under test is agreement, asserted first so a divergence names itself.
+        expect(shell.ok, where).toBe(typeScript.ok);
+
+        const acceptable =
+          trimmable.has(codepoint) ||
+          (codepoint === "\u000d" && position === "trailing") ||
+          (codepoint === "\ufeff" && position === "leading");
+        expect(shell.ok, where).toBe(acceptable);
+      }
+    }
+  });
+
   test("both readers refuse a symlinked policy instead of following it", () => {
     // The chosen semantics is REJECT in both, and the direction matters: `[ -L ]` already
     // refused here while readFileSync() followed the link there, so a policy symlinked at
