@@ -28,6 +28,89 @@ export function resetClient(): void {
   _clientApiKey = null;
 }
 
+/**
+ * Strip anything key-shaped out of a provider error before we print or log it.
+ *
+ * OpenAI's 401 body echoes a partially masked form of the key that was sent
+ * ("sk-abcd1234**********wxyz"). Even masked, that is credential material and
+ * must not land in terminal scrollback, CI logs or a diagnostics file.
+ */
+export function redactKeyMaterial(text: string): string {
+  return text
+    .replace(/\b(sk|rk|org)-[A-Za-z0-9_*\-]{4,}/g, "[redacted]")
+    .replace(/\bBearer\s+[A-Za-z0-9._*\-]{4,}/gi, "Bearer [redacted]");
+}
+
+export interface CredentialProbeResult {
+  ok: boolean;
+  /** HTTP status when the API answered, null when we never reached it. */
+  status: number | null;
+  model: string;
+  message: string;
+}
+
+/**
+ * Verify that the configured credential is ACCEPTED by the API, not merely
+ * present in config.
+ *
+ * A non-empty string in `openai_api_key` proves nothing: any placeholder
+ * satisfies it. This makes one real authenticated request against the model the
+ * transcriber would actually use, so a rejected or revoked key surfaces as a
+ * failure instead of a green tick.
+ *
+ * Scope note: this proves authentication and model access. It does not prove
+ * quota or that a given audio file will transcribe.
+ */
+export async function verifyTranscriptionCredential(
+  config: RecordingsConfig,
+  model: string
+): Promise<CredentialProbeResult> {
+  if (!config.openai_api_key) {
+    return {
+      ok: false,
+      status: null,
+      model,
+      message:
+        "no OpenAI API key configured. Set OPENAI_API_KEY env var or add to ~/.secrets",
+    };
+  }
+
+  let client: OpenAI;
+  try {
+    client = getClient(config);
+  } catch (error) {
+    return { ok: false, status: null, model, message: (error as Error).message };
+  }
+
+  try {
+    const retrieved = await client.models.retrieve(model);
+    return {
+      ok: true,
+      status: 200,
+      model,
+      message: `credential accepted; model '${retrieved.id ?? model}' reachable`,
+    };
+  } catch (error) {
+    const status =
+      typeof (error as { status?: unknown }).status === "number"
+        ? ((error as { status: number }).status)
+        : null;
+    const detail = redactKeyMaterial((error as Error).message || String(error));
+    const hint =
+      status === 401
+        ? " — the key was REJECTED (not a missing key: a present but invalid one)"
+        : status === 404
+          ? ` — authenticated, but model '${model}' is not available to this key`
+          : "";
+    return {
+      ok: false,
+      status,
+      model,
+      message: `credential check failed${status ? ` (HTTP ${status})` : ""}: ${detail}${hint}`,
+    };
+  }
+}
+
 export async function transcribeAudio(
   audioPath: string,
   config: RecordingsConfig,

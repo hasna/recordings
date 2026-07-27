@@ -19,7 +19,17 @@ import {
   checkRecordingDeps,
   recordDuration,
 } from "../lib/recorder.js";
-import { transcribeAudio, transcribeAudioStream } from "../lib/transcriber.js";
+import {
+  transcribeAudio,
+  transcribeAudioStream,
+  verifyTranscriptionCredential,
+  type CredentialProbeResult,
+} from "../lib/transcriber.js";
+import {
+  probeMicrophoneCapture,
+  DEFAULT_PROBE_SECONDS,
+  type CaptureProbeResult,
+} from "../lib/capture-probe.js";
 import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
@@ -1137,14 +1147,59 @@ appCommand
 
 program
   .command("check")
-  .description("Check system dependencies (sox, API keys)")
-  .action(async () => {
+  .description(
+    "Check system dependencies (sox, API keys) and macOS capture permissions. " +
+      "Use --probe to exercise the microphone and credential for real."
+  )
+  .option(
+    "--probe",
+    "Prove capability instead of reporting presence: record a short sample and assert signal, and make one authenticated API request"
+  )
+  .option(
+    "--probe-seconds <seconds>",
+    "Length of the capture probe in seconds",
+    String(DEFAULT_PROBE_SECONDS)
+  )
+  .action(async (opts) => {
     const config = loadConfig();
     const parentOpts = program.opts();
 
     // Check recording deps
     const deps = await checkRecordingDeps();
     const enhKey = config.enhancement_api_key || config.openai_api_key;
+    const transcriberModel = resolveTranscriberModel(config);
+
+    // macOS capture permissions are part of "can this machine record at all".
+    // Omitting them is why a fully-green `check` could coexist with an app that
+    // had no Microphone grant and captured nothing but silence.
+    const macStatus = process.platform === "darwin" ? getMacOSAppStatus() : null;
+
+    let capture: CaptureProbeResult | null = null;
+    let credential: CredentialProbeResult | null = null;
+
+    if (opts.probe) {
+      const parsedSeconds = Number.parseInt(String(opts.probeSeconds), 10);
+      const seconds = Number.isFinite(parsedSeconds) && parsedSeconds > 0
+        ? parsedSeconds
+        : DEFAULT_PROBE_SECONDS;
+
+      capture = deps.available
+        ? probeMicrophoneCapture(config, { seconds })
+        : {
+            ok: false,
+            tool: null,
+            seconds,
+            samples: 0,
+            peak: 0,
+            silent: true,
+            message: deps.message,
+          };
+      credential = await verifyTranscriptionCredential(config, transcriberModel);
+    }
+
+    const probeFailed = Boolean(
+      opts.probe && ((capture && !capture.ok) || (credential && !credential.ok))
+    );
 
     if (parentOpts.json) {
       console.log(JSON.stringify({
@@ -1156,14 +1211,19 @@ program
         openai_api_key_configured: Boolean(config.openai_api_key),
         enhancement_api_key_configured: Boolean(enhKey),
         enhancement_model: config.enhancement_model,
-        transcriber_model: resolveTranscriberModel(config),
+        transcriber_model: transcriberModel,
         realtime_session_model: config.realtime_session_model,
         realtime_transcription_model: config.realtime_transcription_model,
         post_processing_mode: config.post_processing_mode,
         transcription_prompt_configured: Boolean(config.transcription_prompt?.trim()),
         transcriber_prompt_configured: Boolean(config.transcriber_prompt?.trim()),
         config_warnings: config.config_warnings ?? [],
+        microphone_permission: macStatus?.microphone_permission ?? "unsupported",
+        accessibility_permission: macStatus?.accessibility_permission ?? "unsupported",
+        capture_probe: capture,
+        credential_probe: credential,
       }, null, 2));
+      if (probeFailed) process.exitCode = 1;
       return;
     }
 
@@ -1173,10 +1233,12 @@ program
       console.log(chalk.red(`✗ ${deps.message}`));
     }
 
-    // Check API key
+    // Key presence is NOT key validity. Say which one this line means, so the
+    // reader does not take it as proof the credential works.
     if (config.openai_api_key) {
       console.log(
-        chalk.green(`✓ OpenAI API key configured`)
+        chalk.green(`✓ OpenAI API key present`) +
+          chalk.dim(opts.probe ? "" : " (presence only — run 'recordings check --probe' to verify it is accepted)")
       );
     } else {
       console.log(
@@ -1189,13 +1251,51 @@ program
     // Check enhancement key
     if (enhKey) {
       console.log(
-        chalk.green(`✓ Enhancement API key configured (model: ${resolveTranscriberModel(config)})`)
+        chalk.green(`✓ Enhancement API key present (model: ${transcriberModel})`)
       );
     } else {
       console.log(
         chalk.yellow(`⚠ Enhancement API key not configured — enhancement disabled`)
       );
     }
+
+    if (macStatus) {
+      const micOk = macStatus.microphone_permission.startsWith("allowed");
+      console.log(
+        (micOk ? chalk.green("✓") : chalk.red("✗")) +
+          ` Microphone permission: ${macStatus.microphone_permission}`
+      );
+      if (!micOk) {
+        console.log(
+          chalk.dim(
+            "  Recordings.app cannot capture audio without this. macOS does not error when it is " +
+              "missing — it delivers silent audio. Trigger the prompt with 'recordings app request-permissions' " +
+              "and click Allow on the machine itself."
+          )
+        );
+      }
+      console.log(
+        (macStatus.accessibility_permission.startsWith("allowed")
+          ? chalk.green("✓")
+          : chalk.yellow("⚠")) +
+          ` Accessibility permission: ${macStatus.accessibility_permission}`
+      );
+    }
+
+    if (capture) {
+      console.log(
+        (capture.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Microphone capture probe: ${capture.message}`
+      );
+    }
+    if (credential) {
+      console.log(
+        (credential.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Transcription credential: ${credential.message}`
+      );
+    }
+
+    if (probeFailed) process.exitCode = 1;
   });
 
 // ── listen ───────────────────────────────────────────────────────────────────

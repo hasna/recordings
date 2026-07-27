@@ -75,6 +75,16 @@ export {
   recordDuration,
 } from "./lib/recorder.js";
 
+// ── Capability probes (prove capture/credentials, not mere presence) ─────────
+export {
+  probeMicrophoneCapture,
+  captureProbePrecondition,
+  readWavPeak,
+  DEFAULT_PROBE_SECONDS,
+  type CaptureProbeResult,
+  type WavPeak,
+} from "./lib/capture-probe.js";
+
 // ── SDK (typed /v1 cloud client, generated from the serve OpenAPI) ────────────
 export {
   RecordingsV1Client,
