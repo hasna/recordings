@@ -789,8 +789,21 @@ describe("designated-requirement identity-migration guard", () => {
   // (`if [ -z "${RECORDINGS_SKIP_...}" ]`), a `uname`- or hostname-conditioned wrapper, or a
   // wrapper keyed on the presence of a `RECORDINGS_TEST_INSTALL_*_EXECUTABLE` override -- the
   // hermetic-stub mechanism is itself a detectable test signal -- are all still invisible
-  // here, because this fixture holds each of those constant. Closing one costs one more
-  // varied input; there is no assertion over a single run that closes them all.
+  // here, because this fixture holds each of those constant. Closing one BY EXECUTION costs one
+  // more varied input, and no assertion over a single run closes them all.
+  //
+  // That is a bound on execution, not a statement that execution is the only route, and the
+  // difference matters because the cheaper route generalises further. A TEXT check closes the
+  // whole subclass inserted INSIDE this region without knowing what the condition tests:
+  // measured on this tree, the span from `identity_migration=0` to the guard call is
+  // depth-balanced -- every `if`/`for` it contains is closed within it -- and each of the three
+  // `if` wrappers named above leaves exactly one unmatched opener inside that span, artifact
+  // policy and env-var backdoor and `RECORDINGS_TEST_INSTALL_*` probe alike. A balance
+  // assertion over the span is therefore blind to the condition in the USEFUL direction, where
+  // an execution is blind to it in the harmful one. It is not a full closure either: a wrapper
+  // opened ABOVE `identity_migration=0` leaves the span balanced, which is the same bound the
+  // function-declaration check declares for itself further up this file. Neither technique
+  // subsumes the other, so closing the remaining shapes is not simply "one more run each".
   describe("the guard actually runs when the installer runs", () => {
     const REFUSAL = "not mutually compatible";
     // The guard's release branch (scripts/enforce_identity_migration.sh:85) and its
