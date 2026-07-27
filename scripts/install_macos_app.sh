@@ -336,8 +336,22 @@ else
     echo "Local-only artifacts do not accept --expected-team-id or a release TeamIdentifier environment value." >&2
     exit 2
   fi
-  if [ "$APPROVED_TARGET" != "station06" ]; then
-    echo "Local-only install is currently restricted to --approved-target station06." >&2
+  # The approved local-only targets are policy data shared with the artifact tool
+  # and the builder, parsed by one sourced reader so all three agree.
+  LOCAL_TARGET_POLICY="${PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
+  LOCAL_TARGET_READER="${PACKAGE_ROOT}/scripts/read_local_only_targets.sh"
+  [ -f "$LOCAL_TARGET_READER" ] && [ ! -L "$LOCAL_TARGET_READER" ] || {
+    echo "Packaged local-only approved target reader is missing." >&2
+    exit 2
+  }
+  # shellcheck source=/dev/null
+  . "$LOCAL_TARGET_READER"
+  APPROVED_TARGET_MATCHED=0
+  APPROVED_TARGET_LIST=""
+  read_local_only_targets \
+    "$LOCAL_TARGET_POLICY" APPROVED_TARGET_LIST APPROVED_TARGET_MATCHED "$APPROVED_TARGET" || exit 2
+  if [ "$APPROVED_TARGET_MATCHED" -ne 1 ]; then
+    echo "Local-only install requires an approved --approved-target (${APPROVED_TARGET_LIST})." >&2
     exit 2
   fi
   if ! [[ "$APPROVED_TARGET_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
