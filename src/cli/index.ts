@@ -1397,6 +1397,21 @@ program
       return false;
     }
 
+    /**
+     * Bundles a TCC grant would have to be given to: the running instance if there is one,
+     * otherwise whatever is installed. A grant keys to a bundle, so naming none at all is
+     * useless precisely when it matters most — while telling someone to enable a permission.
+     */
+    function grantTargetPaths(): { paths: string[]; running: boolean } {
+      const running = runningAppBundlePaths();
+      if (running.length > 0) return { paths: running, running: true };
+      const status = getMacOSAppStatus();
+      return {
+        paths: [...(status.installed ? [status.installed_app_path] : []), ...status.legacy_install_paths],
+        running: false,
+      };
+    }
+
     function showState(): void {
       const state = readTriggerState();
       console.log(chalk.bold("Recording trigger\n"));
@@ -1551,8 +1566,14 @@ program
               `    ${fnGrant.settingsPath} > enable Recordings`,
           );
           // The grant keys to a bundle, so name the one that has to appear in that list.
-          for (const path of runningAppBundlePaths()) {
-            console.log(chalk.dim(`    grant it to: ${path}`));
+          const target = grantTargetPaths();
+          if (target.paths.length === 0) {
+            console.log(chalk.dim("    (no installed Recordings.app found to grant it to)"));
+          }
+          for (const path of target.paths) {
+            console.log(
+              chalk.dim(`    grant it to: ${path}${target.running ? "" : " (not running — installed copy)"}`),
+            );
           }
         }
         console.log(
