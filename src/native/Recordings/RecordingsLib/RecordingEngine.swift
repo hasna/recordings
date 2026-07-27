@@ -2329,7 +2329,8 @@ public final class RecordingEngine: ObservableObject {
                     postProcessingMode: postProcessingMode,
                     transcript: realtimeFastPathText,
                     hasSelection: selectionToken != nil,
-                    intentDetectionEnabled: processingConfiguration.intentDetectionEnabled
+                    intentDetectionEnabled: processingConfiguration.intentDetectionEnabled,
+                    enhanceTriggersJSON: processingConfiguration.enhanceTriggersJSON
                 ) {
                     self.isTranscribing = false
                     _ = Self.deliverRealtimeBeforePersistence(
@@ -2523,18 +2524,39 @@ public final class RecordingEngine: ObservableObject {
         return shouldFallbackFromPartialRealtime(text: text, pcmByteCount: pcmByteCount) ? nil : text
     }
 
-    /// Delivery may only run ahead of persistence for transcripts the local screen already
+    /// Delivery may only run ahead of persistence for transcripts the local screens already
     /// decided are plain dictation: the paste is near-instant, so persistence is deferred by
     /// milliseconds. Command/conversation-shaped transcripts persist first — their delivery
     /// can block on the classifier, the assistant, or the rewrite CLI, and the recording
     /// must already be durable by then.
+    ///
+    /// `off` mode never rewrites, so plain dictation always qualifies. `auto` mode
+    /// qualifies only when `EnhancementScreen` proves the helper cannot rewrite the
+    /// transcript — enhancement-eligible speech must keep pasting the helper's output,
+    /// which only exists after persistence. `always` mode rewrites unconditionally and
+    /// therefore always persists first.
     nonisolated static func shouldPasteBeforePersistence(
         postProcessingMode: String,
         transcript: String,
         hasSelection: Bool,
-        intentDetectionEnabled: Bool
+        intentDetectionEnabled: Bool,
+        // No default: "[]" decodes successfully to "no configured triggers", which
+        // silently fails OPEN for a caller that forgets the argument — the opposite
+        // of the fail-closed contract documented on EnhancementScreen. Every caller
+        // must state the configured triggers explicitly (review F2 on #30).
+        enhanceTriggersJSON: String
     ) -> Bool {
-        guard PostProcessingMode(rawValue: postProcessingMode) == .off else { return false }
+        switch PostProcessingMode(rawValue: postProcessingMode) {
+        case .off:
+            break
+        case .auto:
+            guard !EnhancementScreen.mayRequireEnhancement(
+                text: transcript,
+                enhanceTriggersJSON: enhanceTriggersJSON
+            ) else { return false }
+        default:
+            return false
+        }
         guard intentDetectionEnabled else { return true }
         return IntentScreen.screen(text: transcript, hasSelection: hasSelection)?.intent == .dictate
     }

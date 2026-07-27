@@ -1,0 +1,44 @@
+# Re-derivation battery for the guards PR #35 introduces (todos 96546cc7).
+#
+# Scope: enhancer.test.ts (the PR's cross-language fixture twins) and
+# enhancement-screen-mirror-contract.test.ts (added because the three claims below were
+# enforced by nothing runnable on Linux). The three station-contended suites are NOT in scope;
+# an already-red target makes every mutation look caught. The Swift suites cannot run here at
+# all -- no Swift toolchain exists on this machine -- so every row below is a TEXT-level check.
+#
+# Rows marked MUST-SURVIVE are controls in the sense of must-survive-controls.tsv, so this
+# manifest exits 1 by design and is not wired into a package.json aggregate script.
+#
+# --- TS side of the cross-language twin. Bound before this task; kept as regression coverage.
+delete	src/__tests__/enhancer.test.ts	enhances: make this sound more professional	src/lib/enhancer.ts	professional|	1
+delete	src/__tests__/enhancer.test.ts	passes through: draft beer is better than bottled in my opinion	src/lib/enhancer.ts	(?:email|message|response|reply|letter|note|text|slack|dm)	1
+# --- SWIFT regex mirror drift. SURVIVED before enhancement-screen-mirror-contract existed:
+# nothing on Linux read EnhancementScreen.swift, so the 'byte-identical' claim was unenforced.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	the instruction pattern sources are byte-identical in the CLI and the Swift mirror	src/native/Recordings/RecordingsLib/EnhancementScreen.swift	professional|	1
+# --- and the same drift introduced on the CLI side must break identity too, not just behaviour.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	the instruction pattern sources are byte-identical in the CLI and the Swift mirror	src/lib/enhancer.ts	professional|	1
+# --- 'shared verbatim fixture table'. SURVIVED before: the tables were the same text only by
+# convention, and the TS fixtures exercised the TS implementation alone.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	the cross-language fixture table is the same text in both suites	src/native/Recordings/RecordingsTests/EnhancementScreenTests.swift	"draft beer is better than bottled in my opinion"	1
+# --- review F2's fail-closed contract at the PRODUCTION call site. SURVIVED before.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	every Swift call site of shouldPasteBeforePersistence states enhanceTriggersJSON	src/native/Recordings/RecordingsLib/RecordingEngine.swift	,\n                    enhanceTriggersJSON: processingConfiguration.enhanceTriggersJSON\n	1
+# --- and at a test call site: these five were shipped without the argument at all, which does
+# not compile. Swift catches that on macOS; this row makes Linux catch it too.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	every Swift call site of shouldPasteBeforePersistence states enhanceTriggersJSON	src/native/Recordings/RecordingsTests/SpeechIntentTests.swift	,\n            enhanceTriggersJSON: "[]"	1
+# --- MUST-SURVIVE: a neutral comment deletion in the CLI must not trip the fixture twins.
+delete	src/__tests__/enhancer.test.ts	enhances: make this sound more professional	src/lib/enhancer.ts	  // Check instruction patterns\n	1
+# --- MUST-SURVIVE: nor may a comment deletion in the Swift mirror trip the identity guard --
+# otherwise the guard is a whole-file checksum rather than an assertion about the patterns.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	the instruction pattern sources are byte-identical in the CLI and the Swift mirror	src/native/Recordings/RecordingsLib/EnhancementScreen.swift	/// Deterministic local pre-screen for the CLI's enhancement decision.\n	1
+
+# --- ADVERSARIAL REVIEW ADDITION (todos 96546cc7). The one place the mirror was LESS
+# conservative than the CLI: `needsEnhancement` tests `lower.includes(trigger.toLowerCase())` and
+# JS `includes("")` is true for every string, so one empty row in enhance_triggers makes the
+# helper rewrite every transcript. Foundation's `contains("")` is FALSE, so the mirror has to
+# special-case the row. It skipped it instead, and deleting the skip SURVIVED all three guards --
+# the fixture twins pin transcript text, never trigger lists. Deleting the fail-closed branch now
+# breaks the new guard's source assertion.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	an empty configured trigger makes both implementations fail closed	src/native/Recordings/RecordingsLib/EnhancementScreen.swift	            guard !loweredTrigger.isEmpty else { return true }\n	1
+# --- and the CLI half of the same claim: deleting the trigger scan makes needsEnhancement stop
+# treating an empty row as a match.
+delete	src/__tests__/enhancement-screen-mirror-contract.test.ts	an empty configured trigger makes both implementations fail closed	src/lib/enhancer.ts	    if (lower.includes(trigger.toLowerCase())) {	1

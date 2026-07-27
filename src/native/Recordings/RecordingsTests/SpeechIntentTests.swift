@@ -481,40 +481,51 @@ struct IntentFlowStateTests {
 
     @Test("delivery only runs ahead of persistence for locally-screened plain dictation")
     func pasteBeforePersistenceIsRouteAware() {
+        // `enhanceTriggersJSON` has no default by design (review F2 on #30): "[]" decodes to
+        // "no configured triggers" and would fail OPEN for a caller that omitted it. These five
+        // cases are all `off`/`always`, where the screen is never consulted, so they state the
+        // empty list explicitly rather than relying on an absent default.
         // Plain dictation with cleanup off: paste first, persist milliseconds later.
         #expect(RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.off.rawValue,
             transcript: "meet me at noon by the north entrance",
             hasSelection: false,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ))
         // Command-shaped speech with a selection may become a rewrite — persist first.
         #expect(!RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.off.rawValue,
             transcript: "rewrite this to be more formal",
             hasSelection: true,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ))
         // Question-shaped speech may become a conversation — persist first.
         #expect(!RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.off.rawValue,
             transcript: "what's the capital of France?",
             hasSelection: false,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ))
         // Detection off restores pure dictation: always paste first when cleanup is off.
         #expect(RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.off.rawValue,
             transcript: "what's the capital of France?",
             hasSelection: false,
-            intentDetectionEnabled: false
+            intentDetectionEnabled: false,
+            enhanceTriggersJSON: "[]"
         ))
-        // Any cleanup mode other than off always persists first.
+        // `always` mode persists first whatever the transcript looks like. This used to read "any
+        // cleanup mode other than off", which this PR makes false: `auto` now pastes first when
+        // EnhancementScreen proves the helper cannot rewrite the text.
         #expect(!RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.always.rawValue,
             transcript: "meet me at noon",
             hasSelection: false,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ))
     }
 

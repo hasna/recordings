@@ -560,19 +560,22 @@ struct RealtimeTranscriptionTests {
             postProcessingMode: PostProcessingMode.off.rawValue,
             transcript: "settled realtime text",
             hasSelection: false,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ))
         #expect(RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.off.rawValue,
             transcript: "rewrite this to be more formal",
             hasSelection: true,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ) == false)
         #expect(RecordingEngine.shouldPasteBeforePersistence(
             postProcessingMode: PostProcessingMode.always.rawValue,
             transcript: "settled realtime text",
             hasSelection: false,
-            intentDetectionEnabled: true
+            intentDetectionEnabled: true,
+            enhanceTriggersJSON: "[]"
         ) == false)
         #expect(RecordingEngine.shouldLabelRewriting(
             postProcessingMode: PostProcessingMode.always.rawValue

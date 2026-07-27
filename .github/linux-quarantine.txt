@@ -20,8 +20,15 @@
 # So "permanently red on Linux" was never a property of Linux. It is a property of the STATION: that
 # box routinely runs several full recordings suites at once out of different worktrees, and this
 # suite scans a shared /tmp, so the suites corrupt each other's fixtures — which is exactly what
-# source-assertions.ts warns about two paragraphs above the list. The 92 failures in
-# macos-app-lifecycle were FIFO synchronisation timeouts under that contention, not defects.
+# source-assertions.ts warns about two paragraphs above the list.
+#
+# CORRECTED 2026-07-28: this said "the 92 failures in macos-app-lifecycle were FIFO synchronisation
+# timeouts under that contention". Contention is real but it is not the whole account, and the count
+# drifts. Measured on the station, a 92-fail run breaks down as 38 owner-mismatch aborts, 22 FIFO
+# timeouts and 24 fixture ENOENTs; the 38 are `FORCE_COLOR` making Bun colour the uid that the
+# fixture's `stat` stub prints, so the installer compares an ANSI-wrapped number against `id -u` and
+# aborts at install_macos_app.sh:143. `env -u FORCE_COLOR` takes them to 0. Two independent causes,
+# neither of which GitHub Actions has. Details in src/__tests__/helpers/source-assertions.ts.
 #
 # That is why the mechanism is kept with an empty list instead of being deleted. It is the only
 # reason the three entries were ever disproven: `scripts/ci-linux-suite.ts` re-runs each quarantined
