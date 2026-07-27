@@ -110,6 +110,48 @@ export function withoutComments(source: string): string {
 }
 
 /**
+ * Strip EVERY Swift comment — trailing `//` and `/* … *\/` too, not only whole comment lines.
+ *
+ * `withoutComments` above drops a line only when the line STARTS with `//`, which leaves a trailing
+ * comment as ordinary text to any assertion downstream. Two measured defects turned on exactly that:
+ *
+ *   - A region assertion for `stillOwnsPayload` was satisfied by an attacker's trailing comment
+ *     `if shouldRestore { // stillOwnsPayload is folded into the table above` while the switch arm
+ *     it was meant to check had been replaced by `true`. The opt-in was gone and the test passed.
+ *   - Commenting the guard OUT entirely — `// if shouldRestore {` around an unconditional
+ *     `previousClipboard.restore(to: pasteboard)` — still let a guard-locating regex capture
+ *     `shouldRestore` out of the comment. That is the maximal transcript-destroying defect, passing.
+ *
+ * Line count is preserved so any assertion that anchors on `\n` still sees the same shape.
+ */
+export function withoutAnyComments(source: string): string {
+  // Block comments first, keeping their newlines so line-anchored patterns are unaffected.
+  const withoutBlocks = source.replace(/\/\*[\s\S]*?\*\//g, (match) =>
+    match.replace(/[^\n]/g, " "),
+  );
+  return withoutBlocks
+    .split("\n")
+    .map((line) => {
+      // A `//` inside a string literal is text, not a comment. Only cut at a `//` that is not
+      // inside quotes; counting unescaped quotes before it is enough for this codebase's log lines.
+      let inString = false;
+      for (let index = 0; index < line.length; index += 1) {
+        const character = line[index];
+        if (character === "\\") {
+          index += 1;
+          continue;
+        }
+        if (character === '"') inString = !inString;
+        else if (!inString && character === "/" && line[index + 1] === "/") {
+          return line.slice(0, index).trimEnd();
+        }
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+/**
  * Evaluate a Swift boolean condition for a given binding of its identifiers.
  *
  * Folded in from PR #43, which pinned the clipboard-restore guard by evaluating it for BOTH values
@@ -147,7 +189,10 @@ export function evaluateSwiftCondition(condition: string, env: Record<string, bo
     }
     if (wrapsAll) return evaluateSwiftCondition(text.slice(1, -1), env);
   }
-  if (text in env) return env[text]!;
+  // `Object.hasOwn`, not `in`: `text in env` walks the prototype chain, so `toString`,
+  // `constructor`, `__proto__`, `valueOf` and `hasOwnProperty` all answer truthy on a plain
+  // object and would be read as bound identifiers rather than rejected.
+  if (Object.hasOwn(env, text)) return env[text]!;
   throw new Error(
     `condition contains an expression this evaluator cannot decide: ${JSON.stringify(text)} — ` +
       "extend the evaluator, do not loosen the assertion",
