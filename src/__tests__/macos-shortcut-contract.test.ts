@@ -8,6 +8,7 @@ import {
   sliceBetween,
   sliceBetweenUnique,
   swiftSourcesUnder,
+  withoutAnyComments,
   withoutComments,
 } from "./helpers/source-assertions.js";
 
@@ -783,17 +784,23 @@ describe("secure-input delivery contract", () => {
    * `restoreClipboard` is an explicit opt-in.
    */
   test("secure input never restores the clipboard, and the message says so", () => {
-    const settlement = sliceBetween(
-      engineSource,
-      "let shouldRestore = switch outcome {",
-      // NOT `"if shouldRestore {"`. That end marker pinned the exact spelling of a guard two
-      // lines below a test that is only about the decision TABLE, so parenthesising the condition
-      // — or putting a comment in it — failed here. The restore CALL is the stable structural
-      // boundary, and the two assertions below are unaffected by the `if` line falling inside.
-      "previousClipboard.restore(",
+    // End marker is the restore CALL, not the literal `if shouldRestore {`: that marker pinned the
+    // exact spelling of a guard two lines below a test which is only about the decision TABLE, so
+    // parenthesising the condition — or putting a comment in it — failed here.
+    //
+    // But widening the region to include the guard line was NOT free, and the first version of this
+    // comment wrongly said it was. An adversarial review replaced the `stillOwnsPayload` arm with
+    // `true` — removing the opt-in entirely — and added `// stillOwnsPayload is folded into the
+    // table above` to the guard line. `toContain("stillOwnsPayload")` was then satisfied by the
+    // COMMENT, and the mutation passed at EXIT=0 where it had died before the marker moved.
+    //
+    // So the region is read with every comment stripped, trailing ones included. Comments cannot
+    // satisfy an assertion about code.
+    const settlement = withoutAnyComments(
+      sliceBetween(engineSource, "let shouldRestore = switch outcome {", "previousClipboard.restore("),
     );
     expect(settlement).toContain("case .secureInputActive:\n                false");
-    // The other outcomes still honour the opt-in.
+    // The other outcomes still honour the opt-in — asserted on the SWITCH, not on prose near it.
     expect(settlement).toContain("stillOwnsPayload");
 
     // Both branches of the message must promise the clipboard, because both keep it.
@@ -821,8 +828,28 @@ describe("secure-input delivery contract", () => {
     // The full condition, captured, so any added disjunct fails rather than passing unseen.
     // Decoupled from whitespace and from the local's name: a comment between the `if` and the call,
     // or renaming `pasteboard`, is a refactor rather than a test failure.
-    const restoreGuard = settlementClosure.match(/if ([^\n{]+?)\s*\{[^{}]*?previousClipboard\.restore\(/);
+    // Comment-stripped before locating the guard. Commenting the guard OUT — `// if shouldRestore {`
+    // wrapped around an unconditional `previousClipboard.restore(to: pasteboard)` — left this regex
+    // capturing `shouldRestore` out of the comment, so the maximal transcript-destroying defect (an
+    // unconditional restore over the transcript the status line just told the owner to paste) passed
+    // at EXIT=0. A guard that exists only inside a comment does not guard anything.
+    const executableClosure = withoutAnyComments(settlementClosure);
+    const restoreGuard = executableClosure.match(/if ([^\n{]+?)\s*\{[^{}]*?previousClipboard\.restore\(/);
     expect(restoreGuard, "the restore is no longer guarded by a single `if`").not.toBeNull();
+
+    // And that `if` must be the ONLY thing gating the restore. `[^{}]*?` cannot cross a brace, so
+    // wrapping the guard in an outer condition —
+    //   `if stillOwnsChangeCount { if shouldRestore { restore } }`
+    // — makes the regex skip the outer `if` and capture the inner one, silently disabling the opt-in
+    // while every assertion here still passed. Brace depth at the captured guard is 0 when it sits
+    // at the closure's top level, which is the shape the decision table is written for.
+    const beforeGuard = executableClosure.slice(0, executableClosure.indexOf(restoreGuard![0]));
+    const nesting =
+      (beforeGuard.match(/\{/g) ?? []).length - (beforeGuard.match(/\}/g) ?? []).length;
+    expect(
+      nesting,
+      "the restore's `if` must sit at the settlement closure's top level, not inside another condition",
+    ).toBe(0);
 
     // Folded in from PR #43, closed as superseded by this test: evaluate the captured guard for
     // BOTH values of the decision instead of pinning its spelling. Each direction is a distinct

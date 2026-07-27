@@ -110,6 +110,93 @@ export function withoutComments(source: string): string {
 }
 
 /**
+ * Strip EVERY Swift comment — trailing `//` and `/* … *\/` too, not only whole comment lines.
+ *
+ * `withoutComments` above drops a line only when the line STARTS with `//`, which leaves a trailing
+ * comment as ordinary text to any assertion downstream. Two measured defects turned on exactly that:
+ *
+ *   - A region assertion for `stillOwnsPayload` was satisfied by an attacker's trailing comment
+ *     `if shouldRestore { // stillOwnsPayload is folded into the table above` while the switch arm
+ *     it was meant to check had been replaced by `true`. The opt-in was gone and the test passed.
+ *   - Commenting the guard OUT entirely — `// if shouldRestore {` around an unconditional
+ *     `previousClipboard.restore(to: pasteboard)` — still let a guard-locating regex capture
+ *     `shouldRestore` out of the comment. That is the maximal transcript-destroying defect, passing.
+ *
+ * Line count is preserved so any assertion that anchors on `\n` still sees the same shape.
+ */
+export function withoutAnyComments(source: string): string {
+  const out = source.split("");
+  const blank = (from: number, to: number): void => {
+    for (let index = from; index < to; index += 1) {
+      if (out[index] !== "\n") out[index] = " ";
+    }
+  };
+  let index = 0;
+  while (index < source.length) {
+    // Line comment: blank to end of line.
+    if (source.startsWith("//", index)) {
+      const newline = source.indexOf("\n", index);
+      const stop = newline === -1 ? source.length : newline;
+      blank(index, stop);
+      index = stop;
+      continue;
+    }
+    // Block comment. Swift NESTS these, so a non-greedy match to the first `*/` left the tail
+    // `c */` of `/* a /* b */ c */` behind as if it were code.
+    if (source.startsWith("/*", index)) {
+      let depth = 1;
+      let at = index + 2;
+      while (at < source.length && depth > 0) {
+        if (source.startsWith("/*", at)) {
+          depth += 1;
+          at += 2;
+        } else if (source.startsWith("*/", at)) {
+          depth -= 1;
+          at += 2;
+        } else at += 1;
+      }
+      blank(index, at);
+      index = at;
+      continue;
+    }
+    // String literal: skipped WHOLE and left intact, tracked across lines and by KIND. Per-line
+    // quote parity got this wrong in the obvious way — a `"""` block reset its state at every
+    // newline, so `https://x` on the second line of a multiline literal was cut to `https:`.
+    // Stripping real code is the inverse of the bug this function exists for and just as bad:
+    // an assertion then passes over text that is no longer there.
+    let hashes = 0;
+    while (source[index + hashes] === "#") hashes += 1;
+    const quoteAt = index + hashes;
+    const delimiter = source.startsWith('"""', quoteAt)
+      ? '"""'
+      : source[quoteAt] === '"'
+        ? '"'
+        : null;
+    if (delimiter !== null) {
+      const pounds = "#".repeat(hashes);
+      const terminator = delimiter + pounds;
+      const escape = `\\${pounds}`;
+      let at = quoteAt + delimiter.length;
+      while (at < source.length) {
+        if (source.startsWith(escape, at)) {
+          at += escape.length + 1;
+          continue;
+        }
+        if (source.startsWith(terminator, at)) {
+          at += terminator.length;
+          break;
+        }
+        at += 1;
+      }
+      index = at;
+      continue;
+    }
+    index += 1;
+  }
+  return out.join("");
+}
+
+/**
  * Evaluate a Swift boolean condition for a given binding of its identifiers.
  *
  * Folded in from PR #43, which pinned the clipboard-restore guard by evaluating it for BOTH values
@@ -147,7 +234,10 @@ export function evaluateSwiftCondition(condition: string, env: Record<string, bo
     }
     if (wrapsAll) return evaluateSwiftCondition(text.slice(1, -1), env);
   }
-  if (text in env) return env[text]!;
+  // `Object.hasOwn`, not `in`: `text in env` walks the prototype chain, so `toString`,
+  // `constructor`, `__proto__`, `valueOf` and `hasOwnProperty` all answer truthy on a plain
+  // object and would be read as bound identifiers rather than rejected.
+  if (Object.hasOwn(env, text)) return env[text]!;
   throw new Error(
     `condition contains an expression this evaluator cannot decide: ${JSON.stringify(text)} — ` +
       "extend the evaluator, do not loosen the assertion",
