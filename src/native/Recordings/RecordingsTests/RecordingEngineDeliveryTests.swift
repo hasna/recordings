@@ -534,7 +534,7 @@ struct PasteSettlementObservationTests {
         let coordinator = engine.installPasteCoordinatorForTesting(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 7) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
         var observations = 0
         let subscription = engine.objectWillChange.sink { _ in observations += 1 }
