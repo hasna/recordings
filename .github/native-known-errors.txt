@@ -1,59 +1,49 @@
-# Compiler errors that the native half ALREADY produces on main.
+# Compiler errors the native half is allowed to produce. THE BASELINE IS EMPTY.
 #
-# main does not compile. This was not known before the first CI run on this repository, because
-# scripts/build_native_fs_guard.sh exits on any non-Darwin host and the stations were the only thing
-# that ever built the native half — which is exactly why PRs have been able to hold hundreds of Swift
-# lines reviewed "by shape and call-site analysis only".
+# Empty means the native job is a plain build gate: every target and every test target must compile
+# cleanly on every run, and any compile error at all fails the job on the first run that introduces
+# it. Nothing in src/native is exempt.
 #
-# Listing them here does NOT make them acceptable. It makes the native job useful in spite of them.
-# Every target NOT blocked by an entry below is compiled individually and required to be clean, so a
-# newly introduced compile error in those targets fails on the first run that introduces it. The job
-# also fails when a blocked target starts building cleanly, so this file cannot outlive the defects it
-# describes.
+# It was NOT empty when this file arrived. The first CI runs on this repository discovered that main
+# did not compile at all — 2 C errors in Updater/VerifierLauncher and 4 Swift errors in
+# Updater/Protocol, measured on macos-latest (macOS 26.4, Apple Swift 6.3.2, Xcode 26.5,
+# SDK MacOSX26.5.sdk) in runs 30302342895 and 30305062756. Between them they blocked
+# RecordingsVerifierLauncher, RecordingsUpdateBroker, RecordingsUpdateBrokerTests,
+# RecordingsUpdateProtocol, RecordingsUpdateClient, RecordingsEnvelopeSigner,
+# RecordingsBootstrapPreflight and RecordingsUpdateProtocolTests — 31 of the 84 Swift files that
+# belonged to a target, i.e. the entire updater subsystem, about 37% of the Swift.
 #
-# Format: <repo-relative source file>: <clang/swift message, truncated at the first ';'>
+# They were fixed in #55, which is what emptied this file: `swift build --build-tests` and
+# `swift test` both exit 0 on the merged tree, all five executable products link, and every one of
+# the eight targets above appears in a `Compiling` line. The six entries were removed in the same
+# change, because scripts/ci-native-build.ts fails the job when a blocked target starts building
+# cleanly — this file cannot outlive the defects it describes, in either direction.
+#
+# WHAT AN EMPTY BASELINE DOES NOT CLAIM: that the native half is verified. It says the native half
+# COMPILES. The runtime behaviour of the Swift test targets is TCC-gated (microphone, clipboard,
+# accessibility) and `swift test` is deliberately not a gate on a headless runner — see the
+# `native` job in ci.yml, which records that outcome rather than asserting one.
+#
+# ---------------------------------------------------------------------------------------------------
+# IF YOU ARE ABOUT TO ADD AN ENTRY, READ THIS FIRST.
+#
+# Adding one re-exempts every target that entry blocks, plus everything that depends on them, and the
+# transitive closure is easy to underestimate: two C errors in one launcher file blocked eight
+# targets. An entry here is not a note, it is a hole in the only regression protection the Swift/C
+# half has.
+#
+# So: fix the error instead. If it genuinely cannot be fixed in the same change, then adding an entry
+# also means deleting the "the baseline is empty" test in src/__tests__/ci-native-build.test.ts, in
+# that same change, with the blast radius named in the PR body. That test exists to make re-exempting
+# the native half a deliberate and reviewable act rather than a one-line append nobody notices.
+#
+# Format, if an entry is ever justified:
+#   <repo-relative source file>: <clang/swift message, truncated at the first ';'>
 # Line and column numbers are deliberately NOT part of the signature — they move whenever anything
 # above them is edited, and a signature that churns is a signature nobody maintains. The cost of that
 # choice, stated plainly: a SECOND occurrence of an already-listed message in the same file is not
 # distinguishable from the first, so it would not be caught.
 #
-# Measured on macos-latest = macOS 26.4, Apple Swift 6.3.2, Xcode 26.5, SDK MacOSX26.5.sdk.
-# Runs 30302342895 (the C errors) and 30305062756 (the Swift errors).
-#
-# WHAT IS BLOCKED BY THIS FILE, derived automatically from `swift package dump-package`:
-#   RecordingsVerifierLauncher, RecordingsUpdateBroker, RecordingsUpdateBrokerTests   (the C errors)
-#   RecordingsUpdateProtocol, RecordingsUpdateClient, RecordingsEnvelopeSigner,
-#   RecordingsBootstrapPreflight, RecordingsUpdateProtocolTests                       (the Swift ones)
-# WHAT IS STILL GATED, i.e. required to compile cleanly on every PR, and required to show compile
-# activity while doing it:
-#   RecordingsLib (22 Swift files), App (10), RecordingsTests (21) = 53 of the 84 Swift files that
-#   belong to a target. The blocked Updater subtree is the other 31. So roughly 63% of the Swift is
-#   compile-checked and 37% is not; the unchecked 37% is the entire updater subsystem.
-# (src/native holds 87 .swift files in all: the 84 above, plus Package.swift and two stray
-# test_fn*.swift at the package root that belong to no target and are compiled by nothing.)
-#
-# The target lists above are DERIVED, not configured -- scripts/ci-native-build.ts maps each entry
-# below to its owning target via `swift package dump-package` and then closes over dependents. They
-# are restated here only as a reading aid; if they ever disagree with the job's output, the job is
-# right and this comment is stale.
-
-# --- Updater/VerifierLauncher (C) -------------------------------------------------------------------
-# Two missing DECLARATIONS, not missing functionality, and neither is safe to fix blind: `closefrom`
-# is hidden unless the translation unit opts into the full Darwin C level, and
-# `sandbox_init_with_parameters` is a private SPI absent from the public sandbox.h, so it needs a local
-# prototype that has to match Apple's exactly. Getting that prototype wrong in a privilege-separation
-# launcher is undefined behaviour rather than a compile error, so it is filed as its own change rather
-# than fixed inside a CI pull request. See todos 9204bd93.
-src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c: call to undeclared function 'closefrom'
-src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c: call to undeclared function 'sandbox_init_with_parameters'
-
-# --- Updater/Protocol (Swift) -----------------------------------------------------------------------
-# Four instances of one real type error at UpdateProtocol.swift:111-117. `NSXPCInterface.setClasses`
-# takes a `Set<AnyHashable>`, and a metatype does not implicitly convert to `AnyHashable`, so
-# `[FileHandle.self]` does not typecheck as a set literal. This is an XPC interface whitelist for the
-# updater's privileged helper — the allowed argument classes for installWithArchive:manifest:envelope:
-# — so it is security-relevant and belongs in the same change as the launcher fix, not here.
-src/native/Recordings/Updater/Protocol/UpdateProtocol.swift: cannot convert value of type 'FileHandle.Type' to expected element type 'Set<AnyHashable>.ArrayLiteralElement' (aka 'AnyHashable')
-src/native/Recordings/Updater/Protocol/UpdateProtocol.swift: cannot convert value of type 'NSDictionary.Type' to expected element type 'Set<AnyHashable>.ArrayLiteralElement' (aka 'AnyHashable')
-src/native/Recordings/Updater/Protocol/UpdateProtocol.swift: cannot convert value of type 'NSNumber.Type' to expected element type 'Set<AnyHashable>.ArrayLiteralElement' (aka 'AnyHashable')
-src/native/Recordings/Updater/Protocol/UpdateProtocol.swift: cannot convert value of type 'NSString.Type' to expected element type 'Set<AnyHashable>.ArrayLiteralElement' (aka 'AnyHashable')
+# Which targets an entry blocks is DERIVED, not configured: scripts/ci-native-build.ts maps each
+# entry to its owning target via `swift package dump-package` and then closes over dependents. Do not
+# hand-maintain a list of blocked targets here; read the job's output instead.
