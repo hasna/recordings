@@ -811,6 +811,10 @@ describe("secure-input delivery contract", () => {
     const decision = switchArmsByOutcome(
       sliceBetween(settlement, "switch outcome {", "\n            }"),
     );
+    // STRICTNESS COST, disclosed rather than left to be discovered: these are exact `.toBe` on the
+    // arm expression, so reflowing an expression across lines fails here. That is the same class of
+    // cost as requiring the table and its use to be adjacent — a legitimate refactor is a one-line
+    // change plus an argument that the mapping is unchanged. It is a trade, not a free property.
     expect(decision.get("secureInputActive")).toBe("false");
     expect(decision.get("clipboardWriteFailed")).toBe("stillOwnsChangeCount");
     for (const outcome of [

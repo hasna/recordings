@@ -20,12 +20,13 @@ import { join } from "node:path";
  * already failing and the run was non-zero before you changed anything, so every mutation "looks
  * caught" and every verdict is manufactured. That already produced one wrong all-clear here.
  *
- * These three are the suites it happens to, measured deterministically 3 of 3 runs each on `main`
- * at 40c37b1 with `bun install --frozen-lockfile`:
+ * These are the three suites it happens to. NO PASS/FAIL SPLIT IS RECORDED FOR THEM ON PURPOSE —
+ * see below. `macos-app-lifecycle.test.ts` has 140 tests, `native-app-companion-contract.test.ts`
+ * has 14, `config.test.ts` has 44, and how many of those fail is a property of the MACHINE:
  *
- *   src/__tests__/macos-app-lifecycle.test.ts             EXIT 1,  48 pass /  92 fail
- *   src/__tests__/native-app-companion-contract.test.ts   EXIT 1,  13 pass /   1 fail
- *   src/__tests__/config.test.ts                          EXIT 1,  43 pass /   1 fail
+ *   src/__tests__/macos-app-lifecycle.test.ts
+ *   src/__tests__/native-app-companion-contract.test.ts
+ *   src/__tests__/config.test.ts
  *
  * CORRECTED 2026-07-27, and the correction is the useful part. This block used to call them
  * "PERMANENTLY RED on Linux" and attribute fixed environmental causes — BSD `stat -f`, a fixture
@@ -37,11 +38,37 @@ import { join } from "node:path";
  *   native-app-companion-contract   14 pass / 0 fail   (  4.50s)
  *   config                          44 pass / 0 fail   (  0.10s)
  *
- * So the cause is not the platform. It is CONTENTION on the station, which routinely runs several
- * full recordings suites at once out of different worktrees — the hazard this very comment warns
- * about below. The 92 macos-app-lifecycle failures are FIFO synchronisation timeouts at an internal
- * 5000ms budget that no `--timeout` flag reaches, and they only trip when another suite is competing
- * for the shared /tmp. Measure on a quiet machine, or in CI, before recording a suite as red.
+ * So the cause is not the platform. Measure on a quiet machine, or in CI, before recording a suite
+ * as red. There are TWO independent station-local causes, and every earlier version of this comment
+ * named only one of them. In a 92-fail run of `macos-app-lifecycle.test.ts` on this station the
+ * failure messages break down as 38 × `Home ancestor has an unexpected owner.`, 22 × FIFO
+ * synchronisation timeout, 24 × ENOENT on a fixture marker:
+ *
+ *   1. `FORCE_COLOR`. The fixture's `stat` stub answers `%u` by shelling out to
+ *      `bun -e '… console.log(statSync(…).uid)'` (`macos-app-lifecycle.test.ts:217`) and spreads
+ *      `...Bun.env` into the installer, so with `FORCE_COLOR` set Bun COLOURS the number. The
+ *      installer then compares `\e[0m\e[33m1000\e[0m` against `id -u`'s `1000` at
+ *      `install_macos_app.sh:143` and aborts before reaching any gate. `env -u FORCE_COLOR` takes
+ *      that message from 38 to 0, positive-controlled. `NO_COLOR=1` does NOT help — FORCE_COLOR
+ *      wins in Bun. Nothing about ancestor MODE is involved: `verify_secure_parent` and
+ *      `verify_safe_home_ancestor` each `stat` only the one path handed to them, the sole call is
+ *      `verify_safe_home_ancestor "$HOME"`, and the stub hardcodes every `%Lp` answer anyway.
+ *   2. CONTENTION. The station routinely runs several full recordings suites at once out of
+ *      different worktrees, and this suite scans a shared /tmp — the hazard this very comment warns
+ *      about below. Those are the FIFO timeouts, at an internal 5000ms budget that no `--timeout`
+ *      flag reaches. With `FORCE_COLOR` unset the residual failures are all timing-shaped and scale
+ *      with load: 132 pass / 8 fail at load ~20, 114 pass / 26 fail at load 44-60 on the same
+ *      commit, which is why no split belongs here either. GitHub Actions sets neither `FORCE_COLOR`
+ *      nor a competing suite, which is why both causes were absent from the only clean measurement.
+ *
+ * WHY NO SPLIT IS RECORDED. Every split ever written here has gone stale, including two written as
+ * corrections. On one unchanged tree, three consecutive runs measured 48/92, 48/92, 49/91; the
+ * single test that flips is `runtime smoke timeout does not wait forever on a live open process`
+ * (`macos-app-lifecycle.test.ts:3594`), which races a hardcoded internal `Bun.sleep(2_000)` that no
+ * `--timeout` flag reaches either. So a count comparison across two trees shows a phantom delta
+ * from this file alone — which is the concrete reason for the rule below: compare failing test
+ * NAMES, never counts. Two trees whose failing NAME SETS are identical are identical regardless of
+ * what the totals say.
  *
  * `@hasna/events` MUST resolve 0.1.11, as `bun.lock` pins it. A plain `bun install` pulls 0.1.14,
  * which dropped a shipped CLI command inside the patch range and fails `cli.test.ts` — and it can
@@ -152,6 +179,20 @@ export function withoutComments(source: string): string {
  * Handles the three kinds Swift has — `"`, `"""`, and raw `#…"` with a matching pound count whose
  * escape introducer is `\#…` — and returns null when the literal does not close, so callers decide
  * whether that is fatal rather than silently running to end of input.
+ *
+ * KNOWN DEFECT, filed rather than fixed here, and stated so nobody re-derives it: a PLAIN `"` literal
+ * whose interpolation contains a nested literal is measured wrong. For `{ log("v=\(f("}"))") }` this
+ * returns 14 where the true close is 21 — the nested literal's opening quote is taken as the outer
+ * terminator, and the `}` inside it is then counted as structure. The raw-string form
+ * (`#"v=\#(f("}"))"#`) is correct, because its terminator cannot be confused with a bare quote.
+ *
+ * It is fail-CLOSED at both call sites today, which is why it is filed and not rushed:
+ * `withoutAnyComments` throws on an unterminated literal, so quote parity is always even by the time
+ * a caller reaches the brace matcher, and the arithmetic can then only land EARLY (the adjacency
+ * slice is non-empty and the assertion fires) or LATE (`tableClose > guardAt` and the assertion
+ * fires). Both directions fail the test rather than passing it. The proper fix is to scan
+ * interpolations as code — the same treatment `withoutAnyComments` gives them — rather than treating
+ * the literal body as opaque.
  */
 function stringLiteralEnd(source: string, index: number): number | null {
   let hashes = 0;
