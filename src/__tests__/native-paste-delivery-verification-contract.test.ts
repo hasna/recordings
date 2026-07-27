@@ -160,6 +160,117 @@ describe("native paste delivery verification contract", () => {
     expect(engine).toContain('"Copied — paste blocked by secure input"');
   });
 
+  // The capability this PR adds is that the app reads the FULL text value of whatever field is
+  // focused in the target app. That is acceptable only while the read stays in memory. A review
+  // established by grep that no added `log(` call interpolates the field value — a grep is not a
+  // guard, so these two tests are the guard. They fail the moment a log line, a report field or
+  // an evidence token starts carrying user text.
+  describe("the focused-field read is not allowed to escape into the log", () => {
+    /// Identifiers that hold the user's text rather than a count or a token. `text.count` and
+    /// `characterCount` are fine and deliberately not listed.
+    const TEXT_BEARING = [
+      "pastedText",
+      "selectedText",
+      "snapshot.value",
+      "baseline.value",
+      "readBack.value",
+      "before.value",
+      "after.value",
+      "focusedValue",
+    ];
+
+    /// Region from `open` at `start` to its matching close. Logging expressions in this codebase
+    /// span several lines — `logLine` is a `+`-chain of six string segments — so a per-line scan
+    /// misses exactly the case that matters: a segment carrying the text on a continuation line.
+    function balancedRegion(source: string, start: number, open: string, close: string): string {
+      const from = source.indexOf(open, start);
+      if (from === -1) return "";
+      let depth = 0;
+      for (let index = from; index < source.length; index += 1) {
+        const character = source[index];
+        if (character === open) depth += 1;
+        else if (character === close) {
+          depth -= 1;
+          if (depth === 0) return source.slice(from, index + 1);
+        }
+      }
+      return source.slice(from);
+    }
+
+    /// Every expression whose value reaches the log: `log(...)` calls and the bodies of the
+    /// `logLine` / `logToken` computed properties that those calls print.
+    function loggingRegions(source: string): string[] {
+      const regions: string[] = [];
+      for (const match of source.matchAll(/\blog\(/g)) {
+        regions.push(balancedRegion(source, match.index ?? 0, "(", ")"));
+      }
+      for (const match of source.matchAll(/var (?:logLine|logToken)\s*:\s*String\s*\{/g)) {
+        regions.push(balancedRegion(source, match.index ?? 0, "{", "}"));
+      }
+      return regions.filter((region) => region.length > 0);
+    }
+
+    function interpolationsIn(region: string): string[] {
+      return [...region.matchAll(/\\\(([^)]*)\)/g)].map((match) => match[1] ?? "");
+    }
+
+    test("no logging expression interpolates the focused field's text", () => {
+      const sources = [
+        [ENGINE_PATH, engineSource()],
+        [VERIFICATION_PATH, verificationSource()],
+      ] as const;
+
+      let inspected = 0;
+      for (const [path, source] of sources) {
+        for (const region of loggingRegions(source)) {
+          inspected += 1;
+          for (const interpolation of interpolationsIn(region)) {
+            for (const identifier of TEXT_BEARING) {
+              expect(
+                interpolation.includes(identifier),
+                `${path}: a logging expression interpolates ${identifier}: ${region.slice(0, 200)}`,
+              ).toBe(false);
+            }
+          }
+        }
+      }
+
+      // Guard the guard: if the log lines are ever renamed out from under this, it must fail
+      // loudly rather than pass by inspecting nothing.
+      expect(inspected).toBeGreaterThan(10);
+    });
+
+    test("the delivery report carries counts and tokens, never the text", () => {
+      const verification = verificationSource();
+      const start = verification.indexOf("struct PasteDeliveryReport");
+      const end = verification.indexOf("\n}", start);
+      expect(start).toBeGreaterThan(-1);
+      const report = verification.slice(start, end);
+
+      // Every stored property, so a new `let pastedText: String` cannot slip in unnoticed.
+      const properties = [...report.matchAll(/^\s{4}let (\w+): ([^\n=]+)$/gm)].map((match) => ({
+        name: match[1] ?? "",
+        type: (match[2] ?? "").trim(),
+      }));
+      expect(properties.length).toBeGreaterThan(4);
+      for (const property of properties) {
+        if (property.type !== "String" && property.type !== "String?") continue;
+        // The one permitted String is the target's bundle identifier, which is not user text.
+        expect(property.name).toBe("targetBundleIdentifier");
+      }
+    });
+
+    test("the user-facing disclosure exists, because no new permission prompt announces it", () => {
+      const readme = readFileSync("README.md", "utf8");
+
+      expect(readme).toContain("What the app reads to confirm a paste");
+      expect(readme).toContain("never logged and never persisted");
+      // The two limits a reader has to know: the cap, and that no extra permission is asked.
+      expect(readme).toContain("20,000 characters");
+      expect(readme).toMatch(/No additional permission is requested/);
+    });
+  });
+
   test("the Swift regression tests that pin the defect are part of the test target", () => {
     const tests = readFileSync(
       "src/native/Recordings/RecordingsTests/PasteDeliveryVerificationTests.swift",

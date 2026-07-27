@@ -177,6 +177,26 @@ enum FocusedTextRead: Equatable, Sendable {
 /// Holds the focused element captured before a paste so the read-back compares the same
 /// element rather than whatever happens to be focused afterwards. AX calls are Mach IPC and
 /// thread safe; the stored elements are never mutated.
+///
+/// CAPABILITY DISCLOSURE — read this before extending anything in here.
+///
+/// This type is the reason a dictation app can see text the user did not dictate. It reads the
+/// **full value** of the focused field in the target application, plus its current selection,
+/// twice around each paste. That is a meaningful widening of what the app can observe and it is
+/// deliberate: `CGEvent.post` returns `Void`, so nothing else can distinguish a paste that
+/// landed from one the window server discarded, and the alternative is the app claiming a paste
+/// it never proved.
+///
+/// The constraints that make it acceptable are load-bearing, not incidental:
+///
+/// - the read-back text is **never logged and never persisted** — only the verdict is;
+/// - values above `maximumComparableCharacterCount` are reported unverifiable instead of copied;
+/// - no new permission is requested: this rides the Accessibility grant the keystroke already
+///   needs, which is precisely why the capability has to be documented rather than inferred.
+///
+/// A change that logs, stores, transmits or forwards a `FocusedTextSnapshot` value breaks that
+/// contract. `README.md` ("What the app reads to confirm a paste") states this to users; keep
+/// the two in step.
 final class FocusedTextProbe: @unchecked Sendable {
     /// Cap on the field text copied into this process for comparison. A large document is
     /// reported unverifiable rather than copied and scanned on the paste path.
@@ -271,6 +291,14 @@ enum PasteDeliveryVerifier {
     /// Decides what two reads of the focused field prove. Ordered so that the positive
     /// verdicts require an observed *gain* of the pasted text: text that was already in the
     /// field before the paste can never be counted as this paste's delivery.
+    ///
+    /// Known false negative, in the safe direction and deliberately not chased: pasting text
+    /// identical to the selection it replaces (baseline `hello WORLD`, selection `WORLD`,
+    /// transcript `WORLD`) leaves both the value and the occurrence count unchanged, so a
+    /// successful delivery classifies as `.notObservedFocusedValueUnchanged`. Distinguishing it
+    /// would mean treating an unchanged field as a possible success, which is the direction that
+    /// manufactures false confirmations. Under-claiming is the correct failure mode here, and
+    /// the case name says "not observed" rather than "failed" so the log does not overstate it.
     static func classify(
         pastedText: String,
         baseline: FocusedTextRead,
