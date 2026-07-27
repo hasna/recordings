@@ -305,16 +305,45 @@ struct PasteDeliveryTransaction: Equatable, Sendable {
 }
 
 enum PasteDeliveryOutcome: Equatable, Sendable {
+    /// Delivery *observed*: the focused field in the target app was read back after the
+    /// keystroke and had gained the pasted text. Reachable only from confirming evidence —
+    /// see `PasteDeliveryOutcome.forDeliveryEvidence`. A posted `CGEvent` never produces it,
+    /// because `CGEvent.post` returns no delivery receipt.
     case pasted
+    /// The keystroke was posted and the focused field, readable before and after, did not
+    /// change. The paste did not land where it was aimed.
+    case deliveryNotObserved
+    /// The keystroke was posted and the target app's focused field could not be read back, so
+    /// delivery is unknown. Carries the reason so the log says which surface refused to
+    /// answer instead of implying success.
+    case deliveredUnverified(PasteDeliveryUnverifiedReason)
+    /// Secure event input is on, so no synthetic keystroke can reach any app. Nothing was
+    /// posted; the payload is left on the clipboard for the user to paste.
+    case secureInputActive(SecureInputHolder)
     case targetUnavailable
     case clipboardOwnershipLost
     case clipboardWriteFailed
     case eventPostFailed
+
+    /// The single place delivery evidence is allowed to become `.pasted`. Kept next to the
+    /// outcome so a reader can check the whole mapping at once: two confirming reads, one
+    /// contradicting read, everything else unverified.
+    static func forDeliveryEvidence(_ evidence: PasteDeliveryEvidence) -> PasteDeliveryOutcome {
+        switch evidence {
+        case .confirmedByFocusedValue, .confirmedBySelectedText: .pasted
+        case .notObservedFocusedValueUnchanged: .deliveryNotObserved
+        case .unverified(let reason): .deliveredUnverified(reason)
+        }
+    }
 }
 
 struct PasteboardWriteResult: Equatable, Sendable {
     let verified: Bool
     let ownershipChangeCount: Int
+    /// Whether the pasteboard's `changeCount` actually advanced past its pre-write value.
+    /// Weaker than `verified` (which also re-reads the stored string) and reported separately
+    /// so a log reader can tell "the pasteboard moved" from "the pasteboard holds our text".
+    var changeCountAdvanced: Bool = false
 }
 
 /// Outcome of revalidating the frozen rewrite target immediately before a rewrite runs.
@@ -336,7 +365,11 @@ final class PasteTransactionCoordinator {
     typealias ScheduledOperation = @MainActor @Sendable () -> Void
     typealias Scheduler = @MainActor @Sendable (TimeInterval, @escaping ScheduledOperation) -> Void
     typealias PayloadWriter = @MainActor @Sendable (String) -> PasteboardWriteResult
-    typealias PastePoster = @MainActor @Sendable () -> Bool
+    typealias PastePoster = @MainActor @Sendable () -> PasteKeystrokeAttempt
+    /// Reads the target app back and reports what that read proves. Defaulted to
+    /// `.unverified(.readBackNotAttempted)` at every entry point so a caller that supplies no
+    /// verification gets an explicitly unverified outcome, never an assumed success.
+    typealias DeliveryVerifier = @MainActor @Sendable () -> PasteDeliveryEvidence
     typealias WriteObserver = @MainActor @Sendable (PasteboardWriteResult) -> Void
     typealias Completion = @MainActor @Sendable (PasteDeliveryTransaction, PasteDeliveryOutcome) -> Void
     typealias Settlement = @MainActor @Sendable (PasteDeliveryTransaction, PasteDeliveryOutcome) -> Void
@@ -381,6 +414,14 @@ final class PasteTransactionCoordinator {
         payloadIsReady: @escaping @MainActor @Sendable () -> Bool = { true },
         prepare: @escaping ScheduledOperation = {},
         writeAttempted: @escaping WriteObserver = { _ in },
+        verify: @escaping DeliveryVerifier = { .unverified(.readBackNotAttempted) },
+        // `verificationDelay` is the wait between posting the keystroke and reading the target
+        // app back; zero verifies on the posting turn, which only makes sense for tests since a
+        // real app cannot have processed the event yet. `verificationAttempts` bounds how many
+        // read-backs may run before "the field did not change" is accepted as the verdict —
+        // only that verdict is retried, and each retry costs one `verificationDelay`.
+        verificationDelay: TimeInterval = 0,
+        verificationAttempts: Int = 1,
         completion: @escaping Completion,
         settlement: @escaping Settlement = { _, _ in }
     ) -> Bool {
@@ -423,25 +464,91 @@ final class PasteTransactionCoordinator {
                 completion(transaction, .clipboardOwnershipLost)
                 return
             }
-            guard self.postPaste() else {
-                settlement(transaction, .eventPostFailed)
+            // `@MainActor` is required, not decorative: a local function does not inherit the
+            // enclosing closure's actor isolation, so without it `state` cannot be mutated and
+            // `completion`/`settlement` cannot be called from here at all.
+            @MainActor func failNow(with outcome: PasteDeliveryOutcome) {
+                settlement(transaction, outcome)
                 self.state = .idle
-                completion(transaction, .eventPostFailed)
+                completion(transaction, outcome)
+            }
+
+            switch self.postPaste() {
+            case .constructionFailed:
+                failNow(with: .eventPostFailed)
+                return
+            case .refusedSecureInput(let holder):
+                // Nothing was posted: with secure input on, the window server drops synthetic
+                // key events for every consumer, so posting would only manufacture a success
+                // log for a paste that cannot happen.
+                failNow(with: .secureInputActive(holder))
+                return
+            case .posted:
+                break
+            }
+
+            // The keystroke is out. `CGEvent.post` returned no receipt, so the transaction
+            // stays open: the outcome comes from reading the target app back.
+            let pending = PendingDelivery(
+                transaction: transaction,
+                verify: verify,
+                verificationDelay: verificationDelay,
+                verificationAttempts: verificationAttempts,
+                settlementDelay: settlementDelay,
+                completion: completion,
+                settlement: settlement
+            )
+            guard verificationDelay > 0 else {
+                self.settleFromDeliveryEvidence(pending, readBackAttempt: verificationAttempts)
                 return
             }
-            completion(transaction, .pasted)
-            guard settlementDelay > 0 else {
-                settlement(transaction, .pasted)
-                self.state = .idle
-                return
-            }
-            self.schedule(settlementDelay) { [weak self] in
+            self.schedule(verificationDelay) { [weak self] in
                 guard let self, self.state == .settling(transaction.id) else { return }
-                settlement(transaction, .pasted)
-                self.state = .idle
+                self.settleFromDeliveryEvidence(pending, readBackAttempt: 1)
             }
         }
         return true
+    }
+
+    /// Everything the read-back loop needs after the keystroke has been posted.
+    private struct PendingDelivery: Sendable {
+        let transaction: PasteDeliveryTransaction
+        let verify: DeliveryVerifier
+        let verificationDelay: TimeInterval
+        let verificationAttempts: Int
+        let settlementDelay: TimeInterval
+        let completion: Completion
+        let settlement: Settlement
+    }
+
+    /// Asks the verifier what the target app shows, retrying only the "field did not change"
+    /// verdict: that is the one a slow app can turn into a confirmation, while a confirmed or
+    /// unreadable result is already final.
+    private func settleFromDeliveryEvidence(_ pending: PendingDelivery, readBackAttempt: Int) {
+        let evidence = pending.verify()
+        guard evidence == .notObservedFocusedValueUnchanged,
+              readBackAttempt < pending.verificationAttempts else {
+            complete(pending, outcome: .forDeliveryEvidence(evidence))
+            return
+        }
+        schedule(pending.verificationDelay) { [weak self] in
+            guard let self, self.state == .settling(pending.transaction.id) else { return }
+            self.settleFromDeliveryEvidence(pending, readBackAttempt: readBackAttempt + 1)
+        }
+    }
+
+    private func complete(_ pending: PendingDelivery, outcome: PasteDeliveryOutcome) {
+        pending.completion(pending.transaction, outcome)
+        guard pending.settlementDelay > 0 else {
+            pending.settlement(pending.transaction, outcome)
+            state = .idle
+            return
+        }
+        schedule(pending.settlementDelay) { [weak self] in
+            guard let self, self.state == .settling(pending.transaction.id) else { return }
+            pending.settlement(pending.transaction, outcome)
+            self.state = .idle
+        }
     }
 }
 
@@ -764,19 +871,33 @@ public final class RecordingEngine: ObservableObject {
             let pasteboard = NSPasteboard.general
             return RecordingEngine.writeClipboardAttempt(text, to: pasteboard)
         },
-        postPaste: {
+        postPaste: { [weak self] in
+            // Secure input is checked here, on the posting turn, rather than earlier: a
+            // password field can take it between the readiness checks and the keystroke, and
+            // while it is held the window server drops every synthetic event.
+            let secureInput = SecureInputProbe.current()
+            self?.lastPasteSecureInputProbe = secureInput
+            if case .active(let holder) = secureInput {
+                return .refusedSecureInput(holder)
+            }
             let source = CGEventSource(stateID: .hidSystemState)
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
                   let up = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-                return false
+                return .constructionFailed
             }
             down.flags = .maskCommand
             up.flags = .maskCommand
             down.post(tap: .cgSessionEventTap)
             up.post(tap: .cgSessionEventTap)
-            return true
+            // Constructed and posted. Nothing here observes delivery, which is why this
+            // returns `.posted` and not a success.
+            return .posted
         }
     )
+    /// Secure-input reading taken on the last posting turn, or nil when no paste has reached
+    /// the posting step. Kept so the delivery log can say whether synthetic input was even
+    /// possible instead of leaving the reader to guess.
+    private var lastPasteSecureInputProbe: SecureInputState?
 
     /// Every coordinator the engine owns must publish its idle transitions:
     /// `canStartRecording` derives from coordinator state, and settlement back to idle is
@@ -836,6 +957,16 @@ public final class RecordingEngine: ObservableObject {
     /// *observable* rewrite time under the public ceiling even when the execution window,
     /// termination grace, and pipe drain all run to exhaustion.
     nonisolated static let commandRewriteReturnMargin: TimeInterval = 1
+    /// Wait before each read-back of the target app's focused field. The window server
+    /// delivers the posted keystroke asynchronously and the app then does its own work, so a
+    /// read taken on the posting turn would report "unchanged" for a paste that is simply
+    /// still in flight.
+    nonisolated static let pasteReadBackInterval: TimeInterval = 0.15
+    /// How many read-backs before "the field did not change" is accepted as the verdict.
+    /// Four reads spaced by `pasteReadBackInterval` give a slow target app ~0.6 s to show the
+    /// paste; a confirmation on any read ends the wait immediately. The transaction stays
+    /// pending for that window, which is why the budget is bounded rather than generous.
+    nonisolated static let pasteReadBackAttempts = 4
 
     // fn key monitor (CGEventTap-based, swallows fn to prevent emoji picker)
     private let fnMonitor = FnKeyMonitor()
@@ -3443,7 +3574,17 @@ public final class RecordingEngine: ObservableObject {
 
         let pasteDelay: TimeInterval = alreadyFrontmost ? 0.15 : 0.5
         var ownedPasteboardChangeCount: Int?
+        var clipboardWrite: PasteboardWriteResult?
         var clipboardOwnershipWasLost = false
+        // Focused field of the target app as it read immediately before the keystroke. The
+        // read-back after the keystroke is compared against this and against nothing else.
+        var deliveryProbe: FocusedTextProbe?
+        // What the read-back proved, and how many reads it took. Both stay at their initial
+        // values when the paste failed before the keystroke, so the log reports "no read-back"
+        // rather than borrowing a verdict from a previous paste.
+        var deliveryEvidence: PasteDeliveryEvidence = .unverified(.readBackNotAttempted)
+        var readBackAttempts = 0
+        lastPasteSecureInputProbe = nil
         updateDeliveryStatus("Pasting...", kind: .progress, pipelineGeneration: pipelineGeneration)
         let accepted = pasteTransactionCoordinator.submit(
             text: text,
@@ -3477,12 +3618,31 @@ public final class RecordingEngine: ObservableObject {
                 if restoreClipboard {
                     previousClipboard = ClipboardSnapshot(pasteboard: .general)
                 }
+                // Captured before the clipboard write rather than immediately before the
+                // keystroke: the readiness checks that follow re-validate focus anyway, and
+                // two Accessibility round trips must not sit between the payload check and
+                // the keystroke. A focus move in the gap is caught by the read-back, which
+                // refuses to compare across a changed element.
+                deliveryProbe = FocusedTextProbe.capture(pid: app.processIdentifier)
             },
             writeAttempted: { result in
                 ownedPasteboardChangeCount = result.ownershipChangeCount
-            }
+                clipboardWrite = result
+            },
+            verify: {
+                guard let deliveryProbe else { return .unverified(.readBackNotAttempted) }
+                readBackAttempts += 1
+                let evidence = PasteDeliveryVerifier.classify(
+                    pastedText: text,
+                    baseline: deliveryProbe.baseline,
+                    readBack: deliveryProbe.readBack()
+                )
+                deliveryEvidence = evidence
+                return evidence
+            },
+            verificationDelay: Self.pasteReadBackInterval,
+            verificationAttempts: Self.pasteReadBackAttempts
         ) { transaction, outcome in
-            let posted = outcome == .pasted
             let accessibilityTrusted = AXIsProcessTrusted()
             let completedTranscriptAlreadyOnClipboard = outcome == .targetUnavailable
                 && !restoreClipboard
@@ -3499,15 +3659,36 @@ public final class RecordingEngine: ObservableObject {
             let copiedAfterFailure = shouldCopyAfterFailure
                 && Self.writeClipboardPreservingOnFailure(transaction.text, to: .general)
             self.log("paste outcome=\(outcome) target=\(app.bundleIdentifier ?? "?") alreadyFrontmost=\(alreadyFrontmost) transaction=\(transaction.id)")
+            // The line to read when asking "did the text land?". Every step reports itself, so
+            // a posted keystroke can no longer stand in for delivery.
+            self.log(PasteDeliveryReport(
+                targetBundleIdentifier: app.bundleIdentifier,
+                characterCount: transaction.text.count,
+                clipboardWriteVerified: clipboardWrite?.verified ?? false,
+                clipboardChangeCountAdvanced: clipboardWrite?.changeCountAdvanced ?? false,
+                attempt: .forOutcome(outcome),
+                secureInput: self.lastPasteSecureInputProbe,
+                evidence: deliveryEvidence,
+                readBackAttempts: readBackAttempts
+            ).logLine)
             if let pipelineTrace {
                 self.log(pipelineTrace.message(
-                    stage: posted ? "paste_posted" : "paste_failed",
+                    stage: Self.pasteTraceStage(for: outcome),
                     detail: "chars=\(transaction.text.count)"
                 ))
             }
             deliveryCompleted?()
             let message = switch outcome {
             case .pasted: "Pasted (\(transaction.text.count) chars)"
+            case .deliveryNotObserved: restoreClipboard
+                ? "Paste did not reach the target app"
+                : "Paste did not reach the target app — text kept on the clipboard"
+            case .deliveredUnverified: restoreClipboard
+                ? "Paste sent, delivery unconfirmed"
+                : "Paste sent, delivery unconfirmed — text kept on the clipboard"
+            case .secureInputActive: restoreClipboard
+                ? "Paste blocked by secure input"
+                : "Copied — paste blocked by secure input"
             case .targetUnavailable: Self.targetUnavailableDeliveryStatus(
                 deliveryKind: deliveryKind,
                 accessibilityTrusted: accessibilityTrusted,
@@ -3524,7 +3705,7 @@ public final class RecordingEngine: ObservableObject {
             }
             self.updateDeliveryStatus(
                 message,
-                kind: posted ? .success : .failure,
+                kind: Self.deliveryStatusKind(for: outcome),
                 pipelineGeneration: transaction.generation
             )
         } settlement: { transaction, outcome in
@@ -3546,7 +3727,8 @@ public final class RecordingEngine: ObservableObject {
             let shouldRestore = switch outcome {
             case .clipboardWriteFailed:
                 stillOwnsChangeCount
-            case .targetUnavailable, .clipboardOwnershipLost, .eventPostFailed, .pasted:
+            case .targetUnavailable, .clipboardOwnershipLost, .eventPostFailed, .pasted,
+                 .deliveryNotObserved, .deliveredUnverified, .secureInputActive:
                 stillOwnsPayload
             }
             if shouldRestore {
@@ -3596,18 +3778,21 @@ public final class RecordingEngine: ObservableObject {
         _ text: String,
         to pasteboard: NSPasteboard
     ) -> PasteboardWriteResult {
+        let changeCountBeforeWrite = pasteboard.changeCount
         let clearedChangeCount = pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
             return PasteboardWriteResult(
                 verified: false,
-                ownershipChangeCount: clearedChangeCount
+                ownershipChangeCount: clearedChangeCount,
+                changeCountAdvanced: clearedChangeCount > changeCountBeforeWrite
             )
         }
         let writtenChangeCount = pasteboard.changeCount
         let storedText = pasteboard.string(forType: .string)
         return PasteboardWriteResult(
             verified: pasteboard.changeCount == writtenChangeCount && storedText == text,
-            ownershipChangeCount: writtenChangeCount
+            ownershipChangeCount: writtenChangeCount,
+            changeCountAdvanced: writtenChangeCount > changeCountBeforeWrite
         )
     }
 
@@ -3711,6 +3896,11 @@ public final class RecordingEngine: ObservableObject {
     enum DeliveryStatusKind: Equatable, Sendable {
         case progress
         case success
+        /// The pipeline finished but delivery could not be observed. Presented like a finished
+        /// run — the recording is safe and the text is on the clipboard — while the message
+        /// itself says the paste is unconfirmed. Never folded into `.success`: that is the
+        /// false positive this state exists to avoid.
+        case unverified
         case failure
     }
 
@@ -3720,8 +3910,32 @@ public final class RecordingEngine: ObservableObject {
     ) -> RecordingFlowPhase {
         switch kind {
         case .progress: .processing(message)
-        case .success: .ready(message)
+        case .success, .unverified: .ready(message)
         case .failure: .failed(message)
+        }
+    }
+
+    /// Only observed delivery is a success. An unreadable target is its own state, and both a
+    /// contradicted read-back and a refused post are failures.
+    nonisolated static func deliveryStatusKind(for outcome: PasteDeliveryOutcome) -> DeliveryStatusKind {
+        switch outcome {
+        case .pasted: .success
+        case .deliveredUnverified: .unverified
+        case .deliveryNotObserved, .secureInputActive, .targetUnavailable,
+             .clipboardOwnershipLost, .clipboardWriteFailed, .eventPostFailed: .failure
+        }
+    }
+
+    /// Pipeline-timing stage name. `paste_posted` used to be emitted for every posted
+    /// keystroke, which made the timing trace read like a delivery record; the three delivery
+    /// verdicts are now distinct stages.
+    nonisolated static func pasteTraceStage(for outcome: PasteDeliveryOutcome) -> String {
+        switch outcome {
+        case .pasted: "paste_delivery_confirmed"
+        case .deliveredUnverified: "paste_delivery_unverified"
+        case .deliveryNotObserved: "paste_delivery_not_observed"
+        case .secureInputActive, .targetUnavailable, .clipboardOwnershipLost,
+             .clipboardWriteFailed, .eventPostFailed: "paste_failed"
         }
     }
 
