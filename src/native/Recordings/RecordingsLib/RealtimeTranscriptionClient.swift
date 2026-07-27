@@ -624,9 +624,16 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     /// the delivery path.
     nonisolated static let configureSendTimeoutMilliseconds: UInt64 = 3_000
     /// Deadline for every send after configuration, riding the established
-    /// connection: kept tight so a mid-session stall surfaces as a transport
-    /// failure quickly instead of backing audio up in the outbound queue.
-    nonisolated static let outboundSendTimeoutMilliseconds: UInt64 = 500
+    /// connection. A single send past this deadline records a transport failure,
+    /// which permanently vetoes the realtime fast path for the whole recording —
+    /// so the deadline must tolerate ordinary jitter, not just the median. At the
+    /// old 500 ms value, 3 of 5 two-minute streaming sessions against the live
+    /// endpoint were poisoned by one slow frame and demoted to the batch path.
+    /// True connection stalls are still detected structurally: the bounded
+    /// outbound queue (256 KB ≈ 4 s of audio) overflows and fails the transport
+    /// if sends stop draining, and the settle budget bounds release latency
+    /// regardless of this deadline.
+    nonisolated static let outboundSendTimeoutMilliseconds: UInt64 = 2_500
 
     private func sendEvent(
         _ obj: [String: Any],

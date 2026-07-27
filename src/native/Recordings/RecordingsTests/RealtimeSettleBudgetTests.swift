@@ -65,12 +65,16 @@ struct RealtimeSendDeadlineTests {
         #expect(RealtimeTranscriptionClient.configureSendTimeoutMilliseconds >= 2_000)
     }
 
-    @Test("post-configure sends stay tight so mid-session stalls surface quickly")
-    func steadyStateDeadlineStaysTight() {
+    @Test("post-configure sends tolerate jitter without outliving the configure budget")
+    func steadyStateDeadlineToleratesJitter() {
+        // One send past the deadline permanently vetoes the fast path, so the
+        // deadline must clear ordinary jitter (a 500 ms value poisoned 3/5 of
+        // two-minute live sessions) while staying under the configure budget —
+        // the bounded outbound queue, not this deadline, is the stall detector.
+        #expect(RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds >= 2_000)
         #expect(
             RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds
                 < RealtimeTranscriptionClient.configureSendTimeoutMilliseconds
         )
-        #expect(RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds <= 1_000)
     }
 }
