@@ -427,9 +427,16 @@ describe("designated-requirement identity-migration guard", () => {
     //   : $((identity_migration = 0))       -- arithmetic assignment
     //
     // Enumerating every mention and pinning the exact set is stronger than adding those two
-    // shapes to a pattern, because it does not depend on having thought of the shapes: any
-    // new line touching this flag fails here and has to be argued for. A shell script has no
-    // parser available to this suite, so an exact-set tripwire is the structural option.
+    // shapes to a pattern: any new line naming this flag fails here and has to be argued for.
+    //
+    // It is NOT shape-independent, and an earlier version of this comment claimed it was. An
+    // adversarial review defeated it four ways, all at EXIT=0, by writing the flag through a
+    // computed name so the literal token never appears — `printf -v "${_fn}migration"`,
+    // `read -r "${_fn}migration"`, `declare "${_fn}migration=0"`, and a helper taking the name
+    // as an argument. Each was confirmed to really zero the flag, not merely to pass the test.
+    // What actually closes those is the WHITELIST in the ordering test below, which requires the
+    // gap between the loop and the call to be comments only. This assertion's real job is
+    // narrower: catching a write to the flag ELSEWHERE in the file, outside that gap.
     const installer = readRepositoryFile("scripts/install_macos_app.sh");
     const uses = installer
       .split("\n")
@@ -476,15 +483,55 @@ describe("designated-requirement identity-migration guard", () => {
     expect(initialize).toBeLessThan(raise);
     expect(loopEnd).toBeLessThan(call);
 
-    // And nothing in the gap may stub the guard out. `eval` is called out by name because
-    // `eval 'recordings_enforce_identity_migration() { return 0; }'` evades the
-    // `starts.length` count above: that filter uses `startsWith`, and the line starts with
-    // `eval`, so the stub is never counted as an invocation.
-    const between = lines.slice(loopEnd + 1, call).join("\n");
-    expect(between).not.toMatch(/\beval\b/);
+    // The gap between the loop and the call is a WHITELIST: comments and blank lines only.
+    //
+    // This started as a denylist -- `not.toMatch(/\beval\b/)` plus an enumeration of assignment
+    // shapes -- and an adversarial review took it apart. Every one of these zeroes the flag or
+    // stubs the guard between the loop and the call, and every one passed at EXIT=0 because it
+    // never writes the literal token `identity_migration` and never uses `eval`:
+    //
+    //   _fn=identity_; printf -v "${_fn}migration" '%s' 0
+    //   _fn=identity_; read -r "${_fn}migration" <<<0
+    //   _fn=identity_; declare "${_fn}migration=0"
+    //   _zero_it() { printf -v "$1" '%s' 0; }; _x=migration; _zero_it "identity_${_x}"
+    //
+    // And worst, at EXIT=0 with 29 pass / 0 fail: wrapping the call in a never-called function,
+    // the nine lines byte-identical, so the guard is DEFINED and never EXECUTED --
+    //
+    //   _recordings_gate() {
+    //   recordings_enforce_identity_migration \
+    //     ... || exit 1
+    //   }
+    //
+    // Every one of those needs at least one non-comment line in this gap. A whitelist does not
+    // have to anticipate the shape; a denylist does, and mine did not anticipate any of the five.
+    const between = lines.slice(loopEnd + 1, call);
+    const executable = between.filter((line) => line.trim() !== "" && !line.trimStart().startsWith("#"));
+    expect(
+      executable,
+      "nothing may execute between the comparison loop and the guard call: the guard must read " +
+        "the flag the loop just finished computing, and must not be wrapped, stubbed or preceded " +
+        "by a write to the flag",
+    ).toEqual([]);
+
+    // A wrapper could still be opened BEFORE the flag's initialization, taking the loop and the
+    // call together. No function may be declared across that region.
+    const enclosing = lines
+      .slice(initialize, call)
+      .filter((line) => /^\s*(?:function\s+\w+|[A-Za-z_]\w*\s*\(\s*\))\s*\{?\s*$/.test(line));
+    expect(
+      enclosing,
+      "no function may be declared between the flag's initialization and the guard call",
+    ).toEqual([]);
+
+    // The installer sources the packaged guard; it must not define or eval its own.
     expect(installer).not.toMatch(/\beval\b[^\n]*recordings_enforce_identity_migration/);
-    // The installer sources the packaged guard; it must not define its own.
     expect(installer).not.toMatch(/recordings_enforce_identity_migration\s*\(\s*\)\s*\{/);
+
+    // BOUND, stated because the assertions above are text and position, not execution: none of
+    // this runs the script. A wrapper opened far enough from this region, or a `return` inserted
+    // upstream, is not visible here. The only test that would actually execute the invocation is
+    // in macos-app-lifecycle.test.ts, 92 of 140 red on Linux, which cannot gate anything.
   });
 
   // A gate whose only escape hatch is undiscoverable is an outage, not a safeguard. This
