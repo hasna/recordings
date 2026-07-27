@@ -727,14 +727,97 @@ describe("recordings CLI", () => {
       legacy_install_paths: string[];
       microphone_permission: string;
       accessibility_permission: string;
+      ambiguous_installations: boolean;
     };
     expect(status.installed_app_path).toBe(canonical);
     expect(status.installed).toBe(true);
     expect(status.executable).toBe(true);
     expect(status.legacy_install_paths).toContain(hiddenLegacy);
     expect(status.legacy_install_paths).toContain(rollbackLegacy);
-    expect(status.microphone_permission).toBe("ambiguous_multiple_installations");
-    expect(status.accessibility_permission).toBe("ambiguous_multiple_installations");
+
+    // Duplicate installs are disclosed as a separate flag. They used to REPLACE both permission
+    // states with "ambiguous_multiple_installations", which threw away the one fact the operator
+    // needed — so ambiguity is now reported alongside the answer, never instead of it.
+    expect(status.ambiguous_installations).toBe(true);
+    expect(status.microphone_permission).not.toBe("ambiguous_multiple_installations");
+    expect(status.accessibility_permission).not.toBe("ambiguous_multiple_installations");
+    if (process.platform !== "darwin") {
+      expect(status.microphone_permission).toBe("unsupported");
+      expect(status.accessibility_permission).toBe("unsupported");
+    }
+  });
+
+  test("duplicate installs are still flagged when the canonical path is absent", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-app-ambiguous-${Date.now()}`);
+    tempDirs.push(home);
+    // No canonical bundle at all — the case that previously suppressed the flag, letting a
+    // bundle nobody named answer for the grant holder in silence.
+    const hiddenLegacy = join(home, ".hasna", "recordings", "Recordings.app");
+    const rollbackLegacy = join(home, "Applications", "Recordings.app.prev");
+    mkdirSync(join(hiddenLegacy, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(hiddenLegacy, "Contents", "MacOS", "Recordings"), "fixture");
+    mkdirSync(rollbackLegacy, { recursive: true });
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "app", "status"],
+      { cwd: process.cwd(), env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const status = JSON.parse(stdout) as {
+      installed_app_path: string;
+      installed: boolean;
+      ambiguous_installations: boolean;
+    };
+
+    expect(status.ambiguous_installations).toBe(true);
+    // And it reports on a bundle that actually exists rather than the absent canonical path.
+    expect(status.installed_app_path).toBe(hiddenLegacy);
+    expect(status.installed).toBe(true);
+  });
+
+  test("with nothing installed no permission state reads as allowed and --json carries the warnings", async () => {
+    const home = join(tmpdir(), `open-recordings-cli-app-empty-${Date.now()}`);
+    tempDirs.push(home);
+    mkdirSync(home, { recursive: true });
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli/index.ts", "--json", "app", "permissions"],
+      { cwd: process.cwd(), env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const permissions = JSON.parse(stdout) as {
+      installed: boolean;
+      microphone: string;
+      accessibility: string;
+      permission_subject: string;
+      warnings: string[];
+    };
+
+    expect(permissions.installed).toBeFalse();
+    // Nothing installed must never produce a string beginning "allowed" — neither a human skim
+    // nor a `grep allowed` over this output may read it as a pass.
+    expect(permissions.microphone.startsWith("allowed")).toBeFalse();
+    expect(permissions.accessibility.startsWith("allowed")).toBeFalse();
+    // `--json` used to return before every warning, leaving machine consumers no signal at all.
+    if (process.platform === "darwin") {
+      expect(permissions.microphone).toBe("unverified_no_installed_bundle");
+      expect(permissions.permission_subject).toContain("no installed bundle");
+      expect(permissions.warnings.join(" ")).toContain("no app bundle exists");
+    }
   });
 
   test("app status never treats a CDHash substring as permission identity proof", () => {
@@ -753,10 +836,21 @@ describe("recordings CLI", () => {
     // The bundle actually on disk is what gets reported on. Pinning the canonical path meant
     // that wherever the app was installed elsewhere, every answer described a bundle that did
     // not exist and the real grants were never read.
-    expect(cli).toContain("existsSync(canonicalAppPath)");
-    // Ambiguity is a warning about which bundle answered, never a replacement for the answer.
+    expect(cli).toContain("function resolveInstalledAppPath");
+    expect(cli).toContain("resolveInstalledAppPath(home, canonicalAppPath, legacyInstallPaths)");
+    // Bundle choice must not be lexicographic: sorting let /Applications answer for a grant
+    // held by the bundle in ~/.hasna/recordings.
+    expect(cli).not.toContain("legacyInstallPaths[0] ?? canonicalAppPath");
+    // A grant is only reported for a bundle that exists; otherwise the service is passed null.
+    expect(cli).toContain("installedAppPathForGrants");
+    // Ambiguity is a warning about which bundle answered, never a replacement for the answer,
+    // and it must fire even when the canonical path is absent.
     expect(cli).not.toContain('?? getTccPermission(');
     expect(cli).not.toContain('"ambiguous_multiple_installations"');
+    expect(cli).not.toContain("installedAppPath === canonicalAppPath");
+    // Text output and --json share one warning builder so they cannot drift apart.
+    expect(cli).toContain("function buildPermissionWarnings");
+    expect(cli).toContain("warnings: buildPermissionWarnings(status)");
 
     // A grant-destroying tool is never resolved through PATH: `security` on a Hasna station
     // already resolves to a shadowing CLI ahead of /usr/bin.

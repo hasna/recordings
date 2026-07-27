@@ -174,10 +174,11 @@ export function verifyStoredRequirementWithCodesign(
 const defaultTccPermissionProbe: TccPermissionProbe = {
   databaseExists: existsSync,
   readAccessRow: (dbPath, service) => {
-    // Both columns need ifnull: concatenating a NULL in SQLite yields NULL, which would arrive
-    // as empty stdout and be read as "no row" — reporting "never asked" for a row that exists.
-    // client_type = 0 pins bundle-identifier rows; client_type = 1 rows key on absolute paths
-    // and would never match this identifier.
+    // `auth_value` is INTEGER NOT NULL on a real TCC db, so its ifnull is belt-and-braces for a
+    // synthetic or corrupt file; `csreq` is the genuinely nullable column. Without the guards a
+    // NULL anywhere makes the whole concatenation NULL, which arrives as empty stdout and reads
+    // as "no row" — "never asked" for a row that exists. client_type = 0 pins
+    // bundle-identifier rows; client_type = 1 rows key on absolute paths.
     const sql =
       "select ifnull(auth_value, '') || '|' || ifnull(hex(csreq), '') from access where service = '" +
       service.replace(/'/g, "''") +
@@ -300,7 +301,13 @@ export function resolveTccGrant(options: {
       adHocSigned: false,
     });
 
-    const label = tccAuthValueLabel(row.authValue.trim());
+    // An empty decision is not a decision. Returning `unknown()` here would stop the search on
+    // a row that says nothing and print bare empty parens at an operator, while a real grant may
+    // sit in the next database — so keep looking, exactly as a missing row does.
+    const authValue = row.authValue.trim();
+    if (authValue.length === 0) continue;
+
+    const label = tccAuthValueLabel(authValue);
     if (label !== "allowed") {
       return { state: label as TccAuthorizationState, storedRequirement, durability };
     }

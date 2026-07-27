@@ -1013,6 +1013,9 @@ appCommand
       platform: status.platform,
       bundle_id: RECORDINGS_BUNDLE_IDENTIFIER,
       installed_app_path: status.installed_app_path,
+      // A machine consumer needs the same caveats the text output prints, or it reads the
+      // states below as describing installed code that may not exist.
+      installed: status.installed,
       legacy_install_paths: status.legacy_install_paths,
       // The grants below belong to this bundle, not to the terminal running this command.
       permission_subject: describeTccAuthorizationSubject(status.installed_app_path),
@@ -1029,6 +1032,8 @@ appCommand
       microphone_stored_requirement: status.microphone_stored_requirement,
       accessibility_stored_requirement: status.accessibility_stored_requirement,
       ambiguous_installations: status.ambiguous_installations,
+      // The same conditions the text output warns about, as data rather than prose.
+      warnings: buildPermissionWarnings(status),
       log_path: status.log_path,
     };
     if (program.opts().json) {
@@ -1040,45 +1045,8 @@ appCommand
     console.log(
       `Accessibility: ${permissions.accessibility} (${permissions.accessibility_grant_durability})`,
     );
-    if (!status.installed) {
-      console.log(
-        chalk.yellow(
-          `Warning: no app bundle exists at ${permissions.installed_app_path}, so the states `
-            + "above describe no running code. Install the app before trusting them.",
-        ),
-      );
-    }
-    if (permissions.ambiguous_installations) {
-      console.log(
-        chalk.yellow(
-          "Warning: more than one Recordings.app is installed. The states above describe "
-            + `${permissions.installed_app_path}; the others are: ${permissions.legacy_install_paths.join(", ")}`,
-        ),
-      );
-    }
-    for (const [service, durability] of [
-      ["Microphone", permissions.microphone_grant_durability],
-      ["Accessibility", permissions.accessibility_grant_durability],
-    ] as const) {
-      if (durability === "dies_on_rebuild_cdhash_pinned") {
-        console.log(
-          chalk.yellow(
-            `Warning: the ${service} grant is pinned to one exact build, so the next rebuild `
-              + "will silently revoke it. Re-sign with a stable certificate identity to keep it.",
-          ),
-        );
-      }
-    }
-    if (
-      permissions.microphone === "undetermined_tcc_database_unreadable"
-      || permissions.accessibility === "undetermined_tcc_database_unreadable"
-    ) {
-      console.log(
-        chalk.yellow(
-          "Warning: the system TCC database could not be read, so a state above is unknown "
-            + "rather than ungranted. Reading it requires Full Disk Access.",
-        ),
-      );
+    for (const warning of permissions.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
     }
     console.log(`Log: ${permissions.log_path}`);
   });
@@ -2081,9 +2049,11 @@ function getMacOSAppStatus(): MacOSAppStatus {
   // Report on the bundle that is actually on disk. Pinning the canonical path meant that on a
   // machine where the app lives anywhere else, every permission answer described a bundle that
   // did not exist — so the grants of the bundle actually holding them were never examined.
-  const installedAppPath = existsSync(canonicalAppPath)
-    ? canonicalAppPath
-    : (legacyInstallPaths[0] ?? canonicalAppPath);
+  const installedAppPath = resolveInstalledAppPath(home, canonicalAppPath, legacyInstallPaths);
+  // A grant belongs to a bundle, so a state can only be reported for one that exists. Passing
+  // a path that is not there produced `allowed_identity_unverified` — an "allowed" string for
+  // a machine with nothing installed.
+  const installedAppPathForGrants = existsSync(installedAppPath) ? installedAppPath : null;
   const executablePath = pathJoin(installedAppPath, "Contents", "MacOS", "Recordings");
   const logPath = pathJoin(home, ".hasna", "recordings", "Recordings.log");
   const installerPath = getMacOSInstallerPath(packageRoot);
@@ -2091,11 +2061,16 @@ function getMacOSAppStatus(): MacOSAppStatus {
   const signingInfo = getCodeSigningInfo(installedAppPath);
   // Ambiguity is a warning about WHICH bundle answered, not a substitute for the answer.
   // Replacing the permission state with it discarded the one fact the operator needed.
-  const ambiguousInstallations = legacyInstallPaths.length > 0
-    && installedAppPath === canonicalAppPath
-    && existsSync(canonicalAppPath);
-  const microphoneGrant = getTccGrant("kTCCServiceMicrophone", home, installedAppPath);
-  const accessibilityGrant = getTccGrant("kTCCServiceAccessibility", home, installedAppPath);
+  // It must be flagged whenever more than one bundle exists — especially when the canonical
+  // path is absent, which is exactly when the answer comes from a bundle nobody named.
+  const ambiguousInstallations =
+    [canonicalAppPath, ...legacyInstallPaths].filter((path) => existsSync(path)).length > 1;
+  const microphoneGrant = getTccGrant("kTCCServiceMicrophone", home, installedAppPathForGrants);
+  const accessibilityGrant = getTccGrant(
+    "kTCCServiceAccessibility",
+    home,
+    installedAppPathForGrants,
+  );
 
   return {
     platform: process.platform,
@@ -2124,6 +2099,76 @@ function getMacOSAppStatus(): MacOSAppStatus {
     accessibility_stored_requirement: accessibilityGrant.storedRequirement,
     log_path: logPath,
   };
+}
+
+/// Every caveat that qualifies a reported permission state, built once so the text output and
+/// `--json` cannot drift apart. `--json` consumers previously received none of these.
+function buildPermissionWarnings(status: MacOSAppStatus): string[] {
+  const warnings: string[] = [];
+  if (status.platform !== "darwin") return warnings;
+
+  if (!status.installed) {
+    warnings.push(
+      `no app bundle exists at ${status.installed_app_path}, so the states above describe no `
+        + "installed code — install the app before trusting them",
+    );
+  }
+  if (status.ambiguous_installations) {
+    warnings.push(
+      "more than one Recordings.app is installed, so the states above may describe a bundle "
+        + `other than the one macOS granted: reporting on ${status.installed_app_path}, also `
+        + `present are ${status.legacy_install_paths.join(", ")}`,
+    );
+  }
+  for (const [service, durability] of [
+    ["Microphone", status.microphone_grant_durability],
+    ["Accessibility", status.accessibility_grant_durability],
+  ] as const) {
+    if (durability === "dies_on_rebuild_cdhash_pinned") {
+      warnings.push(
+        `the ${service} grant is pinned to one exact build, so the next rebuild will silently `
+          + "revoke it — re-sign with a stable certificate identity to keep it",
+      );
+    }
+  }
+  for (const [service, state] of [
+    ["Microphone", status.microphone_permission],
+    ["Accessibility", status.accessibility_permission],
+  ] as const) {
+    if (state === "undetermined_tcc_database_unreadable") {
+      warnings.push(
+        `the TCC database holding the ${service} decision could not be read, so that state is `
+          + "unknown rather than ungranted — the usual cause is that this process lacks Full "
+          + "Disk Access",
+      );
+    }
+  }
+  return warnings;
+}
+
+/// Picks the bundle to report on when the canonical install is absent.
+///
+/// The order is deliberate rather than lexicographic: sorting picked whichever path sorted
+/// first, so `/Applications/Recordings.app` could silently answer for a grant held by the
+/// bundle in `~/.hasna/recordings`. Preference follows the installer's own policy —
+/// `install_macos_app.sh` installs to `$HOME/Applications` and classifies the
+/// `~/.hasna/recordings` copy as a duplicate to archive — so a real install location wins over
+/// one the installer treats as stale. Callers must still surface `ambiguous_installations`:
+/// this returns a defensible choice, not a certainty.
+function resolveInstalledAppPath(
+  home: string,
+  canonicalPath: string,
+  legacyPaths: string[],
+): string {
+  const preference = [
+    canonicalPath,
+    pathJoin("/", "Applications", "Recordings.app"),
+    pathJoin(home, ".hasna", "recordings", "Recordings.app"),
+  ];
+  for (const candidate of preference) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return legacyPaths.find((candidate) => existsSync(candidate)) ?? canonicalPath;
 }
 
 function findLegacyMacOSAppPaths(home: string, canonicalPath: string): string[] {
