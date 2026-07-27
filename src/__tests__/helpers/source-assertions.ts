@@ -14,36 +14,69 @@ import { join } from "node:path";
  * none of it, reads exactly like a satisfied one.
  *
  * ---------------------------------------------------------------------------------------------
- * BEFORE YOU BUILD A MUTATION BATTERY: three suites are PERMANENTLY RED on Linux.
+ * BEFORE YOU BUILD A MUTATION BATTERY: three suites are RED ON A CONTENDED STATION, not on Linux.
  *
- * A mutation battery is evidence only when its clean control is GREEN. Include any of these and
- * the run was already non-zero before you changed anything, so every mutation "looks caught" and
- * every verdict is manufactured. This already produced one wrong all-clear in this repo, and the
- * list in circulation named TWO of the three.
+ * A mutation battery is evidence only when its clean control is GREEN. Include a suite that was
+ * already failing and the run was non-zero before you changed anything, so every mutation "looks
+ * caught" and every verdict is manufactured. That already produced one wrong all-clear here.
  *
- *   src/__tests__/macos-app-lifecycle.test.ts             EXIT 1,  49 pass /  91 fail
- *   src/__tests__/native-app-companion-contract.test.ts   EXIT 1,  13 pass /   1 fail
- *   src/__tests__/config.test.ts                          EXIT 1,  43 pass /   1 fail
+ * These are the three suites it happens to. NO PASS/FAIL SPLIT IS RECORDED FOR THEM ON PURPOSE —
+ * see below. `macos-app-lifecycle.test.ts` has 140 tests, `native-app-companion-contract.test.ts`
+ * has 14, `config.test.ts` has 44, and how many of those fail is a property of the MACHINE:
  *
- * The first file's SPLIT drifts and the earlier version of this comment stated it as fixed. It was
- * recorded here as 48/91+1 and measures 49/91 now, deterministically 3 of 3 runs, because one timing
- * test (`runtime smoke timeout does not wait forever on a live open process`) sits on the margin and
- * flips with load. The TOTAL of red files is stable; the per-file split is not. This is the concrete
- * reason for the rule below: compare failing test NAMES, never counts. A count comparison across two
- * trees will show a phantom delta from this file alone.
+ *   src/__tests__/macos-app-lifecycle.test.ts
+ *   src/__tests__/native-app-companion-contract.test.ts
+ *   src/__tests__/config.test.ts
  *
- * Measured deterministically, 3 of 3 runs each, on `main` at 40c37b1 with
- * `bun install --frozen-lockfile`. Causes are environmental, not defects in the code under test:
- * BSD `stat -f` plus hardcoded macOS tool paths, a fixture server port reading `NaN`, and a
- * `getDataDir` HOME-ancestor assumption respectively.
+ * CORRECTED 2026-07-27, and the correction is the useful part. This block used to call them
+ * "PERMANENTLY RED on Linux" and attribute fixed environmental causes — BSD `stat -f`, a fixture
+ * port reading `NaN`, a `getDataDir` HOME-ancestor assumption. The first CI run this repository
+ * ever had (run 30302342895, ubuntu-24.04) re-ran all three on a clean single-tenant runner and
+ * every one of them PASSED:
+ *
+ *   macos-app-lifecycle            140 pass / 0 fail   (358.85s)
+ *   native-app-companion-contract   14 pass / 0 fail   (  4.50s)
+ *   config                          44 pass / 0 fail   (  0.10s)
+ *
+ * So the cause is not the platform. Measure on a quiet machine, or in CI, before recording a suite
+ * as red. There are TWO independent station-local causes, and every earlier version of this comment
+ * named only one of them. In a 92-fail run of `macos-app-lifecycle.test.ts` on this station the
+ * failure messages break down as 38 × `Home ancestor has an unexpected owner.`, 22 × FIFO
+ * synchronisation timeout, 24 × ENOENT on a fixture marker:
+ *
+ *   1. `FORCE_COLOR`. The fixture's `stat` stub answers `%u` by shelling out to
+ *      `bun -e '… console.log(statSync(…).uid)'` (`macos-app-lifecycle.test.ts:217`) and spreads
+ *      `...Bun.env` into the installer, so with `FORCE_COLOR` set Bun COLOURS the number. The
+ *      installer then compares `\e[0m\e[33m1000\e[0m` against `id -u`'s `1000` at
+ *      `install_macos_app.sh:143` and aborts before reaching any gate. `env -u FORCE_COLOR` takes
+ *      that message from 38 to 0, positive-controlled. `NO_COLOR=1` does NOT help — FORCE_COLOR
+ *      wins in Bun. Nothing about ancestor MODE is involved: `verify_secure_parent` and
+ *      `verify_safe_home_ancestor` each `stat` only the one path handed to them, the sole call is
+ *      `verify_safe_home_ancestor "$HOME"`, and the stub hardcodes every `%Lp` answer anyway.
+ *   2. CONTENTION. The station routinely runs several full recordings suites at once out of
+ *      different worktrees, and this suite scans a shared /tmp — the hazard this very comment warns
+ *      about below. Those are the FIFO timeouts, at an internal 5000ms budget that no `--timeout`
+ *      flag reaches. With `FORCE_COLOR` unset the residual failures are all timing-shaped and scale
+ *      with load: 8 at load ~20, over 21 at load ~60. GitHub Actions sets neither `FORCE_COLOR` nor
+ *      a competing suite, which is why both causes were absent from the only clean measurement.
+ *
+ * WHY NO SPLIT IS RECORDED. Every split ever written here has gone stale, including two written as
+ * corrections. On one unchanged tree, three consecutive runs measured 48/92, 48/92, 49/91; the
+ * single test that flips is `runtime smoke timeout does not wait forever on a live open process`
+ * (`macos-app-lifecycle.test.ts:3594`), which races a hardcoded internal `Bun.sleep(2_000)` that no
+ * `--timeout` flag reaches either. So a count comparison across two trees shows a phantom delta
+ * from this file alone — which is the concrete reason for the rule below: compare failing test
+ * NAMES, never counts. Two trees whose failing NAME SETS are identical are identical regardless of
+ * what the totals say.
  *
  * `@hasna/events` MUST resolve 0.1.11, as `bun.lock` pins it. A plain `bun install` pulls 0.1.14,
  * which dropped a shipped CLI command inside the patch range and fails `cli.test.ts` — and it can
  * drift back mid-session, so re-check it before quoting any cross-tree comparison.
  *
- * Corollary, equally load-bearing: this repo has NO CI. There is no `.github/workflows/`, and
- * `bun test` on `main` is EXIT 1 (94 failing tests), so `prepublishOnly = typecheck && test`
- * cannot pass on this platform either. Nothing gates these suites except somebody running them.
+ * Corollary, also corrected: this repo NOW HAS CI. `.github/workflows/ci.yml` gates the whole
+ * suite with no exemptions on every pull request, so these suites are no longer gated only by
+ * somebody remembering to run them. What CI does NOT cover is the Swift/C half, which does not
+ * currently compile; see `.github/native-known-errors.txt`.
  * Compare failing test NAMES, never counts — the suite is nondeterministic at the margin.
  * ---------------------------------------------------------------------------------------------
  */

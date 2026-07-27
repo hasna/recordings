@@ -20,10 +20,21 @@ const repositoryRoot = resolve(import.meta.dir, "../../..");
 /// that SHOULD survive because it really does execute -- a bare `{ ... }` group.
 /// Reachability is a property of running, so this runs it.
 ///
-/// The fixture root lives under the real `$HOME`, never under `/tmp`: `/tmp` is mode 1777
-/// on Linux and the installer's `verify_secure_parent` / `verify_safe_home_ancestor`
-/// correctly refuse a world-writable ancestor. That single detail is why the full
-/// `macos-app-lifecycle.test.ts` fixtures are red here and cannot gate anything.
+/// The fixture root lives under the real `$HOME`, never under `/tmp`. WITHDRAWN 2026-07-28:
+/// this comment used to explain that as `/tmp` being mode 1777 while
+/// `verify_secure_parent` / `verify_safe_home_ancestor` refuse a world-writable ancestor,
+/// and to call it "that single detail is why the full `macos-app-lifecycle.test.ts`
+/// fixtures are red here". BOTH HALVES WERE FALSE. Neither function inspects an ancestor —
+/// each `stat`s exactly the one path it is handed (`install_macos_app.sh:558-581`, `:600-622`),
+/// the sole call is `verify_safe_home_ancestor "$HOME"` at `:648`, and `/tmp`'s mode is never
+/// examined by the installer at all. The lifecycle fixture also hardcodes every `%Lp` answer in
+/// its `stat` stub, so no mode check can fail there under any root. For what does make that
+/// suite red on this station — `FORCE_COLOR` and /tmp contention, measured — see the block at
+/// the top of `helpers/source-assertions.ts`; it is not a property of the file.
+///
+/// Keeping the root under `$HOME` is still load-bearing, for a different reason: the `mktemp`
+/// stub rewrites EVERY `/tmp/…` template into the work root, not only the installer's one
+/// template, so re-rooting under `/tmp` still breaks. Do not "simplify" that away.
 ///
 /// The macOS-only tool set is stubbed and every tool whose OUTPUT the installer consumes
 /// stays real. Nothing outside the fixture root is read or written, and the guard is

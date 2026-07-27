@@ -466,7 +466,11 @@ describe("designated-requirement identity-migration guard", () => {
     // the install proceeds and voids the grants. It is a plausible refactor ("gate earlier,
     // fail fast"), and before this assertion existed the only things that could catch it were
     // a human noticing the orphaned comment left behind, or macos-app-lifecycle.test.ts --
-    // which is 92 of 140 red on `main` on Linux and cannot serve as a gate. The execution
+    // which is red on a CONTENDED STATION and so cannot serve as a gate there. No count is
+    // quoted deliberately: this comment said "92 of 140 red on `main` on Linux", and both
+    // halves drifted -- the same tree measures 48/92 and 49/91 on consecutive runs, and the
+    // suite is 140/0 on a clean CI runner. See the block at the top of
+    // helpers/source-assertions.ts. The execution
     // block at the end of this file now catches it independently, by observing that a run
     // with the flag raised is not refused.
     const installer = readRepositoryFile("scripts/install_macos_app.sh");
