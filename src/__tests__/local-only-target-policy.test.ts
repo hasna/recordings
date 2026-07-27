@@ -81,8 +81,31 @@ printf 'LIST=%s\\nMATCHED=%s\\n' "$LIST" "$MATCHED"
     ok: result.exitCode === 0,
     matched: /^MATCHED=1$/m.test(stdout),
     list: stdout.match(/^LIST=(.*)$/m)?.[1] ?? "",
-    stderr: result.stderr.toString(),
+    stderr: withoutSetlocaleWarnings(result.stderr.toString()),
   };
+}
+
+/**
+ * Drops bash's own `warning: setlocale:` lines from a captured stderr.
+ *
+ * The hostile-locale test asks for `LC_ALL=en_US.UTF-8`. On a machine where that locale is
+ * not installed — a slim CI image, or `Dockerfile.package`'s `oven/bun:*-alpine`, where musl
+ * has no glibc locales at all — bash cannot honour it and writes
+ * `bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)` to the very stderr
+ * this suite compares against the TypeScript reader byte for byte. That turned CORRECT code
+ * RED, and it did so with a message that reads like a reader divergence, which is the exact
+ * confusion this contract exists to end. bash emits it a second time when the function-local
+ * `LC_ALL` goes out of scope, so a single-line filter is not enough.
+ *
+ * This only ever removes bash's own diagnostics. Both readers prefix every message they own
+ * with "Local-only approved target policy", so no reader output can be swallowed here — and a
+ * policy that produced NO reader message would still fail the `not.toBe("")` assertion.
+ */
+function withoutSetlocaleWarnings(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter((line) => !/warning: setlocale/.test(line))
+    .join("\n");
 }
 
 function shellReaderVerdict(
@@ -106,19 +129,28 @@ function typeScriptReaderVerdict(
   }
 }
 
-/// Both readers print the same sentences with different capitalisation, so compare them
-/// case-insensitively and without trailing punctuation.
+/// Both readers print the same sentences with a different LEADING capital ("Local-only …"
+/// from the shell, "local-only …" from TypeScript), so fold that one character and compare
+/// everything after it exactly, without trailing punctuation.
 ///
 /// Deliberately NOT String.trim(): trim() strips U+000B, U+000C, U+00A0 and U+FEFF, which
 /// are precisely the characters this contract is about. Both readers echo the offending
 /// target name back in the message, so trim() here would silently normalise away a
 /// difference confined to that name's trailing bytes — the comparison would report
 /// agreement it had not checked. ASCII space and tab only, same rule as the readers.
+///
+/// And deliberately NOT String.toLowerCase(), for the same reason one step further. The
+/// echoed target name is the only variable part of these messages, and CASE is the very axis
+/// of the locale finding this suite exists to pin — a blanket toLowerCase() made
+/// "…invalid target name: STATION03" and "…invalid target name: station03" compare EQUAL, so
+/// a reader that upper-cased the name it echoed went undetected and the test called
+/// "byte-exact" was not comparing bytes. Only the first character is folded, which is the
+/// only place the two readers legitimately differ.
 const normalizeReaderMessage = (message: string): string =>
   message
     .replace(/\n$/, "")
     .replace(/^[\t ]+|[\t ]+$/g, "")
-    .toLowerCase()
+    .replace(/^(.)/, (first) => first.toLowerCase())
     .replace(/\.$/, "");
 
 describe("local-only approved target policy", () => {
@@ -374,9 +406,12 @@ describe("local-only approved target policy", () => {
     // TypeScript reader rejects it unconditionally. Build gate open, install validator
     // closed: this PR's entire failure mode.
     //
-    // bash >= 4.3 masks that with the `globasciiranges` shopt, ON by default, which forces
-    // ASCII range semantics whatever the locale. macOS ships /bin/bash 3.2.57, which has no
-    // such option, and src/native/Recordings/build.sh is `#!/bin/bash` and exports no
+    // The `globasciiranges` shopt forces ASCII range semantics whatever the locale, and it is
+    // what hides this on this box. Which bash matters, and the obvious summary is wrong: per
+    // bash's NEWS the option was INTRODUCED in 4.3 (§4.3 e.) but only became ENABLED BY
+    // DEFAULT in 5.0 (§5.0 hh.) — so 4.3 and 4.4 are exposed just as 3.2 is. macOS ships
+    // /bin/bash 3.2.57, which has no such option at all,
+    // and src/native/Recordings/build.sh is `#!/bin/bash` and exports no
     // locale of its own — so on the Mac that actually builds artifacts, the reader's
     // function-local pin is the only thing between the caller's LANG and the allowlist.
     // `shopt -u globasciiranges` reproduces those pre-4.3 semantics on the bash we have.
@@ -387,21 +422,45 @@ describe("local-only approved target policy", () => {
       preamble: "shopt -u globasciiranges",
       env: { LC_ALL: "en_US.UTF-8", LANG: "en_US.UTF-8" },
     };
-    const uppercase = "STATION07\n";
+    // One input is not the hole; the hole is a CLASS. A change that special-cased uppercase
+    // while deleting the pin would keep a STATION07-only test green, so the corpus spans the
+    // range behaviours that actually differ under collation:
+    //   * "STATION07" — the reported case: A-Y interleave into `[a-z]`.
+    //   * "Station03" — uppercase away from the range endpoints.
+    //   * "stationé"  — NON-ASCII, and the reason this list is not "the uppercase test".
+    //                   Collated `[a-z0-9-]` admits it; the TypeScript regex never does.
+    //   * "ZEBRA07"   — `Z` does NOT collate into `[a-z]` the way A-Y do. Pinning the
+    //                   asymmetry stops someone "simplifying" the corpus to one endpoint.
+    const hostileTargets = ["STATION07", "Station03", "stationé", "ZEBRA07"];
 
-    const shell = withPolicyFile(uppercase, (path) =>
-      shellReaderVerdictAtPath(path, "STATION07", hostile),
-    );
-    expect(shell.ok).toBeFalse();
-    expect(shell.matched).toBeFalse();
-    expect(shell.stderr).toContain("invalid target name");
+    // Collected rather than asserted in the loop so a regression names the exact target and
+    // the exact property, instead of failing on whichever one happens to run first.
+    const observed = hostileTargets.map((target) => {
+      const policy = `${target}\n`;
+      const shell = withPolicyFile(policy, (path) =>
+        shellReaderVerdictAtPath(path, target, hostile),
+      );
+      // The TypeScript reader has no locale to pin, so it is the fixed reference: whatever
+      // the shell does under a hostile locale, it must match this.
+      const typeScript = withPolicyFile(policy, (path) => typeScriptReaderVerdict(path));
+      return {
+        target,
+        shellRefused: !shell.ok && !shell.matched,
+        shellSaysInvalidName: shell.stderr.includes("invalid target name"),
+        typeScriptRefused: !typeScript.ok,
+        readersAgree:
+          normalizeReaderMessage(typeScript.message) === normalizeReaderMessage(shell.stderr),
+      };
+    });
 
-    // The TypeScript reader has no locale to pin, so it is the fixed reference: whatever
-    // the shell does under a hostile locale, it must match this.
-    const typeScript = withPolicyFile(uppercase, (path) => typeScriptReaderVerdict(path));
-    expect(typeScript.ok).toBeFalse();
-    expect(normalizeReaderMessage(typeScript.message)).toBe(
-      normalizeReaderMessage(shell.stderr),
+    expect(observed).toEqual(
+      hostileTargets.map((target) => ({
+        target,
+        shellRefused: true,
+        shellSaysInvalidName: true,
+        typeScriptRefused: true,
+        readersAgree: true,
+      })),
     );
 
     // A legitimate policy must still parse identically under the same hostile locale, so
@@ -412,7 +471,11 @@ describe("local-only approved target policy", () => {
     expect(legitimate.ok).toBeTrue();
     expect(legitimate.matched).toBeTrue();
     expect(legitimate.list).toBe("station03, station06");
-  });
+    // Same 120 s budget as the eight other subprocess-spawning tests in this file. This one
+    // spawns bash three times and measured 163-283 ms at loadavg 66-87, so the headroom is
+    // ~20x — but bun's 5 s default aborts under load and reports `Received: ""`, which reads
+    // exactly like a reader divergence. This box has been at loadavg 161 today.
+  }, 120_000);
 
   test("both readers refuse a symlinked policy instead of following it", () => {
     // The chosen semantics is REJECT in both, and the direction matters: `[ -L ]` already
@@ -443,7 +506,7 @@ describe("local-only approved target policy", () => {
       expect(localOnlyApprovedTargets(target)).toContain("attacker");
       expect(shellReaderVerdictAtPath(target, "attacker").matched).toBeTrue();
     });
-  });
+  }, 120_000);
 
   test("refusing symlinks applies to the policy file itself, not to symlinked ancestors", () => {
     // The granularity is the whole point of the previous test being safe to ship. `[ -L ]`
@@ -486,7 +549,7 @@ describe("local-only approved target policy", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
   test("the shell reader does not silently succeed when the requested target is last", () => {
     // A trailing `&& VAR=1` inside the loop makes the compound return non-zero under
@@ -500,7 +563,7 @@ describe("local-only approved target policy", () => {
     const unapproved = shellReaderVerdict("station03\nstation06\n", "station05");
     expect(unapproved.ok).toBeTrue();
     expect(unapproved.matched).toBeFalse();
-  });
+  }, 120_000);
 
   test("the shell reader rejects a missing, symlinked, or non-regular policy", () => {
     // This test's name promised symlink coverage and asserted only the missing case, so
@@ -555,7 +618,7 @@ describe("local-only approved target policy", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
   // The installer's own gate, actually executed. The macOS-only tool set is stubbed
   // and HOME is placed outside the world-writable /tmp that makes the existing
