@@ -405,6 +405,56 @@ describe("a trigger write that the running app will not pick up", () => {
     expect(pickup.armed).toBe(false);
     expect(pickup.runningBundlePaths).toEqual(["/Applications/Recordings.app"]);
   });
+
+  /**
+   * Through the real CLI, because the whole defect was in the exit code:
+   * `recordings shortcut --fn on && echo armed` printed "armed" while the warning above it
+   * said the trigger was not armed.
+   */
+  test("recordings shortcut exits non-zero when it writes while an instance runs", () => {
+    const home = scratchHome("pickup");
+    const bundle = join(home, "Applications", "Recordings.app");
+    mkdirSync(join(bundle, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(bundle, "Contents", "Info.plist"), "<plist/>");
+
+    const writesPath = join(home, "writes.txt");
+    const defaultsPath = join(home, "fake-defaults");
+    writeFileSync(
+      defaultsPath,
+      `#!/bin/sh
+if [ "$1" = write ]; then
+  printf '%s\\n' "$*" >> "${writesPath}"
+  exit 0
+fi
+[ "$1" = read ] || exit 1
+case "$2" in
+  */Contents/Info) [ "$3" = CFBundleIdentifier ] && printf 'com.hasna.recordings\\n' && exit 0 ;;
+esac
+exit 1
+`,
+    );
+    chmodSync(defaultsPath, 0o755);
+
+    const psPath = join(home, "fake-ps");
+    writeFileSync(psPath, `#!/bin/sh\nprintf '%s\\n' "${bundle}/Contents/MacOS/Recordings"\n`);
+    chmodSync(psPath, 0o755);
+
+    const result = Bun.spawnSync([process.execPath, cliEntry, "shortcut", "--fn", "on"], {
+      cwd: repoRoot,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: home,
+        RECORDINGS_TEST_DEFAULTS_EXECUTABLE: defaultsPath,
+        RECORDINGS_TEST_PS_EXECUTABLE: psPath,
+      },
+    });
+    const stdout = result.stdout.toString();
+    // The write itself must still have happened — this is not a refusal to write.
+    expect(readFileSync(writesPath, "utf8")).toContain("useFnKey");
+    expect(stdout).toContain("still holds the previous trigger");
+    expect(stdout).toContain(bundle);
+    expect(result.exitCode).toBe(1);
+  });
 });
 
 /**

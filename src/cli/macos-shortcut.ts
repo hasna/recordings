@@ -343,13 +343,24 @@ export interface BundleScanProbes {
   readBundleIdentifier?: BundleIdentifierReader;
 }
 
+/**
+ * Same rule as `TRIGGER_DEFAULTS_EXECUTABLE`: pinned on macOS so PATH cannot substitute the
+ * process listing that decides which bundle holds the live trigger, and overridable only off
+ * macOS, where it is the one way to exercise the "an instance is running, so your write is not
+ * armed" exit path — a path that by definition needs a running Recordings.app to reach.
+ */
+const PROCESS_LISTER_EXECUTABLE =
+  process.platform === "darwin"
+    ? "/bin/ps"
+    : process.env.RECORDINGS_TEST_PS_EXECUTABLE ?? "/bin/ps";
+
 const defaultProcessLister: ProcessLister = () => {
   // `comm=` prints the executable path and nothing else. `args=` would include arguments,
   // and a wrapper such as `/bin/sh -c /path/Recordings.app/...` would then make the start
   // of the path ambiguous — the pattern below cannot tell an argument boundary from a
   // directory name once spaces are legal in the path. `-ww` stops ps truncating to the
   // terminal width, which would silently cut long bundle paths short.
-  const result = spawnSync("/bin/ps", ["-Awwo", "comm="], { encoding: "utf8" });
+  const result = spawnSync(PROCESS_LISTER_EXECUTABLE, ["-Awwo", "comm="], { encoding: "utf8" });
   if (result.status !== 0) return null;
   return result.stdout;
 };
