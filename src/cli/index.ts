@@ -27,9 +27,16 @@ import {
 } from "../lib/transcriber.js";
 import {
   probeMicrophoneCapture,
+  captureProbeSubject,
+  microphoneGrantInstruction,
   DEFAULT_PROBE_SECONDS,
   type CaptureProbeResult,
 } from "../lib/capture-probe.js";
+import {
+  describeActiveStore,
+  probeRecordingPersistence,
+  type PersistenceProbeResult,
+} from "../lib/persistence-probe.js";
 import { enhanceText, processText, resolveTranscriberModel } from "../lib/enhancer.js";
 import type { Recording, RecordingFilter } from "../types/index.js";
 import { VERSION } from "../version.js";
@@ -1174,8 +1181,16 @@ program
     // had no Microphone grant and captured nothing but silence.
     const macStatus = process.platform === "darwin" ? getMacOSAppStatus() : null;
 
+    // A transcript only counts as recorded once it is stored, and this package
+    // has two stores behind one interface. Which one is live is decided by env
+    // vars whose mere presence flips the transport, so `check` has to name it:
+    // auditing the wrong store is what made two separate reviews conclude that
+    // persistence had broken when it had only moved.
+    const activeStore = describeActiveStore(config);
+
     let capture: CaptureProbeResult | null = null;
     let credential: CredentialProbeResult | null = null;
+    let persistence: PersistenceProbeResult | null = null;
 
     if (opts.probe) {
       const parsedSeconds = Number.parseInt(String(opts.probeSeconds), 10);
@@ -1195,10 +1210,14 @@ program
             message: deps.message,
           };
       credential = await verifyTranscriptionCredential(config, transcriberModel);
+      persistence = await probeRecordingPersistence();
     }
 
     const probeFailed = Boolean(
-      opts.probe && ((capture && !capture.ok) || (credential && !credential.ok))
+      opts.probe &&
+        ((capture && !capture.ok) ||
+          (credential && !credential.ok) ||
+          (persistence && !persistence.ok))
     );
 
     if (parentOpts.json) {
@@ -1220,8 +1239,18 @@ program
         config_warnings: config.config_warnings ?? [],
         microphone_permission: macStatus?.microphone_permission ?? "unsupported",
         accessibility_permission: macStatus?.accessibility_permission ?? "unsupported",
+        active_store: activeStore,
         capture_probe: capture,
+        capture_probe_subject: captureProbeSubject(),
+        microphone_grant_instruction: macStatus
+          ? microphoneGrantInstruction({
+              installedAppPath: macStatus.installed_app_path,
+              otherAppPaths: macStatus.legacy_install_paths,
+              everRequested: macStatus.microphone_permission !== "not_determined",
+            })
+          : null,
         credential_probe: credential,
+        persistence_probe: persistence,
       }, null, 2));
       if (probeFailed) process.exitCode = 1;
       return;
@@ -1259,6 +1288,25 @@ program
       );
     }
 
+    // Where a transcript will actually land. Named unconditionally: the failure
+    // this prevents is a human reading the wrong dataset, which no probe catches.
+    console.log(
+      chalk.green("✓") +
+        ` Active store: ${activeStore.transport}` +
+        (activeStore.base_url ? ` → ${activeStore.base_url}` : ` → ${activeStore.local_db_path}`) +
+        chalk.dim(` (selected by ${activeStore.mode_source})`)
+    );
+    if (activeStore.divergent) {
+      console.log(
+        chalk.yellow("⚠") +
+          ` Two datasets present: ${activeStore.local_db_recordings} recordings sit in ` +
+          `${activeStore.local_db_path}, which is NOT the live store.`
+      );
+    }
+    if (activeStore.warning) {
+      console.log(chalk.dim(`  ${activeStore.warning}`));
+    }
+
     if (macStatus) {
       const micOk = macStatus.microphone_permission.startsWith("allowed");
       console.log(
@@ -1269,10 +1317,18 @@ program
         console.log(
           chalk.dim(
             "  Recordings.app cannot capture audio without this. macOS does not error when it is " +
-              "missing — it delivers silent audio. Trigger the prompt with 'recordings app request-permissions' " +
-              "and click Allow on the machine itself."
+              "missing — it delivers silent audio. This grant CANNOT be set remotely; it needs a " +
+              "human at the keyboard:"
           )
         );
+        const instruction = microphoneGrantInstruction({
+          installedAppPath: macStatus.installed_app_path,
+          otherAppPaths: macStatus.legacy_install_paths,
+          everRequested: macStatus.microphone_permission !== "not_determined",
+        });
+        for (const [index, step] of instruction.steps.entries()) {
+          console.log(chalk.dim(`  ${index + 1}. ${step}`));
+        }
       }
       console.log(
         (macStatus.accessibility_permission.startsWith("allowed")
@@ -1287,11 +1343,20 @@ program
         (capture.ok ? chalk.green("✓") : chalk.red("✗")) +
           ` Microphone capture probe: ${capture.message}`
       );
+      // Whose grant this exercised. Without it a green tick here reads as
+      // "the app can record", which it never proves.
+      console.log(chalk.dim(`  subject: ${captureProbeSubject().note}`));
     }
     if (credential) {
       console.log(
         (credential.ok ? chalk.green("✓") : chalk.red("✗")) +
           ` Transcription credential: ${credential.message}`
+      );
+    }
+    if (persistence) {
+      console.log(
+        (persistence.ok ? chalk.green("✓") : chalk.red("✗")) +
+          ` Persistence round-trip: ${persistence.message}`
       );
     }
 
