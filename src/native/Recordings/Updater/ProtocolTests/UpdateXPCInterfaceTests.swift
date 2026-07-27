@@ -68,15 +68,19 @@ struct UpdateXPCInterfaceTests {
         }
     }
 
-    @Test("every value the reply builders emit is covered by the allowlist")
-    func replyBuildersEmitOnlyAllowlistedClasses() {
+    /// The allowlist only matters if it is actually sufficient to decode what the broker
+    /// sends. Rather than comparing class names — a native Swift `String` key bridges to
+    /// `Swift.__StringStorage`, not `NSString`, so name matching tests the bridge instead of
+    /// the contract — this round-trips real replies through secure coding restricted to the
+    /// installed allowlist. A reply that grew a type XPC would refuse to decode fails here.
+    @Test("the installed allowlist can securely decode the replies the broker actually sends")
+    func allowlistDecodesRealReplies() throws {
         let interface = makeRecordingsUpdateXPCInterface()
-        let allowed = allowedClassNames(
-            interface,
-            selector: Self.statusSelector,
-            argumentIndex: 0,
-            ofReply: true
-        )
+        let allowedClasses = interface
+            .classes(for: Self.statusSelector, argumentIndex: 0, ofReply: true)
+            .compactMap { $0 as? AnyClass }
+        #expect(allowedClasses.count == 3)
+
         let replies = [
             updateSuccessReply(
                 transactionID: "t-1",
@@ -86,23 +90,24 @@ struct UpdateXPCInterfaceTests {
             updateFailureReply(.invalidEnvelope, message: "rejected"),
         ]
         for reply in replies {
-            #expect(allowed.contains(NSStringFromClass(type(of: reply))) || reply is NSDictionary)
-            for (key, value) in reply as? [AnyHashable: Any] ?? [:] {
-                // Keys and values both cross the boundary and both must be allowlisted.
-                let keyClass = NSStringFromClass(type(of: key as AnyObject))
-                let valueClass = NSStringFromClass(type(of: value as AnyObject))
-                #expect(
-                    allowed.contains(keyClass) || keyClass.hasSuffix("String"),
-                    "reply key class \(keyClass) is not allowlisted"
-                )
-                #expect(
-                    allowed.contains(valueClass)
-                        || valueClass.hasSuffix("String")
-                        || valueClass.hasSuffix("Number")
-                        || valueClass.hasSuffix("Boolean"),
-                    "reply value class \(valueClass) is not allowlisted"
-                )
-            }
+            let data = try NSKeyedArchiver.archivedData(
+                withRootObject: reply,
+                requiringSecureCoding: true
+            )
+            let unarchiver = try NSKeyedUnarchiver(forReadingFrom: data)
+            unarchiver.requiresSecureCoding = true
+            let decoded = unarchiver.decodeObject(
+                of: allowedClasses,
+                forKey: NSKeyedArchiveRootObjectKey
+            )
+            unarchiver.finishDecoding()
+            #expect(unarchiver.error == nil, "reply is not decodable under the allowlist")
+            let decodedReply = try #require(decoded as? NSDictionary)
+            #expect(decodedReply.count == reply.count)
+            #expect(
+                decodedReply[RecordingsUpdateReplyKey.lifecycle] as? String
+                    == RecordingsUpdateConstants.lifecycle
+            )
         }
     }
 }
