@@ -294,7 +294,10 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         let sessionConfig = Self.transcriptionSessionUpdateEvent(transcription: transcription)
 
         do {
-            try await sendEvent(sessionConfig)
+            try await sendEvent(
+                sessionConfig,
+                timeoutMilliseconds: Self.configureSendTimeoutMilliseconds
+            )
             isConfigured = true
             flushPendingAudio()
         } catch {
@@ -369,8 +372,11 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     }
 
     /// Commit buffered input, wait briefly for a final completed event, then close.
+    /// The settlement budget is the caller's decision (`RecordingEngine` scales it with
+    /// captured audio length); there is deliberately no default so a new call site cannot
+    /// silently reintroduce the fixed 700 ms budget this parameter replaced.
     public func finish(
-        timeoutMilliseconds: UInt64 = 700,
+        timeoutMilliseconds: UInt64,
         pipelineID: String? = nil,
         pipelineStartedUptimeMilliseconds: UInt64? = nil
     ) async -> RealtimeFinishResult {
@@ -611,14 +617,42 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
         }
     }
 
-    private func sendEvent(_ obj: [String: Any]) async throws {
-        try await sendEncodedEvent(encodeJSON(obj))
+    /// Deadline for the session-configure send. This is the first frame on a
+    /// just-resumed socket, so it absorbs DNS + TCP + TLS + WebSocket upgrade on a
+    /// cold connection — measured 0.77-1.0 s from a fresh process against the live
+    /// endpoint. The old shared 500 ms deadline made a cold morning connection fail
+    /// configuration outright, poisoning the whole session and silently demoting
+    /// every recording to the batch path. The user is speaking while this runs
+    /// (audio buffers locally either way), so the larger budget costs nothing on
+    /// the delivery path.
+    nonisolated static let configureSendTimeoutMilliseconds: UInt64 = 3_000
+    /// Deadline for every send after configuration, riding the established
+    /// connection. A single send past this deadline records a transport failure,
+    /// which permanently vetoes the realtime fast path for the whole recording —
+    /// so the deadline must tolerate ordinary jitter, not just the median. At the
+    /// old 500 ms value, 3 of 5 two-minute streaming sessions against the live
+    /// endpoint were poisoned by one slow frame and demoted to the batch path.
+    /// True connection stalls are still detected structurally: the bounded
+    /// outbound queue (262,144 bytes of raw 24 kHz/16-bit PCM ≈ 5.5 s of audio,
+    /// 262,144 ÷ 48,000 bytes/s) overflows and fails the transport
+    /// if sends stop draining, and the settle budget bounds release latency
+    /// regardless of this deadline.
+    nonisolated static let outboundSendTimeoutMilliseconds: UInt64 = 2_500
+
+    private func sendEvent(
+        _ obj: [String: Any],
+        timeoutMilliseconds: UInt64 = RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds
+    ) async throws {
+        try await sendEncodedEvent(encodeJSON(obj), timeoutMilliseconds: timeoutMilliseconds)
     }
 
-    private func sendEncodedEvent(_ text: String) async throws {
+    private func sendEncodedEvent(
+        _ text: String,
+        timeoutMilliseconds: UInt64 = RealtimeTranscriptionClient.outboundSendTimeoutMilliseconds
+    ) async throws {
         guard let ws else { throw URLError(.networkConnectionLost) }
         try await Self.runOutboundOperationWithDeadline(
-            timeoutMilliseconds: 500,
+            timeoutMilliseconds: timeoutMilliseconds,
             operation: { try await ws.send(.string(text)) },
             nowMilliseconds: Self.monotonicMilliseconds,
             sleepMilliseconds: { milliseconds in
@@ -826,7 +860,7 @@ extension RealtimeTranscriptionClient {
         _ operation: @escaping @MainActor @Sendable () async throws -> Void
     ) async -> Bool {
         await enqueueOutboundOperationTestHelper(
-            timeoutMilliseconds: 500,
+            timeoutMilliseconds: Self.outboundSendTimeoutMilliseconds,
             operation: operation,
             nowMilliseconds: Self.monotonicMilliseconds,
             sleepMilliseconds: { milliseconds in

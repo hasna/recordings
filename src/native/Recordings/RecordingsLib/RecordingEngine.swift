@@ -939,7 +939,40 @@ public final class RecordingEngine: ObservableObject {
     #endif
 
     private nonisolated static let realtimePeriodicCommitIntervalMilliseconds: UInt64 = 900
-    private nonisolated static let realtimeFinishTimeoutMilliseconds: UInt64 = 700
+    /// Floor of the post-release settlement budget. The settlement wait polls every 10 ms
+    /// and returns the moment the final transcription lands, so the budget is only ever
+    /// paid in full when the realtime session is still unsettled — the common settled case
+    /// costs its actual settle time (measured 0.6-1.6 s on station-class hardware).
+    private nonisolated static let realtimeSettleBudgetFloorMilliseconds: UInt64 = 1_500
+    /// Additional settlement budget granted per second of captured audio. A settlement
+    /// miss falls back to re-transcribing the whole recording through the batch API, which
+    /// costs roughly a quarter of the recording's duration (measured: 4 s floor + ~25%
+    /// of audio length) — so the longer the recording, the more waiting is worth it.
+    private nonisolated static let realtimeSettleBudgetPerAudioSecondMilliseconds: UInt64 = 25
+    /// Ceiling of the settlement budget: past this point the user has watched
+    /// "Transcribing..." for so long that starting the recoverable batch path is the
+    /// better trade even for very long recordings.
+    private nonisolated static let realtimeSettleBudgetCeilingMilliseconds: UInt64 = 5_000
+    /// PCM byte rate of the capture pipeline (24 kHz, 16-bit, mono) — used to convert
+    /// captured byte counts back into audio seconds for the settlement budget.
+    private nonisolated static let capturedPCMBytesPerSecond = 48_000
+
+    /// Settlement budget for `RealtimeTranscriptionClient.finish` scaled to the captured
+    /// audio length. The previous fixed 700 ms budget was routinely missed by real
+    /// sessions (final transcription completions arrive ~0.6-1.6 s after release), which
+    /// silently demoted nearly every recording to the duration-proportional batch path —
+    /// the "one minute to transcribe" failure mode this budget exists to prevent.
+    public nonisolated static func realtimeSettleBudgetMilliseconds(pcmByteCount: Int) -> UInt64 {
+        let audioSeconds = UInt64(max(pcmByteCount, 0)) / UInt64(capturedPCMBytesPerSecond)
+        let (scaled, overflowed) = audioSeconds.multipliedReportingOverflow(
+            by: realtimeSettleBudgetPerAudioSecondMilliseconds
+        )
+        guard !overflowed else { return realtimeSettleBudgetCeilingMilliseconds }
+        let (budget, budgetOverflowed) = realtimeSettleBudgetFloorMilliseconds
+            .addingReportingOverflow(scaled)
+        guard !budgetOverflowed else { return realtimeSettleBudgetCeilingMilliseconds }
+        return min(budget, realtimeSettleBudgetCeilingMilliseconds)
+    }
     /// Hard wall-clock budget for the rewrite helper (CLI spawn + one model call), covering
     /// execution *and* CLIRunner's termination grace, kill grace, and pipe drain — not just
     /// the child execution deadline. The user is waiting with recording blocked, so this
@@ -1789,7 +1822,9 @@ public final class RecordingEngine: ObservableObject {
             ))
 
             let streamingResult = await client?.finish(
-                timeoutMilliseconds: Self.realtimeFinishTimeoutMilliseconds,
+                timeoutMilliseconds: Self.realtimeSettleBudgetMilliseconds(
+                    pcmByteCount: self.recordedPCM.count
+                ),
                 pipelineID: pipelineTrace.id,
                 pipelineStartedUptimeMilliseconds: pipelineTrace.startedUptimeMilliseconds
             )
