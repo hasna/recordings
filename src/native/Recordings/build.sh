@@ -381,6 +381,7 @@ if [ "$SOURCE_PACKAGE_ROOT" != "$PACKAGE_ROOT" ]; then
         "$SOURCE_PACKAGE_ROOT/scripts/build_native_fs_guard.sh" \
         "$SOURCE_PACKAGE_ROOT/scripts/native/recordings_fs_guard.c" \
         "$SOURCE_PACKAGE_ROOT/scripts/policy/local-only-approved-targets.txt" \
+        "$SOURCE_PACKAGE_ROOT/scripts/read_local_only_targets.sh" \
         "$SOURCE_PACKAGE_ROOT/packaging/macos/build_release_pkg.sh" \
         "$SOURCE_PACKAGE_ROOT/packaging/macos/release_lifecycle.ts" \
         "$SOURCE_PACKAGE_ROOT/packaging/macos/Verifier.entitlements" \
@@ -992,24 +993,21 @@ if [ "$MODE" = "release" ]; then
         fi
     fi
 elif [ "$MODE" = "local" ]; then
-    # Same policy file the installer and artifact tool read, so the builder and the
-    # target agree on the approved set without repeating a hostname literal.
+    # Same policy file and same sourced reader the installer and artifact tool use,
+    # so the builder and the target can never disagree about the approved set.
     LOCAL_TARGET_POLICY="${PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
-    [ -f "$LOCAL_TARGET_POLICY" ] && [ ! -L "$LOCAL_TARGET_POLICY" ] || {
-        echo "Local-only approved target policy is missing." >&2
+    LOCAL_TARGET_READER="${PACKAGE_ROOT}/scripts/read_local_only_targets.sh"
+    [ -f "$LOCAL_TARGET_READER" ] && [ ! -L "$LOCAL_TARGET_READER" ] || {
+        echo "Packaged local-only approved target reader is missing." >&2
         exit 1
     }
+    # shellcheck source=/dev/null
+    . "$LOCAL_TARGET_READER"
     LOCAL_APPROVED_TARGET_MATCHED=0
     LOCAL_APPROVED_TARGET_LIST=""
-    while IFS= read -r policy_line || [ -n "$policy_line" ]; do
-        case "$policy_line" in ''|'#'*) continue ;; esac
-        LOCAL_APPROVED_TARGET_LIST="${LOCAL_APPROVED_TARGET_LIST:+${LOCAL_APPROVED_TARGET_LIST}, }${policy_line}"
-        [ "$policy_line" = "$LOCAL_APPROVED_TARGET" ] && LOCAL_APPROVED_TARGET_MATCHED=1
-    done < "$LOCAL_TARGET_POLICY"
-    [ -n "$LOCAL_APPROVED_TARGET_LIST" ] || {
-        echo "Local-only approved target policy lists no targets." >&2
-        exit 1
-    }
+    read_local_only_targets \
+        "$LOCAL_TARGET_POLICY" LOCAL_APPROVED_TARGET_LIST LOCAL_APPROVED_TARGET_MATCHED \
+        "$LOCAL_APPROVED_TARGET" || exit 1
     if [ "$LOCAL_APPROVED_TARGET_MATCHED" -ne 1 ]; then
         echo "Local-only builds require an approved RECORDINGS_LOCAL_APPROVED_TARGET (${LOCAL_APPROVED_TARGET_LIST})." >&2
         exit 1

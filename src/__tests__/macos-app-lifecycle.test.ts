@@ -3692,6 +3692,10 @@ describe("macOS signed artifact build", () => {
       join(repositoryRoot, "scripts", "policy", "local-only-approved-targets.txt"),
       join(root, "scripts", "policy", "local-only-approved-targets.txt"),
     );
+    cpSync(
+      join(repositoryRoot, "scripts", "read_local_only_targets.sh"),
+      join(root, "scripts", "read_local_only_targets.sh"),
+    );
     writeFileSync(join(native, "RecordingsLib", "Info.plist"), "<plist><dict/></plist>\n");
     writeFileSync(join(native, "RecordingsLib", "Recordings.entitlements"), "<plist><dict/></plist>\n");
     cpSync(
@@ -4287,6 +4291,45 @@ fi
     expect(existsSync(join(fixture.markers, "syspolicy.log"))).toBeFalse();
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station06-local-only.zip"))).toBeTrue();
     expect(existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station06-local-only.manifest.json"))).toBeTrue();
+  });
+
+  test("local-only build accepts every target the policy file declares, not just the first", async () => {
+    // The whole point of the policy file: a second approved Mac builds identically,
+    // with the target name carried through to the artifact, manifest, and provenance.
+    const fixture = createBuildFixture();
+    const result = await runLocalBuild(fixture, { RECORDINGS_LOCAL_APPROVED_TARGET: "station03" });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stderr).toContain("ad-hoc signed, non-notarized, and restricted to station03");
+    expect(result.stdout).toContain("not notarized and is approved only for station03");
+    const bunLog = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(bunLog).toContain("--approved-target station03");
+    expect(bunLog).toContain("--artifact-policy local_only");
+    expect(bunLog).toContain("--approved-target-identity-kind tailscale_node_id_sha256");
+    expect(bunLog).toContain(`--approved-target-identity-sha256 ${targetTailscaleIdentitySha256}`);
+    expect(
+      existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station03-local-only.zip")),
+    ).toBeTrue();
+    expect(
+      existsSync(
+        join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station03-local-only.manifest.json"),
+      ),
+    ).toBeTrue();
+  });
+
+  test("local-only build fails closed when the approved-target policy is absent", async () => {
+    const fixture = createBuildFixture();
+    rmSync(join(fixture.root, "scripts", "policy", "local-only-approved-targets.txt"));
+    const missingPolicy = await runLocalBuild(fixture);
+    expect(missingPolicy.exitCode).not.toBe(0);
+    expect(missingPolicy.stderr).toContain("policy is missing");
+    expect(existsSync(join(fixture.native, ".build"))).toBeFalse();
+
+    const noReader = createBuildFixture();
+    rmSync(join(noReader.root, "scripts", "read_local_only_targets.sh"));
+    const missingReader = await runLocalBuild(noReader);
+    expect(missingReader.exitCode).not.toBe(0);
+    expect(missingReader.stderr).toContain("target reader is missing");
+    expect(existsSync(join(noReader.native, ".build"))).toBeFalse();
   });
 
   test("local-only build uses the standard Tailscale app CLI fallback", async () => {

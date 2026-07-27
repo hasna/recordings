@@ -239,7 +239,9 @@ signature check. The mutable `/Applications` path is never executed, caller stat
 not inherited, and all snapshot paths are removed by normal installer cleanup. The builder applies
 the same checks in its private build directory and removes the snapshot with the rest of the build
 workspace. The status parser then
-requires online `Self` whose hostname is the approved target being built for,
+requires online `Self` whose hostname equals the caller's `--expected-hostname` — the
+approved target when the installer verifies the target, and the builder's own host when
+the builder verifies itself, which `build.sh` requires to differ from the target —
 requires the single nonempty `Self.ID` to contain no whitespace or NUL, hashes its exact decoded
 bytes without a newline, and compares the digest. Neither raw node ID is written to the manifest,
 build log, or installer log. Older schema-v3 artifacts without an

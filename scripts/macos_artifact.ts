@@ -71,10 +71,10 @@ export const LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH = join(
 export function localOnlyApprovedTargets(
   policyPath: string = LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH,
 ): string[] {
-  const contents = readFileSync(policyPath, "utf8");
+  const contents = readFileSync(policyPath, "utf8").replace(/^﻿/, "");
   const targets = contents
     .split("\n")
-    .map((line) => line.trim())
+    .map((line) => line.replace(/\r$/, "").trim())
     .filter((line) => line.length > 0 && !line.startsWith("#"));
   if (targets.length === 0) {
     throw new Error("local-only approved target policy lists no targets");
