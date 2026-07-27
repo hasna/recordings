@@ -196,8 +196,23 @@ describe("native paste delivery verification contract", () => {
       const from = source.indexOf(open, start);
       if (from === -1) return "";
       let depth = 0;
+      let inString = false;
       for (let index = from; index < source.length; index += 1) {
         const character = source[index];
+        // Delimiters inside a string literal are TEXT, not structure. Counting them let an
+        // unmatched `)` in a format string — `log("paste read-back attempt) baseline=\(x)")` —
+        // close the region early, so the interpolation that followed was never inspected and the
+        // leak went unseen. Swift interpolations are themselves balanced inside the quotes, so
+        // skipping the whole literal is safe; the characters still appear in the returned slice.
+        if (character === "\\") {
+          index += 1;
+          continue;
+        }
+        if (character === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
         if (character === open) depth += 1;
         else if (character === close) {
           depth -= 1;
