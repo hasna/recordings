@@ -183,12 +183,18 @@ export function partition(discovered: string[], quarantined: string[]): Partitio
 /**
  * The set of test files a run actually executed, read from bun's JUnit report.
  *
- * The JUnit report is used rather than the console output, and that choice is the difference
- * between a real check and a decorative one. Measured on bun 1.3.14: a fully passing
- * `bun test a.test.ts b.test.ts` prints ONLY a summary — no per-file headers, no `(pass)` lines —
- * so a console-scraping version of this function returns the empty set on exactly the runs it is
- * supposed to police, and every assertion over it passes for free. The JUnit report carries a
- * `file=` attribute per suite whether or not anything failed.
+ * WHY THE JUNIT REPORT AND NOT THE CONSOLE OUTPUT. Not because the console is empty — an earlier
+ * version of this comment claimed a fully passing run prints only a summary, which is true when you
+ * run bun in a terminal and FALSE on an Actions runner, where it emits a `##[group]<file>:` header
+ * and a `(pass)` line per test. Asserting against a stream whose shape depends on the environment is
+ * the problem; the JUnit report has one documented shape with a `file=` attribute per suite whether
+ * or not anything failed.
+ *
+ * What makes the check load-bearing at all is measured bun behaviour that is genuinely surprising:
+ * positional arguments are SUBSTRING FILTERS, not paths, so `bun test gen1` matched four files, and
+ * `bun test src/nope.test.ts` on a path that does not exist EXITS 0 — it reports nothing to run and
+ * succeeds. So "the command was given 56 paths and returned 0" is not evidence that 56 suites ran,
+ * or that any did.
  *
  * Attributes are matched with a regex rather than a parser because the path set is already known to
  * be free of whitespace and XML metacharacters (`--check` enforces the whitespace half, and the
@@ -201,6 +207,39 @@ export function executedFilesFromJUnit(xml: string): string[] {
     if (path?.endsWith(TEST_SUFFIX)) executed.add(path);
   }
   return [...executed].sort();
+}
+
+export type SuiteSkips = { file: string; total: number; skipped: number };
+
+/**
+ * Per-file test and skip counts from the JUnit report.
+ *
+ * Membership in the executed set is NOT the same as being asserted. bun emits a `file=` attribute for
+ * a suite whose every test is `describe.skip`ped, so such a file counts as executed and the partition
+ * check still reports "56 suites executed, exactly the 56 gated" while that suite asserts nothing.
+ * Set equality cannot see that; only the skip counts can.
+ *
+ * A skipped case is `<testcase ...><skipped /></testcase>` while a real one self-closes, so each
+ * `<testcase` chunk is inspected up to its terminator rather than the attributes being trusted —
+ * the `skipped=` attribute appears on the enclosing `<testsuite>` at several nesting levels and
+ * summing those double-counts.
+ */
+export function suiteSkips(xml: string): SuiteSkips[] {
+  const counts = new Map<string, { total: number; skipped: number }>();
+  for (const chunk of xml.split("<testcase").slice(1)) {
+    const file = chunk.match(/\bfile="([^"]+)"/)?.[1];
+    if (!file?.endsWith(TEST_SUFFIX)) continue;
+    const body = chunk.split("</testcase>")[0] ?? chunk;
+    const entry = counts.get(file) ?? { total: 0, skipped: 0 };
+    entry.total += 1;
+    // The self-closing form ends the element before any child could appear, so a `<skipped` found in
+    // a self-closed chunk belongs to the NEXT case and must not be attributed here.
+    if (!/^[^>]*\/>/.test(chunk) && /<skipped\b/.test(body)) entry.skipped += 1;
+    counts.set(file, entry);
+  }
+  return [...counts.entries()]
+    .map(([file, { total, skipped }]) => ({ file, total, skipped }))
+    .sort((a, b) => a.file.localeCompare(b.file));
 }
 
 /**
@@ -338,6 +377,22 @@ function main(argv: string[]): void {
       `gated run honoured the partition: ${executed.length} suites executed, ` +
         `exactly the ${gated.length} gated, none of the ${quarantined.length} quarantined`,
     );
+
+    // Membership is not assertion. Reported rather than gated: a suite MAY legitimately skip
+    // everything on a given platform, so failing here would be a false red — but leaving it silent is
+    // how `describe.skip` hollows out a gate that still reports full coverage.
+    const skips = suiteSkips(xml);
+    const totalSkipped = skips.reduce((sum, s) => sum + s.skipped, 0);
+    const hollow = skips.filter((s) => s.total > 0 && s.skipped === s.total);
+    console.log(
+      `${skips.reduce((sum, s) => sum + s.total, 0)} tests reported, ${totalSkipped} skipped`,
+    );
+    for (const suite of hollow) {
+      console.log(
+        `::warning title=Suite asserts nothing::${suite.file} ran ${suite.total} test(s) and skipped ` +
+          "ALL of them. It counts as covered by the gate while asserting nothing.",
+      );
+    }
     return;
   }
   fail("usage: --check | --gated | --quarantined | --verify-run <junit.xml>");

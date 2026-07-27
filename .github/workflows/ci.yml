@@ -3,16 +3,23 @@ name: CI
 # This repository had no workflows at all until this file: zero runs in its entire history, so
 # every one of its merges was gated only by somebody running batteries by hand.
 #
-# READ THIS BEFORE TRUSTING A GREEN CHECK. The two halves of this repository are not equally
+# READ THIS BEFORE TRUSTING A GREEN CHECK. The two halves of this repository are NOT equally
 # covered, and the asymmetry is structural rather than an oversight:
 #
-#   TypeScript/CLI/MCP/server — built, typechecked and tested here on Linux, minus the suites
-#     listed in .github/linux-quarantine.txt, which cannot pass on this platform for environmental
-#     reasons. The `typescript` job proves afterwards that it ran exactly the gated set.
-#   Swift/native (87 files under src/native) — needs a macOS toolchain. The `native` job covers it.
-#     If that job is ever removed or made non-blocking, the `scope` job goes red, because a green
-#     run that silently skipped the native half is the exact false-assurance this file exists to
-#     end.
+#   TypeScript/CLI/MCP/server — typechecked, tested and built on Linux. The whole suite, with no
+#     exemptions: .github/linux-quarantine.txt is empty, and the `typescript` job proves after the
+#     fact, against the runner's own JUnit report, that it ran exactly the discovered set.
+#   Swift/C native (87 files under src/native) — compiled on macOS, but only PARTLY, because `main`
+#     itself does not compile. Two pre-existing errors in Updater/VerifierLauncher are recorded in
+#     .github/native-known-errors.txt; every target NOT blocked by them is built individually and
+#     required to be clean. Read that file before reading the `native` job's tick as "it compiles".
+#
+# LIMITS OF THIS FILE, stated because a reader will otherwise assume the opposite:
+#   - Nothing here is REQUIRED to merge. That is branch-protection configuration on `main`, which
+#     this file cannot set. Until it is configured these checks are advisory.
+#   - The `scope` job fails when a job it depends on did not succeed, which catches a job that was
+#     skipped or cancelled. It cannot catch a job DELETED along with its `needs` entry — no workflow
+#     can assert against its own absence.
 
 on:
   pull_request:
@@ -70,7 +77,7 @@ jobs:
         # dependency is a caret range, and a plain `bun install` resolves @hasna/events to 0.1.14,
         # which dropped a shipped CLI command inside the patch range and manufactured a cli.test.ts
         # regression that cost a session to chase.
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: The lockfile is unchanged by installing it
         # The check --frozen-lockfile cannot perform on itself. If the flag is ever dropped, or a
@@ -188,7 +195,23 @@ jobs:
           git checkout -- src/sdk
 
       - name: Diff hygiene
-        run: git diff --check
+        # Against the BASE, not the working tree. `git diff --check` with no revisions inspects
+        # uncommitted changes, and a fresh CI checkout has none -- it printed nothing and asserted
+        # nothing. Comparing against the merge base is what actually examines the pull request's diff
+        # for whitespace errors and conflict markers.
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then
+            # A push to main has no pull_request context; the previous commit is the right comparison.
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+          fi
+          if [ -z "$base" ]; then
+            echo "::notice title=Diff hygiene skipped::No base commit to compare against (first commit)."
+            exit 0
+          fi
+          echo "comparing $base..HEAD"
+          git diff --check "$base" HEAD
 
       - name: Preserve the test report
         # The JUnit report carries a per-test duration, which is the only measured basis for
@@ -196,7 +219,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: gated-test-report-${{ github.sha }}
+          name: gated-test-report-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             gated-junit.xml
             gated-console.log
@@ -208,10 +231,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     outputs:
-      # Surfaced so the `scope` job can state whether the native half actually compiled, rather than
-      # inferring it from this job's green tick. The tick means "no NEW compile error", which is a
-      # much weaker claim; see .github/native-known-errors.txt.
+      # Surfaced so the `scope` job can state what actually compiled, rather than inferring it from
+      # this job's green tick. The tick means "nothing NEW broke", which is a much weaker claim; see
+      # .github/native-known-errors.txt.
       compiled: ${{ steps.compile.outputs.compiled }}
+      blocked: ${{ steps.compile.outputs.blocked }}
+      gatedTargets: ${{ steps.compile.outputs.gatedTargets }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -282,9 +307,10 @@ jobs:
         # a headless runner. Whether that makes them wholly or only partly unrunnable has never been
         # measured, so this records the outcome instead of asserting one.
         if: steps.compile.outputs.compiled == 'true'
-        continue-on-error: true
         shell: bash
         run: |
+          # No `continue-on-error` needed: the if/else below already absorbs the exit status. Having
+          # both invites a reader to think the flag is what makes this non-blocking.
           set -o pipefail
           if swift test --package-path src/native/Recordings 2>&1 | tee swift-test.log; then
             echo "::notice title=Native tests passed::swift test is green on this runner and can become a gate."
@@ -304,14 +330,14 @@ jobs:
         # Independent of the Swift build: a separate clang invocation over scripts/native.
         if: always()
         run: |
-          bun install --frozen-lockfile
+          bun install --frozen-lockfile --ignore-scripts
           bun run build:native-fs-guard
 
       - name: Preserve native build logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-build-logs-${{ github.sha }}
+          name: native-build-logs-${{ github.event.pull_request.head.sha || github.sha }}
           path: swift-test.log
           if-no-files-found: ignore
           retention-days: 14
@@ -335,33 +361,61 @@ jobs:
           TS_RESULT: ${{ needs.typescript.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
           NATIVE_COMPILED: ${{ needs.native.outputs.compiled }}
+          NATIVE_BLOCKED: ${{ needs.native.outputs.blocked }}
+          NATIVE_GATED: ${{ needs.native.outputs.gatedTargets }}
         run: |
-          if [ "$NATIVE_COMPILED" = "true" ]; then
-            native_scope='compiled cleanly'
+          # Every line below is conditioned on a job RESULT. An earlier version printed
+          # "typechecked and built" as a literal and listed everything under "Verified:"
+          # unconditionally, so a run whose Linux job had FAILED still rendered a summary asserting
+          # the suite passed — a dishonest summary in the job whose only purpose is honesty.
+          if [ "$NATIVE_RESULT" != "success" ]; then
+            native_scope="**not examined** — job result \`$NATIVE_RESULT\`"
+          elif [ "$NATIVE_COMPILED" = "true" ]; then
+            native_scope='every target and test target compiled cleanly'
           else
-            native_scope='**DID NOT COMPILE** — pre-existing errors, see `.github/native-known-errors.txt`'
+            native_scope="**partly compiled** — ${NATIVE_GATED:-0} target(s) built; \`${NATIVE_BLOCKED:-unknown}\` blocked by pre-existing errors"
+          fi
+          if [ "$TS_RESULT" = "success" ]; then
+            ts_scope='typechecked, whole suite passed, built'
+          else
+            ts_scope="**not verified** — job result \`$TS_RESULT\`"
           fi
           {
             echo '## Coverage scope for this run'
             echo
-            echo "| Half of the repository | Job | Job result | Compile status |"
+            echo "| Half of the repository | Job | Job result | What it established |"
             echo "| --- | --- | --- | --- |"
-            echo "| TypeScript / CLI / MCP / server | \`typescript\` (Linux) | \`$TS_RESULT\` | typechecked and built |"
+            echo "| TypeScript / CLI / MCP / server | \`typescript\` (Linux) | \`$TS_RESULT\` | $ts_scope |"
             echo "| Swift / C native (src/native) | \`native\` (macOS) | \`$NATIVE_RESULT\` | $native_scope |"
             echo
-            echo '**Verified:** three tsc projects; the gated bun suite, proven against the runner'"'"'s own'
-            echo 'JUnit report to be exactly the gated set; build; release guard; the Swift dependency'
-            echo 'pins; the Darwin-only native filesystem guard addon; and that no NEW native compile'
-            echo 'error was introduced.'
+            if [ "$TS_RESULT" = "success" ]; then
+              echo '**Verified on Linux:** three tsc projects; the whole bun suite with no exemptions,'
+              echo 'proven against the runner'"'"'s own JUnit report to be exactly the discovered set;'
+              echo 'build; release guard; lockfile unchanged by install.'
+            else
+              echo '**Nothing is verified on Linux:** that job did not succeed.'
+            fi
             echo
-            echo '**NOT verified:** the suites listed in `.github/linux-quarantine.txt`; the RUNTIME'
-            echo 'behaviour of the Swift test targets (TCC-gated on a headless runner); code signing'
-            echo 'and notarization; and the vacuity mutation battery.'
-            if [ "$NATIVE_COMPILED" != "true" ]; then
+            if [ "$NATIVE_RESULT" = "success" ] && [ "$NATIVE_COMPILED" = "true" ]; then
+              echo '**Verified on macOS:** every native target and every native test target compiles;'
+              echo 'the Swift dependency pins; the Darwin-only filesystem guard addon.'
+            elif [ "$NATIVE_RESULT" = "success" ]; then
+              echo '**Partly verified on macOS:** the Swift dependency pins and the Darwin-only'
+              echo 'filesystem guard addon built, and the targets not blocked by a pre-existing error'
+              echo 'compiled cleanly. See the `native` job log for which targets were blocked.'
+            else
+              echo '**Nothing is verified on macOS:** that job did not succeed.'
+            fi
+            echo
+            echo '**Never verified by this workflow, in any run:** the RUNTIME behaviour of the Swift'
+            echo 'test targets (TCC-gated on a headless runner — compiled, not executed); code signing'
+            echo 'and notarization; the vacuity mutation battery; and the suites listed in'
+            echo '`.github/linux-quarantine.txt`, if any.'
+            if [ "$NATIVE_RESULT" = "success" ] && [ "$NATIVE_COMPILED" != "true" ]; then
               echo
-              echo '> A green tick on the `native` job means "no NEW compile error", NOT "the native'
-              echo '> code compiles". It does not. Nothing in `src/native` on this branch has been'
-              echo '> proven to build.'
+              echo '> A green tick on the `native` job does NOT mean the native code compiles. It does'
+              echo "> not: \`${NATIVE_BLOCKED:-unknown}\` could not be built at all, so nothing in those"
+              echo '> targets is verified. See `.github/native-known-errors.txt`.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

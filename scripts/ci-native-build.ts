@@ -80,6 +80,7 @@ export function errorSignatures(output: string, repoRoot: string): string[] {
 export type Verdict =
   | { kind: "clean" }
   | { kind: "stale-baseline"; reason: string }
+  | { kind: "unattributable-failure" }
   | { kind: "quarantined"; observed: string[] }
   | { kind: "regression"; introduced: string[] };
 
@@ -93,6 +94,16 @@ export type Verdict =
 export function verdict(succeeded: boolean, observed: string[], known: string[]): Verdict {
   const introduced = observed.filter((signature) => !known.includes(signature));
   if (introduced.length > 0) return { kind: "regression", introduced };
+  // A failed build from which NO diagnostic could be attributed to this repository cannot be compared
+  // against the baseline at all, so it must fail rather than compare equal to it.
+  //
+  // This is not hypothetical. `errorSignatures` only recognises `path:line:col: error:`, so a linker
+  // failure ("ld: symbol(s) not found", "clang: error: linker command failed"), a swift-driver
+  // "error: emit-module command failed", or an out-of-disk abort all yield zero signatures. Without
+  // this branch, `verdict(false, [], [])` returned `quarantined` and the job exited 0 — a build that
+  // failed for a reason nobody parsed would have been GREEN, and green FOREVER once the baseline was
+  // emptied, which is exactly what this file's own remediation text tells you to do.
+  if (!succeeded && observed.length === 0) return { kind: "unattributable-failure" };
   if (succeeded) {
     if (known.length === 0) return { kind: "clean" };
     return {
@@ -114,10 +125,95 @@ export function verdict(succeeded: boolean, observed: string[], known: string[])
   return { kind: "quarantined", observed };
 }
 
+export type TargetInfo = { name: string; dir: string; dependencies: string[] };
+
+/**
+ * Read the package's targets and their internal dependencies from `swift package dump-package`.
+ *
+ * The manifest is evaluated rather than parsed, and dumping it works even when the package does not
+ * COMPILE, so this stays available in exactly the situation it is needed. A regex over Package.swift
+ * would have to re-implement target/path/dependency resolution and would drift the first time a
+ * target was declared in a way the regex did not anticipate.
+ */
+export function targetsFromDump(dump: unknown, packagePath: string): TargetInfo[] {
+  const raw = (dump as { targets?: unknown[] })?.targets;
+  if (!Array.isArray(raw)) throw new Error("dump-package produced no targets array");
+  return raw.map((entry) => {
+    const target = entry as {
+      name: string;
+      path?: string | null;
+      dependencies?: unknown[];
+    };
+    const dependencies: string[] = [];
+    for (const dependency of target.dependencies ?? []) {
+      // `byName` and `target` are internal references; `product` names a package dependency, which
+      // cannot be the thing blocked by an error in THIS repository's sources.
+      const named = dependency as { byName?: unknown[]; target?: unknown[] };
+      const reference = named.byName?.[0] ?? named.target?.[0];
+      if (typeof reference === "string") dependencies.push(reference);
+    }
+    return {
+      name: target.name,
+      // SwiftPM defaults an omitted path to Sources/<name>; every target in this package declares
+      // one, but relying on that would make the fallback silently wrong rather than absent.
+      dir: `${packagePath}/${target.path ?? `Sources/${target.name}`}`.replace(/\/+$/, ""),
+      dependencies,
+    };
+  });
+}
+
+/**
+ * Targets that cannot be built because a recorded error lives in them, plus everything that depends
+ * on those transitively.
+ *
+ * This is what makes the per-target gate honest. `swift build --build-tests` stops scheduling work
+ * after the first failure, and measured on run 30303366777 it reached 41 of 140 tasks and compiled
+ * only third-party dependencies — not one of this package's own Swift targets. So "the build failed
+ * with only known errors" proves nothing about the other targets: the compiler never looked at them.
+ * Everything not blocked is therefore built individually and required to be clean.
+ */
+export function blockedTargets(targets: TargetInfo[], errorFiles: string[]): string[] {
+  const blocked = new Set<string>();
+  for (const target of targets) {
+    if (errorFiles.some((file) => file === target.dir || file.startsWith(`${target.dir}/`))) {
+      blocked.add(target.name);
+    }
+  }
+  // Transitive closure. Iterate to a fixed point rather than recursing, so a dependency cycle in a
+  // malformed manifest cannot turn this into a stack overflow.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const target of targets) {
+      if (blocked.has(target.name)) continue;
+      if (target.dependencies.some((dependency) => blocked.has(dependency))) {
+        blocked.add(target.name);
+        changed = true;
+      }
+    }
+  }
+  return [...blocked].sort();
+}
+
+/** The source file part of a `<path>: <message>` signature. */
+export function signatureFile(signature: string): string {
+  return signature.split(": ")[0]!;
+}
+
 /** Emit a GitHub Actions step output when running under Actions; a no-op elsewhere. */
 function setOutput(name: string, value: string): void {
   const file = process.env.GITHUB_OUTPUT;
   if (file) appendFileSync(file, `${name}=${value}\n`);
+}
+
+/** Run a command, streaming nothing, returning combined output and exit status. */
+async function run(command: string[]): Promise<{ output: string; exitCode: number }> {
+  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { output: `${stdout}\n${stderr}`, exitCode };
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -126,17 +222,11 @@ async function main(argv: string[]): Promise<void> {
   const packagePath = pathIndex >= 0 ? argv[pathIndex + 1]! : "src/native/Recordings";
 
   // --build-tests compiles the test targets as well as the products, so one invocation covers every
-  // line of native code the package knows about. Running the plain build too would only re-report
-  // the same diagnostics from a subset of the same targets.
-  const command = ["swift", "build", "--build-tests", "--package-path", packagePath];
-  console.log(`$ ${command.join(" ")}`);
-  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  const output = `${stdout}\n${stderr}`;
+  // line of native code the package knows about — WHEN it succeeds. When it fails it stops early,
+  // which is why the per-target pass below exists.
+  const whole = ["swift", "build", "--build-tests", "--package-path", packagePath];
+  console.log(`$ ${whole.join(" ")}`);
+  const { output, exitCode } = await run(whole);
   process.stdout.write(output);
 
   const known = parseKnownErrors(readFileSync(`${repoRoot}/${KNOWN_ERRORS_FILE}`, "utf8"));
@@ -145,14 +235,23 @@ async function main(argv: string[]): Promise<void> {
   setOutput("compiled", exitCode === 0 ? "true" : "false");
 
   if (result.kind === "clean") {
-    console.log("\nNative build is clean and fully gated.");
+    console.log("\nNative build is clean: every target and every test target compiles, fully gated.");
     return;
   }
   if (result.kind === "regression") {
     console.log(
       `\n::error title=New native compile error::${result.introduced.length} compile error(s) ` +
-        `not recorded in ${KNOWN_ERRORS_FILE} appeared in this change. The native half was ` +
-        `already failing, so this is a NEW break: ${result.introduced.join(" | ")}`,
+        `not recorded in ${KNOWN_ERRORS_FILE} appeared in this change: ` +
+        result.introduced.join(" | "),
+    );
+    process.exit(1);
+  }
+  if (result.kind === "unattributable-failure") {
+    console.log(
+      "\n::error title=Native build failed for an unparsed reason::The build exited non-zero but no " +
+        "compile diagnostic could be attributed to a file in this repository, so the failure cannot " +
+        `be compared against ${KNOWN_ERRORS_FILE}. A linker error, a driver error or an aborted ` +
+        "build all look like this. Read the log above; do NOT record anything in the baseline for it.",
     );
     process.exit(1);
   }
@@ -160,11 +259,63 @@ async function main(argv: string[]): Promise<void> {
     console.log(`\n::error title=Stale native baseline::${result.reason}`);
     process.exit(1);
   }
+
+  // The whole-package build failed with exactly the recorded errors. That alone is NOT evidence about
+  // any other target, because the build aborted before reaching them: measured on run 30303366777 it
+  // got to 41 of 140 tasks and compiled only third-party dependencies. So build every target that is
+  // not blocked by a recorded error, individually, and require each to be clean. This is the
+  // difference between "no new error appeared in the 30% that compiled" and a real gate.
+  const dump = await run(["swift", "package", "dump-package", "--package-path", packagePath]);
+  if (dump.exitCode !== 0) {
+    console.log(`\n::error title=Cannot read the package manifest::${dump.output.trim().slice(0, 400)}`);
+    process.exit(1);
+  }
+  const targets = targetsFromDump(JSON.parse(dump.output), packagePath);
+  const blocked = blockedTargets(targets, observed.map(signatureFile));
+  const gated = targets.filter((target) => !blocked.includes(target.name)).map((t) => t.name);
+
   console.log(
-    `\n::warning title=Native half NOT verified::swift build fails on main with ` +
-      `${result.observed.length} recorded pre-existing error(s), so NO Swift or C in this change ` +
-      `has been proven to compile. No NEW compile error was introduced. Recorded errors: ` +
-      result.observed.join(" | "),
+    `\nWhole-package build stopped at the recorded errors. Building the ${gated.length} target(s) ` +
+      `not blocked by them, individually.\n  blocked: ${blocked.join(", ") || "(none)"}\n`,
+  );
+  if (gated.length === 0) {
+    console.log(
+      "\n::error title=Nothing could be gated::Every target is blocked by a recorded error, so this " +
+        "job proves nothing at all. Fix the recorded errors rather than keeping the baseline.",
+    );
+    process.exit(1);
+  }
+
+  // Surfaced so the `scope` job can name what went uncompiled instead of saying "the native half"
+  // and leaving a reader to guess how much of it that is.
+  setOutput("blocked", blocked.join(", "));
+  setOutput("gatedTargets", String(gated.length));
+
+  const failures: string[] = [];
+  for (const name of gated) {
+    const attempt = await run(["swift", "build", "--target", name, "--package-path", packagePath]);
+    const introduced = errorSignatures(attempt.output, repoRoot).filter((s) => !known.includes(s));
+    if (attempt.exitCode === 0 && introduced.length === 0) {
+      console.log(`  ok        ${name}`);
+      continue;
+    }
+    console.log(`  FAILED    ${name}`);
+    process.stdout.write(attempt.output);
+    failures.push(name);
+  }
+  if (failures.length > 0) {
+    console.log(
+      `\n::error title=Native target failed to compile::${failures.join(", ")}. These targets are ` +
+        "not blocked by any recorded pre-existing error, so this is a break introduced by this change.",
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `\n::warning title=Native half only PARTLY verified::${gated.length} target(s) compile cleanly ` +
+      `(${gated.join(", ")}), but ${blocked.join(", ")} could NOT be compiled because of ` +
+      `${observed.length} pre-existing error(s) recorded in ${KNOWN_ERRORS_FILE}. Nothing in those ` +
+      "blocked targets is verified by this run.",
   );
 }
 

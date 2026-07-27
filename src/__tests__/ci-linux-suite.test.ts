@@ -8,6 +8,7 @@ import {
   entriesMissingReason,
   executedFilesFromJUnit,
   isCompleteJUnit,
+  suiteSkips,
   parseQuarantine,
   partition,
   testFilesFromGit,
@@ -150,6 +151,46 @@ describe("executedFilesFromJUnit", () => {
   });
 });
 
+describe("suiteSkips", () => {
+  /** Both encodings bun actually emits: a self-closing case, and one wrapping `<skipped />`. */
+  const report = [
+    '<testsuites name="bun test" tests="3" skipped="1">',
+    '  <testcase name="a" file="src/x.test.ts" line="1" assertions="5" />',
+    '  <testcase name="b" file="src/x.test.ts" line="2" assertions="0">',
+    "    <skipped />",
+    "  </testcase>",
+    '  <testcase name="c" file="src/y.test.ts" line="1" assertions="0">',
+    "    <skipped />",
+    "  </testcase>",
+    "</testsuites>",
+  ].join("\n");
+
+  test("counts tests and skips per file", () => {
+    expect(suiteSkips(report)).toEqual([
+      { file: "src/x.test.ts", total: 2, skipped: 1 },
+      { file: "src/y.test.ts", total: 1, skipped: 1 },
+    ]);
+  });
+
+  test("does not attribute a following skip to a self-closed case", () => {
+    // The bug this guards: scanning past a self-closing `/>` finds the NEXT case's `<skipped />` and
+    // marks a passing test as skipped, which would report healthy suites as hollow and get the whole
+    // warning ignored.
+    expect(suiteSkips(report).find((s) => s.file === "src/x.test.ts")?.skipped).toBe(1);
+  });
+
+  test("identifies a suite that ran only skipped tests", () => {
+    // The hole this exists for: such a file still emits `file=`, so it counts as executed and the
+    // partition check reports full coverage while the suite asserts nothing.
+    const hollow = suiteSkips(report).filter((s) => s.total > 0 && s.skipped === s.total);
+    expect(hollow.map((s) => s.file)).toEqual(["src/y.test.ts"]);
+  });
+
+  test("ignores non-test files", () => {
+    expect(suiteSkips('<testcase name="a" file="scripts/x.ts" />')).toEqual([]);
+  });
+});
+
 describe("the committed quarantine list", () => {
   const discovered = testFilesFromGit(repoRoot);
   const entries = parseQuarantine(readFileSync(join(repoRoot, QUARANTINE_FILE), "utf8"));
@@ -177,12 +218,12 @@ describe("the committed quarantine list", () => {
     expect(entriesMissingReason(readFileSync(join(repoRoot, QUARANTINE_FILE), "utf8"))).toEqual([]);
   });
 
-  test("is currently empty, so the gate covers every discovered suite", () => {
-    // Pinned as a fact rather than left implicit. The list started with three entries copied from
-    // src/__tests__/helpers/source-assertions.ts, and the first CI run disproved all three by
-    // passing them on a clean runner. If an entry is ever added, this test is where the reviewer is
-    // forced to notice that the gate stopped being total.
-    expect(entries).toEqual([]);
-    expect(partition(discovered, entries).gated).toEqual(discovered);
+  test("partitions the discovered suites exactly, losing none", () => {
+    // The invariant, asserted instead of the emptiness. An earlier version pinned
+    // `expect(entries).toEqual([])`, which meant ADDING a quarantine entry failed the gated suite --
+    // a booby trap for the next person following the file's own "TO ADD AN ENTRY" instructions.
+    const { gated, quarantined } = partition(discovered, entries);
+    expect([...gated, ...quarantined].sort()).toEqual([...discovered].sort());
+    expect(gated.length + quarantined.length).toBe(discovered.length);
   });
 });

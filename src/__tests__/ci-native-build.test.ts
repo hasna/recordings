@@ -4,9 +4,12 @@ import { join } from "node:path";
 
 import {
   KNOWN_ERRORS_FILE,
+  blockedTargets,
   errorSignatures,
   normalizeMessage,
   parseKnownErrors,
+  signatureFile,
+  targetsFromDump,
   verdict,
 } from "../../scripts/ci-native-build";
 
@@ -140,6 +143,120 @@ describe("verdict", () => {
 
   test("a clean build against an empty baseline is a plain pass", () => {
     expect(verdict(true, [], [])).toEqual({ kind: "clean" });
+  });
+
+  test("a FAILED build with no attributable diagnostic is a failure, not a quarantine", () => {
+    // The hole an adversarial review found in the first version: this returned `quarantined`, which
+    // main() treats as success, so a build that failed for a reason the parser does not recognise
+    // exited 0. Worse, it was green FOREVER once the baseline was emptied -- which is exactly what
+    // the tool's own remediation message instructs you to do.
+    expect(verdict(false, [], [])).toEqual({ kind: "unattributable-failure" });
+    expect(verdict(false, [], known)).toEqual({ kind: "unattributable-failure" });
+  });
+
+  test("the failure modes that produce no attributable diagnostic really do parse to nothing", () => {
+    // Establishes that the branch above is reachable rather than defensive. None of these carry a
+    // `path:line:col: error:` shape, so errorSignatures returns [] for all of them.
+    for (const output of [
+      "ld: symbol(s) not found for architecture arm64",
+      "clang: error: linker command failed with exit code 1 (use -v to see invocation)",
+      "error: emit-module command failed with exit code 1 (use -v to see invocation)",
+      "error: terminated(2): /usr/bin/xcrun --sdk macosx ...",
+    ]) {
+      expect(errorSignatures(output, "/repo"), `should not parse: ${output}`).toEqual([]);
+      expect(verdict(false, errorSignatures(output, "/repo"), known).kind).toBe(
+        "unattributable-failure",
+      );
+    }
+  });
+});
+
+describe("targetsFromDump and blockedTargets", () => {
+  /**
+   * Shaped like real `swift package dump-package` output for this package, including the two
+   * dependency encodings SwiftPM emits (`byName` for an internal reference, `product` for one that
+   * comes from a package dependency) and the actual VerifierLauncher relationship.
+   */
+  const dump = {
+    targets: [
+      { name: "RecordingsLib", path: "RecordingsLib", dependencies: [{ product: ["KeyboardShortcuts", "KeyboardShortcuts", null, null] }] },
+      { name: "App", path: "App", dependencies: [{ byName: ["RecordingsLib", null] }] },
+      { name: "RecordingsUpdateProtocol", path: "Updater/Protocol", dependencies: [] },
+      { name: "RecordingsVerifierLauncher", path: "Updater/VerifierLauncher", dependencies: [] },
+      {
+        name: "RecordingsUpdateBroker",
+        path: "Updater/Broker",
+        dependencies: [{ byName: ["RecordingsUpdateProtocol", null] }, { byName: ["RecordingsVerifierLauncher", null] }],
+      },
+      { name: "RecordingsUpdateBrokerTests", path: "Updater/BrokerTests", dependencies: [{ byName: ["RecordingsUpdateBroker", null] }] },
+      { name: "RecordingsTests", path: "RecordingsTests", dependencies: [{ byName: ["RecordingsLib", null] }, { product: ["Testing", "swift-testing", null, null] }] },
+    ],
+  };
+  const targets = targetsFromDump(dump, "src/native/Recordings");
+
+  test("resolves each target's repo-relative directory", () => {
+    expect(targets.find((t) => t.name === "RecordingsVerifierLauncher")?.dir).toBe(
+      "src/native/Recordings/Updater/VerifierLauncher",
+    );
+  });
+
+  test("keeps internal dependencies and drops package products", () => {
+    // A product comes from another repository, so it can never be the thing blocked by an error in
+    // this one. Counting it would make swift-testing look like a blocked local target.
+    expect(targets.find((t) => t.name === "RecordingsTests")?.dependencies).toEqual(["RecordingsLib"]);
+    expect(targets.find((t) => t.name === "RecordingsLib")?.dependencies).toEqual([]);
+  });
+
+  test("defaults an omitted path to Sources/<name>", () => {
+    expect(targetsFromDump({ targets: [{ name: "Foo", dependencies: [] }] }, "pkg")[0]?.dir).toBe(
+      "pkg/Sources/Foo",
+    );
+  });
+
+  test("blocks the target owning the failing file and its transitive dependents only", () => {
+    // The measured reality for this package: the C launcher fails, so the broker and the broker's
+    // tests cannot build — but RecordingsLib, App, the protocol and RecordingsTests are untouched by
+    // it and MUST still be gated. Treating the whole package as unverifiable would discard almost
+    // all of the available coverage.
+    expect(
+      blockedTargets(targets, [
+        "src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c",
+      ]),
+    ).toEqual(["RecordingsUpdateBroker", "RecordingsUpdateBrokerTests", "RecordingsVerifierLauncher"]);
+  });
+
+  test("blocks nothing when there are no recorded errors", () => {
+    expect(blockedTargets(targets, [])).toEqual([]);
+  });
+
+  test("does not block a sibling target that merely shares a parent directory", () => {
+    // `Updater/Protocol` and `Updater/VerifierLauncher` share the `Updater` prefix. A prefix test
+    // without the boundary slash would block the protocol, and through it every updater target.
+    const blocked = blockedTargets(targets, [
+      "src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c",
+    ]);
+    expect(blocked).not.toContain("RecordingsUpdateProtocol");
+    expect(blocked).not.toContain("RecordingsTests");
+  });
+
+  test("terminates on a dependency cycle instead of overflowing the stack", () => {
+    const cyclic = targetsFromDump(
+      {
+        targets: [
+          { name: "A", path: "a", dependencies: [{ byName: ["B", null] }] },
+          { name: "B", path: "b", dependencies: [{ byName: ["A", null] }] },
+          { name: "C", path: "c", dependencies: [] },
+        ],
+      },
+      "pkg",
+    );
+    expect(blockedTargets(cyclic, ["pkg/a/x.c"])).toEqual(["A", "B"]);
+  });
+
+  test("signatureFile recovers the path from a signature", () => {
+    expect(signatureFile(CLOSEFROM)).toBe(
+      "src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c",
+    );
   });
 });
 
