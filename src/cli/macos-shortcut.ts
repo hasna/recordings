@@ -20,7 +20,6 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 
 export const RECORDINGS_BUNDLE_ID = "com.hasna.recordings";
 
@@ -256,6 +255,24 @@ export function formatShortcut(shortcut: Shortcut): string {
 /** Injectable so the process scan can be tested without a running app. */
 export type ProcessLister = () => string | null;
 
+/** Reads a bundle's CFBundleIdentifier, or null when it is not a readable bundle. */
+export type BundleIdentifierReader = (bundlePath: string) => string | null;
+
+const defaultBundleIdentifierReader: BundleIdentifierReader = (bundlePath) => {
+  const result = spawnSync(
+    "/usr/bin/defaults",
+    ["read", `${bundlePath}/Contents/Info`, "CFBundleIdentifier"],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) return null;
+  return result.stdout.trim() || null;
+};
+
+export interface BundleScanProbes {
+  listProcesses?: ProcessLister;
+  readBundleIdentifier?: BundleIdentifierReader;
+}
+
 const defaultProcessLister: ProcessLister = () => {
   // `comm=` prints the executable path and nothing else. `args=` would include arguments,
   // and a wrapper such as `/bin/sh -c /path/Recordings.app/...` would then make the start
@@ -275,11 +292,11 @@ const defaultProcessLister: ProcessLister = () => {
  * grant have to go". Reporting a nominal install path instead is how a permission readout
  * ends up naming a bundle that is not the one being denied.
  */
-export function runningAppBundlePaths(
-  lister: ProcessLister = defaultProcessLister,
-  bundleExists: (path: string) => boolean = existsSync,
-): string[] {
-  const listing = lister();
+export function runningAppBundlePaths(probes: BundleScanProbes = {}): string[] {
+  const listProcesses = probes.listProcesses ?? defaultProcessLister;
+  const readBundleIdentifier = probes.readBundleIdentifier ?? defaultBundleIdentifierReader;
+
+  const listing = listProcesses();
   if (!listing) return [];
   const suffixPattern = /\/Contents\/MacOS\/[^/]+$/;
   const paths = new Set<string>();
@@ -289,22 +306,34 @@ export function runningAppBundlePaths(
     const suffix = suffixPattern.exec(line);
     if (!suffix) continue;
     const bundle = line.slice(0, suffix.index);
-    if (!bundle.endsWith(".app")) continue;
 
     // Spaces are legal in a bundle path, so text alone cannot say where the path begins:
     // "/bin/sh -c /Applications/Recordings.app" and "/Users/first last/Recordings.app" are
-    // the same shape. Resolve it by asking the filesystem instead of guessing — try the
-    // longest candidate first and take the one that is really a bundle on disk. A path that
-    // does not exist is not a running app, so a wrapper's arguments fall away by themselves.
+    // the same shape. Resolve it by asking the bundle instead of guessing — try the longest
+    // candidate first and accept the first one that identifies as this app.
     for (let index = bundle.indexOf("/"); index !== -1; index = bundle.indexOf("/", index + 1)) {
       const candidate = bundle.slice(index);
-      if (candidate.endsWith("Recordings.app") && bundleExists(candidate)) {
-        paths.add(candidate);
-        break;
-      }
+      if (!isThisApp(candidate, readBundleIdentifier)) continue;
+      paths.add(candidate);
+      break;
     }
   }
   return [...paths].sort();
+}
+
+/**
+ * Whether a path is a bundle of *this* app.
+ *
+ * The identifier is the invariant, not the name: TCC grants and the UserDefaults domain
+ * both key on CFBundleIdentifier. A sibling bundle called "Hasna Recordings.app" whose id
+ * is `com.hasna.recordings.launcher` ends with "Recordings.app" and exists on disk, but a
+ * grant given to it does nothing for this app — naming it would send the owner to enable
+ * the wrong row in the Accessibility list. Check the last path component exactly, then
+ * confirm the identifier.
+ */
+function isThisApp(candidate: string, readBundleIdentifier: BundleIdentifierReader): boolean {
+  if (candidate.slice(candidate.lastIndexOf("/") + 1) !== "Recordings.app") return false;
+  return readBundleIdentifier(candidate) === RECORDINGS_BUNDLE_ID;
 }
 
 function readDefault(key: string): string | null {

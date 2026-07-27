@@ -230,80 +230,130 @@ describe("blocked-trigger reporting contract", () => {
  */
 describe("running bundle detection", () => {
   const psLine = (path: string) => `${path}/Contents/MacOS/Recordings`;
-  /** Stands in for the filesystem: only these bundles are real. */
-  const onDisk = (...real: string[]) => (path: string) => real.includes(path);
+  /**
+   * Stands in for reading CFBundleIdentifier: only these paths are bundles of this app.
+   * Anything else reads as null, exactly as a missing or foreign bundle would.
+   */
+  const appBundles = (...real: string[]) => (path: string) =>
+    real.includes(path) ? "com.hasna.recordings" : null;
 
   test("reports the bundle root of a running instance", () => {
     expect(
-      runningAppBundlePaths(
-        () =>
+      runningAppBundlePaths({
+        listProcesses: () =>
           [
             "/sbin/launchd",
             psLine("/Users/hasna/.hasna/recordings/Recordings.app"),
             "/usr/libexec/cfprefsd",
           ].join("\n"),
-        onDisk("/Users/hasna/.hasna/recordings/Recordings.app"),
-      ),
+        readBundleIdentifier: appBundles("/Users/hasna/.hasna/recordings/Recordings.app"),
+      }),
     ).toEqual(["/Users/hasna/.hasna/recordings/Recordings.app"]);
   });
 
   test("reports every distinct bundle when more than one copy runs", () => {
     expect(
-      runningAppBundlePaths(
-        () =>
+      runningAppBundlePaths({
+        listProcesses: () =>
           [
             psLine("/Applications/Recordings.app"),
             psLine("/Users/hasna/Applications/Recordings.app"),
             psLine("/Applications/Recordings.app"),
           ].join("\n"),
-        onDisk("/Applications/Recordings.app", "/Users/hasna/Applications/Recordings.app"),
-      ),
+        readBundleIdentifier: appBundles(
+          "/Applications/Recordings.app",
+          "/Users/hasna/Applications/Recordings.app",
+        ),
+      }),
     ).toEqual(["/Applications/Recordings.app", "/Users/hasna/Applications/Recordings.app"]);
   });
 
   test("keeps a bundle path that contains spaces", () => {
     const bundle = "/Users/first last/Applications/Recordings.app";
-    expect(runningAppBundlePaths(() => psLine(bundle), onDisk(bundle))).toEqual([bundle]);
+    expect(
+      runningAppBundlePaths({
+        listProcesses: () => psLine(bundle),
+        readBundleIdentifier: appBundles(bundle),
+      }),
+    ).toEqual([bundle]);
   });
 
-  test("resolves argument text by asking the filesystem instead of guessing", () => {
+  test("resolves argument text by asking the bundle instead of guessing", () => {
     // "/bin/sh -c /Applications/Recordings.app" and "/Users/first last/Recordings.app" are
     // the same shape, so text alone cannot say where the path starts. The longest candidate
-    // here does not exist, so the real bundle is the one that survives.
+    // here is not a bundle, so the real one is what survives.
     expect(
-      runningAppBundlePaths(
-        () => `/bin/sh -c ${psLine("/Applications/Recordings.app")}`,
-        onDisk("/Applications/Recordings.app"),
-      ),
+      runningAppBundlePaths({
+        listProcesses: () => `/bin/sh -c ${psLine("/Applications/Recordings.app")}`,
+        readBundleIdentifier: appBundles("/Applications/Recordings.app"),
+      }),
     ).toEqual(["/Applications/Recordings.app"]);
   });
 
-  test("reports nothing when no candidate is a real bundle", () => {
+  /**
+   * The decoy is real: /Applications/Hasna Recordings.app exists on station03, is ad-hoc
+   * signed, is a shell stub, and its id is com.hasna.recordings.launcher. It ends with
+   * "Recordings.app" and it exists on disk, so a name- or existence-based check reports it —
+   * and an owner told to grant Accessibility to it would enable the wrong row and see no
+   * change. Only the identifier separates them.
+   */
+  test("rejects a differently-named sibling bundle that merely ends in Recordings.app", () => {
+    const decoy = "/Applications/Hasna Recordings.app";
     expect(
-      runningAppBundlePaths(() => psLine("/bogus/Recordings.app"), onDisk()),
+      runningAppBundlePaths({
+        listProcesses: () => `${decoy}/Contents/MacOS/stub`,
+        // The decoy is a readable bundle — it just is not this app.
+        readBundleIdentifier: (path) =>
+          path === decoy ? "com.hasna.recordings.launcher" : null,
+      }),
+    ).toEqual([]);
+  });
+
+  test("rejects a bundle named Recordings.app whose identifier is not this app", () => {
+    const impostor = "/Applications/Recordings.app";
+    expect(
+      runningAppBundlePaths({
+        listProcesses: () => psLine(impostor),
+        readBundleIdentifier: () => "com.example.recordings",
+      }),
+    ).toEqual([]);
+  });
+
+  test("reports nothing when no candidate is a readable bundle", () => {
+    expect(
+      runningAppBundlePaths({
+        listProcesses: () => psLine("/bogus/Recordings.app"),
+        readBundleIdentifier: () => null,
+      }),
     ).toEqual([]);
   });
 
   test("does not match the CLI, another process, or an unavailable process list", () => {
-    const anything = () => true;
-    expect(runningAppBundlePaths(() => "/Users/hasna/.bun/bin/recordings", anything)).toEqual([]);
-    expect(runningAppBundlePaths(() => "/usr/bin/tail", anything)).toEqual([]);
-    expect(runningAppBundlePaths(() => null, anything)).toEqual([]);
-    expect(runningAppBundlePaths(() => "", anything)).toEqual([]);
+    const anyBundle = () => "com.hasna.recordings";
+    expect(
+      runningAppBundlePaths({ listProcesses: () => "/Users/hasna/.bun/bin/recordings", readBundleIdentifier: anyBundle }),
+    ).toEqual([]);
+    expect(runningAppBundlePaths({ listProcesses: () => "/usr/bin/tail", readBundleIdentifier: anyBundle })).toEqual([]);
+    expect(runningAppBundlePaths({ listProcesses: () => null, readBundleIdentifier: anyBundle })).toEqual([]);
+    expect(runningAppBundlePaths({ listProcesses: () => "", readBundleIdentifier: anyBundle })).toEqual([]);
   });
 
   test("ignores paths that are not the executable inside the bundle", () => {
-    const anything = () => true;
-    expect(runningAppBundlePaths(() => "/Applications/Recordings.app", anything)).toEqual([]);
+    const anyBundle = () => "com.hasna.recordings";
     expect(
-      runningAppBundlePaths(
-        () => "/Applications/Recordings.app/Contents/Helpers/recordings-update-client",
-        anything,
-      ),
+      runningAppBundlePaths({ listProcesses: () => "/Applications/Recordings.app", readBundleIdentifier: anyBundle }),
     ).toEqual([]);
-    // A nested path below MacOS/ is not the executable either.
     expect(
-      runningAppBundlePaths(() => "/Applications/Recordings.app/Contents/MacOS/sub/thing", anything),
+      runningAppBundlePaths({
+        listProcesses: () => "/Applications/Recordings.app/Contents/Helpers/recordings-update-client",
+        readBundleIdentifier: anyBundle,
+      }),
+    ).toEqual([]);
+    expect(
+      runningAppBundlePaths({
+        listProcesses: () => "/Applications/Recordings.app/Contents/MacOS/sub/thing",
+        readBundleIdentifier: anyBundle,
+      }),
     ).toEqual([]);
   });
 });
