@@ -398,7 +398,14 @@ describe("native paste delivery verification contract", () => {
     // The later reading becomes what the log reports, or `PasteDeliveryReport` keeps carrying the
     // pre-post one and states `secure_input=inactive` for a paste secure input may have eaten.
     const afterPost = poster.slice(secondProbe);
-    expect(afterPost).toMatch(/if case \.active = secureInputAfterPost/);
+    // Exhaustive over the three states, so a fourth has to decide rather than silently keeping the
+    // pre-post reading. `.active` is the reading the log must carry; a definite `.inactive` after an
+    // indefinite pre-post reading is strictly more informative and replaces it; `.unknown` never
+    // displaces a definite one.
+    expect(afterPost).toContain("switch secureInputAfterPost {");
+    for (const arm of ["case .active:", "case .inactive:", "case .unknown:"]) {
+      expect(afterPost, `missing arm: ${arm}`).toContain(arm);
+    }
     expect(afterPost).toContain("lastPasteSecureInputProbe = secureInputAfterPost");
 
     // And it must NOT become a refusal. `.refusedSecureInput` is answered by `failNow`, which

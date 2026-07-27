@@ -767,8 +767,14 @@ public final class RecordingEngine: ObservableObject {
         /// rather than defaulting into a section whose remedy does not fit it.
         var isTriggerHealth: Bool {
             switch self {
-            case .hotkey, .fnKey: true
-            case .delivery, .pressConsumed: false
+            // `.pressConsumed` IS trigger health: it is written from the fn and hotkey release
+            // handlers and says "press and hold again to record". Classifying it as non-trigger
+            // dropped it from the one section documented as "a trigger that is switched on but
+            // cannot arm must say so next to its own switch". `remedy` alone suppresses the wrong
+            // button, so the row belongs here.
+            case .hotkey, .fnKey, .pressConsumed: true
+            // Delivery is about the last paste, not about a binding. It gets its own row.
+            case .delivery: false
             }
         }
 
@@ -1033,8 +1039,13 @@ public final class RecordingEngine: ObservableObject {
             // `PasteAttempt`, or the log token lies about whether events were posted. That
             // widening is a design change, left for review rather than smuggled in here.
             let secureInputAfterPost = SecureInputProbe.current()
-            if case .active = secureInputAfterPost {
-                self?.lastPasteSecureInputProbe = secureInputAfterPost
+            switch secureInputAfterPost {
+            // Held after the posts: the reading the log must carry.
+            case .active: self?.lastPasteSecureInputProbe = secureInputAfterPost
+            // Definite after an indefinite pre-post reading is strictly more informative, so it
+            // replaces it; the reverse would discard a definite reading for an indefinite one.
+            case .inactive: if case .unknown = secureInput { self?.lastPasteSecureInputProbe = secureInputAfterPost }
+            case .unknown: break
             }
             // Constructed and posted. Nothing here observes delivery, which is why this
             // returns `.posted` and not a success.
@@ -1431,9 +1442,22 @@ public final class RecordingEngine: ObservableObject {
         generation: UInt64? = nil
     ) {
         if let reason, !reason.isEmpty {
+            // Refuse the write outright when the reason belongs to a superseded recording. The
+            // expiry in `updateStatus()` is lazy — no production caller runs it on the delivery
+            // completion or the return to idle — so a superseded reason written here would render
+            // and stay rendered until the owner next touched a trigger. Declining the store is the
+            // pre-render gate; the expiry remains as defence against a generation bump that
+            // happens AFTER a legitimate write.
+            if source == .delivery, let generation, generation != recordingGeneration {
+                log("delivery blocked reason refused for superseded generation=\(generation) current=\(recordingGeneration)")
+                return
+            }
             blockedReasons[source] = reason
             if source == .delivery {
-                deliveryBlockedReasonGeneration = generation ?? recordingGeneration
+                // `nil` means unscoped, NOT "current". The public `pasteIntoFrontApp` route has no
+                // pipeline generation, so there is nothing that can supersede its reason and it
+                // must not be stamped with a generation it never belonged to.
+                deliveryBlockedReasonGeneration = generation
             }
         } else {
             blockedReasons.removeValue(forKey: source)
@@ -1533,8 +1557,13 @@ public final class RecordingEngine: ObservableObject {
         flowPhase = .idle
     }
 
-    /// Drop a `.delivery` reason that belongs to a superseded recording, before anything renders
-    /// it as the current state of the app.
+    /// Drop a `.delivery` reason whose recording has been superseded since it was written.
+    ///
+    /// Lazily, and deliberately named as such: this runs only from `updateStatus()`, and no
+    /// production caller invokes that on the delivery completion or on the return to idle. It is
+    /// therefore NOT the pre-render gate — `setBlockedReason` declining the write is. This covers
+    /// the other half: a generation bump that happens after a legitimate write, which
+    /// `cancelIntentProcessing()` does.
     ///
     /// This is the structural half of the delivery reason's lifetime, and it exists because the
     /// two halves are asymmetric: `updateDeliveryStatus` refuses to write a *status* for a

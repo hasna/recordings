@@ -402,8 +402,14 @@ describe("blocked-trigger reporting contract", () => {
     // Scoped to trigger sources, not to whatever is composed.
     expect(section).toContain("engine.blockedReasonEntries.filter(\\.isTriggerHealth)");
     expect(section).not.toContain("engine.blockedReason {");
-    // The button is keyed to the remedy, so only the cause Accessibility actually fixes offers it.
-    expectOrder(section, "entry.remedy == .openAccessibilitySettings", "openAccessibilitySettings()");
+    // The button is keyed to the remedy with a `switch`, never `==`. This engine forbids `==`
+    // against an enum case in three separate comments for one reason: it answers `false` for every
+    // case added later, so a fourth remedy carrying a button would silently render none.
+    expect(section).not.toContain("entry.remedy ==");
+    expect(section).toContain("switch entry.remedy {");
+    expect(section).toContain("case .openAccessibilitySettings:");
+    expect(section).toContain("case .chooseAnotherShortcut, .messageOnly:");
+    expectOrder(section, "case .openAccessibilitySettings:", "openAccessibilitySettings()");
 
     // And the remedy mapping is the engine's, exhaustive, so a new source must decide rather than
     // inherit a button that does not fit it.
@@ -411,9 +417,30 @@ describe("blocked-trigger reporting contract", () => {
     expect(sources).toContain("case .fnKey: .openAccessibilitySettings");
     expect(sources).toContain("case .hotkey: .chooseAnotherShortcut");
     expect(sources).toContain("case .delivery, .pressConsumed: .messageOnly");
+    // `.pressConsumed` IS trigger health — it is written from the fn and hotkey RELEASE handlers
+    // and says "press and hold again to record", which is this section's own subject. Classifying
+    // it as non-trigger dropped it from the only section documented to carry it.
     const triggerHealth = sliceBetween(engineSource, "var isTriggerHealth: Bool", "var remedy:");
-    expect(triggerHealth).toContain("case .hotkey, .fnKey: true");
-    expect(triggerHealth).toContain("case .delivery, .pressConsumed: false");
+    expect(triggerHealth).toContain("case .hotkey, .fnKey, .pressConsumed: true");
+    expect(triggerHealth).toContain("case .delivery: false");
+  });
+
+  /**
+   * Scoping the trigger section was right; dropping delivery reasons from Settings entirely was
+   * not. A `.delivery` reason is the only message telling the owner their transcript is still
+   * recoverable, and without a row here its surfaces are a wordless warning triangle in the menu
+   * bar and a `.font(.caption)` line behind a click. A sighted owner could not read "press Cmd-V"
+   * anywhere in Settings.
+   */
+  test("delivery reasons keep a Settings surface of their own, without a trigger remedy", () => {
+    const delivery = sliceBetween(settingsSource, 'Section("Last Delivery")', 'Section("Permissions")');
+    expect(delivery).toContain("engine.blockedReasonEntries.filter { !$0.isTriggerHealth }");
+    expect(delivery).toContain("exclamationmark.triangle.fill");
+    // No trigger remedy in a section about the last paste.
+    expect(delivery).not.toContain("openAccessibilitySettings");
+    // And it is the non-trigger complement, so every source reaches exactly one of the two rows.
+    const trigger = sliceBetween(settingsSource, 'Section("Recording Shortcut")', 'Section("Last Delivery")');
+    expect(trigger).toContain("filter(\\.isTriggerHealth)");
   });
 
   test("a trigger that fires and is dropped is logged rather than swallowed", () => {
@@ -576,10 +603,18 @@ describe("secure-input delivery contract", () => {
       "private func setBlockedReason(",
       "static func systemReservedShortcuts()",
     );
-    expect(compositor).toContain("deliveryBlockedReasonGeneration = generation ?? recordingGeneration");
-    expect(compositor).toContain("deliveryBlockedReasonGeneration = nil");
+    // The write is REFUSED for a superseded generation, which is the real pre-render gate: the
+    // expiry below is lazy, and no production caller runs `updateStatus()` on the delivery
+    // completion or the return to idle, so a superseded reason written here would render and stay
+    // rendered until the owner next touched a trigger.
+    expect(compositor).toContain("if source == .delivery, let generation, generation != recordingGeneration {");
+    expect(compositor).toMatch(/generation != recordingGeneration \{[\s\S]{0,240}?return\n/);
+    // `nil` means unscoped, not "current": the public `pasteIntoFrontApp` route has no pipeline
+    // generation and must not be stamped with one it never belonged to.
+    expect(compositor).toContain("deliveryBlockedReasonGeneration = generation");
+    expect(compositor).not.toContain("generation ?? recordingGeneration");
 
-    // And the reader expires it before anything renders it as current state.
+    // And the lazy expiry still covers a generation bump AFTER a legitimate write.
     const updateStatus = sliceBetween(engineSource, "public func updateStatus()", "// MARK: - Toggle");
     expectOrder(updateStatus, "expireStaleDeliveryBlockedReason()", "if let blockedReason {");
     const expiry = sliceBetween(

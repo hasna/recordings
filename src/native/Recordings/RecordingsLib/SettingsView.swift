@@ -88,10 +88,30 @@ public struct SettingsView: View {
                 ForEach(engine.blockedReasonEntries.filter(\.isTriggerHealth)) { entry in
                     Label(entry.message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    if entry.remedy == .openAccessibilitySettings {
+                    // `switch`, not `==`. This file's engine forbids `==` against an enum case in
+                    // three separate comments for the same reason: it answers `false` for every
+                    // case added later, so a fourth remedy carrying a button would silently render
+                    // none. Exhaustive here means adding one forces the decision.
+                    switch entry.remedy {
+                    case .openAccessibilitySettings:
                         Button("Open Accessibility Settings") {
                             engine.openAccessibilitySettings()
                         }
+                    case .chooseAnotherShortcut, .messageOnly:
+                        EmptyView()
+                    }
+                }
+            }
+
+            // Delivery reasons are not trigger health, but they are the ONLY message telling the
+            // owner their transcript is still recoverable — so they need a surface here, not just
+            // a wordless warning triangle in the menu bar and a caption behind a click. Scoping
+            // the trigger section was right; dropping these entirely was not.
+            if !engine.blockedReasonEntries.filter({ !$0.isTriggerHealth }).isEmpty {
+                Section("Last Delivery") {
+                    ForEach(engine.blockedReasonEntries.filter { !$0.isTriggerHealth }) { entry in
+                        Label(entry.message, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                     }
                 }
             }
