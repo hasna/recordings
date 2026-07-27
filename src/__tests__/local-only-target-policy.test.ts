@@ -218,6 +218,17 @@ describe("local-only approved target policy", () => {
       "-station03\n",
       "station03-\n",
       "s\n",
+      // Both length bounds, from both sides. The corpus held a 1-character target and a
+      // 64-character one, and 64 lived only in a TypeScript-only test — so nothing here
+      // constrained the SHARED verdict anywhere near the limits, and widening either
+      // reader's bound in isolation went unnoticed: shell `-lt 3`->`-lt 2` accepted "st",
+      // shell `-gt 32`->`-gt 64` accepted 33 characters, and the TypeScript
+      // `{1,30}`->`{1,60}` accepted 33 too. Each of those is the divergence direction this
+      // contract exists to close, with the build gate open and the install validator shut.
+      // Both readers bound a target to 3..32 characters, so 2 and 33 are the first
+      // rejected value on each side.
+      "st\n",
+      `${"a".repeat(33)}\n`,
       "# only comments\n",
       "   \n\t\n",
       // Non-ASCII whitespace and NUL. These five diverged before: JS trim() strips
@@ -614,9 +625,25 @@ describe("local-only approved target policy", () => {
     "bunfig.toml",
   ];
 
+  // A working-tree reader that approves every requested target regardless of what the
+  // policy file says. It exists so the gate's choice of reader is observable: see the
+  // comment on `tamperWorkingTreeReader` below.
+  const tamperedWorkingTreeReader = [
+    "# shellcheck shell=bash",
+    "# Fixture-only tampered reader. Approves everything, ignores the policy file.",
+    "read_local_only_targets() {",
+    '  local list_var="$2"',
+    '  local match_var="$3"',
+    "  printf -v \"$list_var\" '%s' 'tampered'",
+    "  printf -v \"$match_var\" '%s' '1'",
+    "}",
+    "",
+  ].join("\n");
+
   function runBuilderTargetGate(
     approvedTarget: string,
     policy: { archived: string; workingTree: string },
+    options: { tamperWorkingTreeReader?: boolean } = {},
   ): { exitCode: number; stderr: string } {
     const root = mkdtempSync(join(tmpdir(), "recordings-builder-gate-"));
     try {
@@ -669,6 +696,18 @@ describe("local-only approved target policy", () => {
       git("commit", "-q", "-m", "fixture");
       git("update-index", "--skip-worktree", policyRelativePath);
       writeFileSync(policyPath, policy.workingTree);
+      // The reader is diverged exactly like the policy, and for the same reason. This
+      // fixture used to copy ONE reader into the package root, so the archived and the
+      // working-tree copies were byte-identical and a gate that resolved the reader from
+      // $PACKAGE_ROOT rather than $SOURCE_PACKAGE_ROOT could not be observed here at all
+      // — that half of the gate was pinned only by a `toContain` over build.sh's text,
+      // which an appended override defeats while the grep still passes. A tampered reader
+      // is strictly worse than a tampered policy: it approves any target regardless of
+      // the policy file's contents, so this is the more important half to defend.
+      if (options.tamperWorkingTreeReader === true) {
+        git("update-index", "--skip-worktree", readerRelativePath);
+        writeFileSync(join(packageRoot, readerRelativePath), tamperedWorkingTreeReader);
+      }
       // If this ever reports changes, require_clean_source aborts the build before the
       // gate and every assertion below becomes vacuous, so prove the tree looks clean.
       const status = Bun.spawnSync(["git", "status", "--porcelain=v1", "--untracked-files=all"], {
@@ -718,6 +757,33 @@ describe("local-only approved target policy", () => {
     // assertion that the build fails: the target the ARCHIVED policy authorizes must get
     // past the target gate, and then stop at the next check for a different reason.
     const archived = runBuilderTargetGate("station06", policy);
+    expect(archived.stderr).not.toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
+    expect(archived.stderr).toContain(
+      "require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256",
+    );
+  });
+
+  test("the builder's gate reads the archived reader, not the working tree", () => {
+    // Both roots hold the SAME policy, so the only thing that differs between the two
+    // roots here is the reader itself. The archived copy is the real reader and approves
+    // only station06; the working-tree copy approves everything and names its list
+    // "tampered", which makes the gate's choice visible in stderr either way.
+    const policy = { archived: "station06\n", workingTree: "station06\n" };
+    const tampered = { tamperWorkingTreeReader: true };
+
+    // Sourcing the working-tree reader would approve "attacker" and carry it past the
+    // target gate. The gate must refuse, and must name the archived reader's list.
+    const forged = runBuilderTargetGate("attacker", policy, tampered);
+    expect(forged.exitCode).not.toBe(0);
+    expect(forged.stderr).toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
+    expect(forged.stderr).toContain("(station06)");
+    expect(forged.stderr).not.toContain("tampered");
+
+    // The converse, so this is a two-sided proof rather than an assertion that the build
+    // fails for some unrelated reason: with the same tampered reader on disk, the target
+    // the ARCHIVED policy authorizes still gets past the target gate and stops at the
+    // next check. That also proves the tampered file did not simply break the sourcing.
+    const archived = runBuilderTargetGate("station06", policy, tampered);
     expect(archived.stderr).not.toContain("require an approved RECORDINGS_LOCAL_APPROVED_TARGET");
     expect(archived.stderr).toContain(
       "require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256",
