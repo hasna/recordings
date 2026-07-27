@@ -830,10 +830,23 @@ public final class RecordingEngine: ObservableObject {
     private let fnMonitor = FnKeyMonitor()
     private var permissionRetryTimer: Timer?
 
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    /// Filesystem root for every artifact the engine owns: the audio spool, the
+    /// API-key/language store (`config.json`), `Recordings.log`, and the `recordings` CLI it
+    /// shells out to. This is the same `homePath:` seam `NativeAppLog.write` and
+    /// `OpenAIAPIKeyStore` already expose, defaulted the same way — production keeps the real
+    /// home and is unchanged.
+    ///
+    /// Unlike the closure seams above it must be supplied before `init` returns, because
+    /// `init` already creates `audioDir` and logs; hence an `init(homePath:)` parameter
+    /// rather than a settable property. Tests must pass a temp directory: with the default,
+    /// every engine a test builds appends the suite's synthetic fixtures
+    /// (`target=com.example.editor pid=99999`) to the operator's live `Recordings.log` and
+    /// rewrites their real `config.json`.
+    let home: String
     private var audioDir: String { "\(home)/.hasna/recordings/audio" }
 
-    public init() {
+    public init(homePath: String = FileManager.default.homeDirectoryForCurrentUser.path) {
+        home = homePath
         try? FileManager.default.createDirectory(atPath: audioDir, withIntermediateDirectories: true)
         log("RecordingEngine init; microphone=\(microphonePermissionLabel); accessibility=\(accessibilityPermissionLabel)")
 

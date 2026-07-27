@@ -67,7 +67,7 @@ private func makeEngine(
     accessibilityTrusted: Bool = true,
     pasteRecorder: PasteRecorder? = nil
 ) -> RecordingEngine {
-    let engine = RecordingEngine()
+    let engine = RecordingEngine(homePath: makeIsolatedTestHome("delivery-tests"))
     engine.openAIAPIKeyProvider = { "" }
     engine.microphoneAuthorization = { .denied }
     engine.accessibilityTrustCheck = { accessibilityTrusted }
