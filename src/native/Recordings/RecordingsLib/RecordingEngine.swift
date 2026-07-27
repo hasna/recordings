@@ -724,7 +724,17 @@ private extension Data {
 
 @MainActor
 public final class RecordingEngine: ObservableObject {
-    @Published public var isRecording = false
+    /// Audio is arriving. Not "a start was requested": `AVAudioEngine.start()` returns before
+    /// the input tap delivers its first sample (measured cold on Apple silicon:
+    /// `native recorder started` at +541 ms, `native recorder received first PCM chunk` at
+    /// +644 ms), and a hold released inside that window captured nothing at all. Flipping this
+    /// on `start()` returning is what let a short tap fall through to the transcription
+    /// pipeline with an empty buffer and finish silently.
+    @Published public private(set) var isRecording = false
+    /// The microphone is open but has not produced a sample yet — the ~100 ms window above.
+    /// Surfaces render this as recording (the user is holding the key), and every teardown
+    /// path can abandon it, but nothing may treat it as audio that exists.
+    @Published public private(set) var isWarmingUpCapture = false
     @Published public var useFnKey: Bool = false {
         didSet {
             UserDefaults.standard.set(useFnKey, forKey: "useFnKey")
@@ -1202,6 +1212,7 @@ public final class RecordingEngine: ObservableObject {
                 guard Self.canBeginRecording(
                     isRecording: self.isRecording,
                     isTranscribing: self.isTranscribing,
+                    isWarmingUpCapture: self.isWarmingUpCapture,
                     isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse,
                     isDeliveryPending: self.deliveryIsPending
                 ) else {
@@ -1215,25 +1226,8 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fnKeyIsDown = false
-                guard self.useFnKey, self.activeTrigger == .fnKey else { return }
-                guard self.isRecording else {
-                    self.log("fn released before recording started; cancelling pending start")
-                    // The press was consumed and nothing was recorded. `resetRecordingIntent()`
-                    // + `updateStatus()` used to write "Ready" here, so the whole event was
-                    // invisible: the trigger fired, a permission was missing, and the app said
-                    // nothing. Cancelling stays; the silence does not.
-                    let consumedByPermissionPrompt = self.microphonePermissionStartGate.isAwaitingResponse
-                    self.resetRecordingIntent()
-                    if consumedByPermissionPrompt {
-                        self.setBlockedReason(
-                            Self.pressConsumedByPermissionPromptMessage,
-                            for: .pressConsumed
-                        )
-                    }
-                    self.updateStatus()
-                    return
-                }
-                self.stopAndTranscribe()
+                guard self.useFnKey else { return }
+                self.handleTriggerRelease(.fnKey)
             }
         }
         updateFnMonitor(allowAutomaticPrompt: false)
@@ -1245,6 +1239,7 @@ public final class RecordingEngine: ObservableObject {
                 guard Self.canBeginRecording(
                     isRecording: self.isRecording,
                     isTranscribing: self.isTranscribing,
+                    isWarmingUpCapture: self.isWarmingUpCapture,
                     isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse,
                     isDeliveryPending: self.deliveryIsPending
                 ) else {
@@ -1258,23 +1253,7 @@ public final class RecordingEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.keyboardShortcutIsDown else { return }
                 self.keyboardShortcutIsDown = false
-                guard self.activeTrigger == .keyboardShortcut else { return }
-                guard self.isRecording else {
-                    self.log("shortcut released before recording started; cancelling pending start")
-                    // Same branch, same defect: the hotkey has an identical
-                    // released-before-start path, so it needs the identical disclosure.
-                    let consumedByPermissionPrompt = self.microphonePermissionStartGate.isAwaitingResponse
-                    self.resetRecordingIntent()
-                    if consumedByPermissionPrompt {
-                        self.setBlockedReason(
-                            Self.pressConsumedByPermissionPromptMessage,
-                            for: .pressConsumed
-                        )
-                    }
-                    self.updateStatus()
-                    return
-                }
-                self.stopAndTranscribe()
+                self.handleTriggerRelease(.keyboardShortcut)
             }
         }
 
@@ -1379,9 +1358,15 @@ public final class RecordingEngine: ObservableObject {
     /// Both global triggers used to `return` silently when the engine was busy, so a press
     /// that produced nothing left no trace at all — indistinguishable from a trigger that
     /// never fired. Name the refusal instead.
+    ///
+    /// Every field the start gate consults must appear here, `isWarmingUpCapture` included:
+    /// a press arriving during the ~100 ms warm-up is refused by that field alone, and
+    /// omitting it would print every reason as false and reproduce the exact silence this
+    /// function was added to end.
     private func logIgnoredTrigger(_ trigger: RecordingTrigger) {
         log(
             "trigger ignored trigger=\(trigger) isRecording=\(isRecording) "
+                + "isWarmingUpCapture=\(isWarmingUpCapture) "
                 + "isTranscribing=\(isTranscribing) deliveryPending=\(deliveryIsPending) "
                 + "awaitingMicrophonePermission=\(microphonePermissionStartGate.isAwaitingResponse)"
         )
@@ -1553,8 +1538,13 @@ public final class RecordingEngine: ObservableObject {
     static let pressConsumedByPermissionPromptMessage =
         "Permission was requested — press and hold again to record"
 
+    /// The only writer of the idle status pair. Nothing else may set `statusMessage` to
+    /// "Ready" — three separate callers had grown their own copy of that assignment, and each
+    /// one silently bypassed the `blockedReason` branch below, overwriting a live "the app
+    /// cannot do the thing you asked" disclosure with a cheerful "Ready". Route every
+    /// return-to-idle through here so a fourth copy cannot appear.
     public func updateStatus() {
-        if isRecording || isTranscribing || deliveryIsPending { return }
+        if captureIsActive || isTranscribing || deliveryIsPending { return }
         expireStaleDeliveryBlockedReason()
         // A blocked trigger outlives one status write. `init` and every `useFnKey` change
         // called `updateFnMonitor()` and then `updateStatus()`, so the fn permission
@@ -1598,10 +1588,49 @@ public final class RecordingEngine: ObservableObject {
         setBlockedReason(nil, for: .delivery)
     }
 
+    // MARK: - Trigger release
+
+    /// Single key-up path for both hold-to-record triggers, so fn and the configurable
+    /// shortcut can never diverge on the only question that matters here: whether any audio
+    /// exists yet. A release that lands before the first PCM chunk is a tap that captured
+    /// nothing, and it is abandoned rather than transcribed.
+    func handleTriggerRelease(_ trigger: RecordingTrigger) {
+        guard activeTrigger == trigger else { return }
+        guard isRecording else {
+            log("\(trigger) released before audio started; cancelling pending start")
+            cancelPendingStart()
+            return
+        }
+        stopAndTranscribe()
+    }
+
+    /// Key-up with no audio yet. Two windows reach this: the microphone permission prompt
+    /// (nothing was ever started, so there is nothing to tear down) and the warm-up window
+    /// (the microphone is open and a realtime session may be negotiating, both of which must
+    /// be closed).
+    private func cancelPendingStart() {
+        if isWarmingUpCapture {
+            abandonWarmingCapture(
+                reason: "trigger released before first audio",
+                alert: .releasedBeforeAudio
+            )
+            return
+        }
+        // Nothing was started: the press landed while the microphone permission prompt was up
+        // and was consumed by it. Both key-up handlers used to carry a copy of this disclosure;
+        // it belongs here, once, with the rest of the no-audio branch.
+        let consumedByPermissionPrompt = microphonePermissionStartGate.isAwaitingResponse
+        resetRecordingIntent()
+        if consumedByPermissionPrompt {
+            setBlockedReason(Self.pressConsumedByPermissionPromptMessage, for: .pressConsumed)
+        }
+        updateStatus()
+    }
+
     // MARK: - Toggle
 
     public func toggleRecording() {
-        if isRecording { stopAndTranscribe() } else { startRecording(trigger: .manual) }
+        if captureIsActive { stopAndTranscribe() } else { startRecording(trigger: .manual) }
     }
 
     // MARK: - Start Recording (Streaming)
@@ -1610,6 +1639,7 @@ public final class RecordingEngine: ObservableObject {
         guard Self.canBeginRecording(
             isRecording: isRecording,
             isTranscribing: isTranscribing,
+            isWarmingUpCapture: isWarmingUpCapture,
             isAwaitingMicrophonePermission: microphonePermissionStartGate.isAwaitingResponse,
             isDeliveryPending: deliveryIsPending
         ) else {
@@ -1782,13 +1812,18 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    /// `isWarmingUpCapture` deliberately has no default. It is a safety input, and a default of
+    /// `false` is the permissive value: a call site that forgot it would compile, read as
+    /// startable during the warm-up window, and open a second recorder on top of a live one.
     nonisolated static func canBeginRecording(
         isRecording: Bool,
         isTranscribing: Bool,
+        isWarmingUpCapture: Bool,
         isAwaitingMicrophonePermission: Bool = false,
         isDeliveryPending: Bool = false
     ) -> Bool {
         !isRecording && !isTranscribing && !isAwaitingMicrophonePermission && !isDeliveryPending
+            && !isWarmingUpCapture
     }
 
     nonisolated static func shouldCaptureSelection(
@@ -1829,10 +1864,16 @@ public final class RecordingEngine: ObservableObject {
         Self.canBeginRecording(
             isRecording: isRecording,
             isTranscribing: isTranscribing,
+            isWarmingUpCapture: isWarmingUpCapture,
             isAwaitingMicrophonePermission: microphonePermissionStartGate.isAwaitingResponse,
             isDeliveryPending: deliveryIsPending
         )
     }
+
+    /// A capture attempt is in flight — warming up or live. Anything that used to read
+    /// `isRecording` because it meant "a recording is happening" reads this instead, so the
+    /// warm-up window can neither look idle nor accept a second start.
+    public var captureIsActive: Bool { isWarmingUpCapture || isRecording }
 
     /// Whether an in-flight Deciding/Answering/Rewriting delivery can be cancelled. Once a
     /// paste transaction is submitted the remaining window is sub-second and has its own
@@ -1912,21 +1953,32 @@ public final class RecordingEngine: ObservableObject {
         )
         activeCaptureConfiguration = captureConfiguration
         log("startNativeRecording apiKeyConfigured=\(!apiKey.isEmpty)")
-        if !apiKey.isEmpty {
-            startRealtimeStreaming(
-                apiKey: apiKey,
-                transcriptionLanguage: transcriptionLanguage
-            )
-        }
+        // Constructing the client is a plain allocation; the WebSocket handshake happens in
+        // `beginRealtimeStreaming` below, only once the recorder has actually started. The
+        // stream pipe needs the client at construction time, which is why the two steps are
+        // split rather than simply reordered. The handshake cannot be deferred further — to
+        // the first PCM chunk — without reworking `PCMStreamPipe`: `RealtimeTranscriptionClient`
+        // silently drops audio queued while `isStreaming` is false.
+        let client: RealtimeTranscriptionClient? = apiKey.isEmpty
+            ? nil
+            : RealtimeTranscriptionClient(apiKey: apiKey, homePath: home)
+        realtimeClient = client
 
-        let client = realtimeClient
         let streamPipe = PCMStreamPipe(chunkSize: 4_800, client: client)
         pcmStreamPipe = streamPipe
         let homePath = home
+        let captureGeneration = recordingGeneration
+        let confirmCapture: @MainActor @Sendable (UInt64) -> Void = { [weak self] generation in
+            self?.confirmCaptureIsLive(generation: generation)
+        }
         let firstChunkLogged = LockedFlag()
         let recorder = recorderFactory { data in
             if firstChunkLogged.take() {
                 NativeAppLog.write("native recorder received first PCM chunk bytes=\(data.count)", homePath: homePath)
+                // The first sample is the only honest signal that this recording exists.
+                // Promoting the capture here — not when `start()` returned — is what makes a
+                // release during warm-up take the cancel path.
+                Task { @MainActor in confirmCapture(captureGeneration) }
             }
             streamPipe.append(data)
         }
@@ -1935,7 +1987,7 @@ public final class RecordingEngine: ObservableObject {
             try recorder.start()
             log("native recorder started")
             nativeRecorder = recorder
-            isRecording = true
+            isWarmingUpCapture = true
             recordingDuration = 0
             streamingText = ""
             liveTranscriptionText = ""
@@ -1943,7 +1995,12 @@ public final class RecordingEngine: ObservableObject {
             activeAudioPath = "\(audioDir)/recording-\(Self.timestampForFilename()).wav"
             let trigger = activeTrigger ?? .manual
             statusMessage = Self.recordingStatus(trigger: trigger)
+            // The pane must not look dead for the ~100 ms of warm-up, so it enters the
+            // listening layout immediately; Stop and Discard there both abandon the attempt.
             flowPhase = .listening
+            if let client {
+                beginRealtimeStreaming(client: client, transcriptionLanguage: transcriptionLanguage)
+            }
 
             recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -1952,6 +2009,12 @@ public final class RecordingEngine: ObservableObject {
             }
         } catch {
             log("native recorder failed error=\(error.localizedDescription)")
+            // Unreachable today — nothing between `recorder.start()` and `isWarmingUpCapture`
+            // can throw — but a warming flag left set here wedges the engine permanently: the
+            // start gate refuses every press and no teardown path runs, with the input device
+            // possibly open. One added throwing call above is all it would take, so clear it
+            // here rather than rely on the current statement order.
+            isWarmingUpCapture = false
             realtimeClient?.stop()
             realtimeClient = nil
             streamingTask?.cancel()
@@ -1965,11 +2028,87 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    // MARK: - Capture confirmation
+
+    /// Promotes a warming capture to live on the first PCM chunk. Bound to the generation that
+    /// requested it, because a chunk already in the recorder's delivery queue can be handed to
+    /// the MainActor *after* a key-up has abandoned the attempt — that late chunk must never
+    /// resurrect a dead recording.
+    private func confirmCaptureIsLive(generation: UInt64) {
+        guard generation == recordingGeneration, isWarmingUpCapture else { return }
+        isWarmingUpCapture = false
+        isRecording = true
+        log("native capture confirmed live")
+    }
+
+    /// Tears down a capture attempt that never produced a sample. `recorder.start()` had
+    /// succeeded, so the microphone is open and a realtime session may be mid-handshake, but
+    /// there is no audio: running the transcription pipeline over that empty buffer is exactly
+    /// what made a short tap finish silently. `alert` is nil when the user asked for the
+    /// discard and therefore already knows the outcome.
+    private func abandonWarmingCapture(reason: String, alert: RecordingAttemptAlert?) {
+        guard isWarmingUpCapture else { return }
+        log("capture abandoned before first audio reason=\(reason)")
+        // Supersede the attempt so every completion still bound to it — a queued first-chunk
+        // confirmation, the resolved start context — is stale and cannot apply.
+        recordingGeneration &+= 1
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        let recorder = nativeRecorder
+        nativeRecorder = nil
+        recorder?.stop()
+
+        realtimeClient?.stop()
+        realtimeClient = nil
+        streamingTask?.cancel()
+        streamingTask = nil
+        pcmStreamPipe?.cancel()
+        pcmStreamPipe = nil
+
+        isWarmingUpCapture = false
+        isRecording = false
+        isTranscribing = false
+        streamingText = ""
+        liveTranscriptionText = ""
+        recordedPCM.removeAll(keepingCapacity: true)
+        activeAudioPath = nil
+        activeCaptureConfiguration = nil
+        resetRecordingIntent()
+
+        if let alert {
+            discloseEmptyAttempt(alert)
+        } else {
+            // `updateStatus()`, never a direct "Ready": the state above is already cleared, so
+            // its early return does not fire, and going through it is what preserves a live
+            // `blockedReason` instead of overwriting the disclosure with "Ready".
+            updateStatus()
+        }
+    }
+
+    // MARK: - Visible outcome
+
+    /// Discloses an attempt that produced nothing, on the one surface that is always on screen.
+    ///
+    /// Routed through `setBlockedReason(_:for: .pressConsumed)` rather than a published field of
+    /// its own. That slot already means "a press was consumed and nothing was recorded", it is
+    /// already cleared by the next `startRecording`, and `MenuBarPresentation` already renders
+    /// `blockedReason` with a distinct icon and a distinct VoiceOver label. It also outlives a
+    /// timer: the disclosure is still on the glyph a minute later, which a three-second badge on
+    /// a surface the user had no reason to watch would not be.
+    private func discloseEmptyAttempt(_ alert: RecordingAttemptAlert) {
+        log("attempt produced no audio disclosure=\(alert)")
+        setBlockedReason(alert.message, for: .pressConsumed)
+        updateStatus()
+    }
+
     // MARK: - Real-time Streaming
 
-    private func startRealtimeStreaming(apiKey: String, transcriptionLanguage: String) {
-        let client = RealtimeTranscriptionClient(apiKey: apiKey, homePath: home)
-        realtimeClient = client
+    private func beginRealtimeStreaming(
+        client: RealtimeTranscriptionClient,
+        transcriptionLanguage: String
+    ) {
         let language = OpenAIAPIKeyStore.apiLanguageHint(for: transcriptionLanguage)
         log("realtime streaming task starting language=\(language.isEmpty ? "auto" : language)")
 
@@ -2015,6 +2154,12 @@ public final class RecordingEngine: ObservableObject {
     // MARK: - Cancel (discard without transcribing)
 
     public func cancelRecording() {
+        // Discard during warm-up: identical teardown, but the user asked for it, so the glyph
+        // stays quiet.
+        if isWarmingUpCapture {
+            abandonWarmingCapture(reason: "discarded during warm-up", alert: nil)
+            return
+        }
         guard isRecording else { return }
         log("cancelRecording")
 
@@ -2039,13 +2184,21 @@ public final class RecordingEngine: ObservableObject {
         activeAudioPath = nil
         activeCaptureConfiguration = nil
         resetRecordingIntent()
-        statusMessage = "Ready"
-        flowPhase = .idle
+        // Same reason as the warm-up abandon path: this used to assign "Ready" directly and
+        // silently discard a live trigger-blocked warning.
+        updateStatus()
     }
 
     // MARK: - Stop & Transcribe
 
     public func stopAndTranscribe() {
+        // Stop during the warm-up window has nothing to transcribe — the microphone was opened
+        // but has not delivered a sample. Abandon visibly instead of spending a transcription
+        // pipeline (and a CLI round trip) on an empty buffer.
+        if isWarmingUpCapture {
+            abandonWarmingCapture(reason: "stopped during warm-up", alert: .releasedBeforeAudio)
+            return
+        }
         guard isRecording else { return }
         let pipelineTrace = RecordingPipelineTrace()
         log(pipelineTrace.message(stage: "release"))
@@ -2311,7 +2464,18 @@ public final class RecordingEngine: ObservableObject {
                 } else {
                     self.log("no audio captured")
                     self.pipelineDeliveryGate.abandonPipeline(pipelineGeneration)
-                    self.finish(resolved.failureStatus ?? "No audio captured")
+                    // The one failure the user has no other way to notice: nothing was typed,
+                    // nothing appeared, and the status line lives behind a click on a menu-bar
+                    // glyph that never changed. So disclose it on the glyph too.
+                    //
+                    // One message, used for both. `MenuBarPresentation` renders the blocked
+                    // state as `statusText = blockedReason`, so passing the generic constant here
+                    // while `finish` held a specific `failureStatus` would replace the specific
+                    // diagnosis with "No audio captured" in every surface that reads the
+                    // presentation — losing the more useful of the two.
+                    let failure = resolved.failureStatus ?? RecordingAttemptAlert.noAudioCaptured.message
+                    self.finish(failure)
+                    self.setBlockedReason(failure, for: .pressConsumed)
                 }
             }
 

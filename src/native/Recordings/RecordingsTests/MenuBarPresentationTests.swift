@@ -9,8 +9,10 @@ struct MenuBarPresentationTests {
     func idle() {
         let presentation = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: true,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            blockedReason: nil
         )
         #expect(presentation.iconName == "mic.fill")
         #expect(presentation.accessibilityLabel == "Recordings")
@@ -22,8 +24,10 @@ struct MenuBarPresentationTests {
     func recording() {
         let presentation = MenuBarPresentation(
             isRecording: true,
+            isWarmingUpCapture: false,
             canStartRecording: false,
-            statusMessage: "Recording — release to stop"
+            statusMessage: "Recording — release to stop",
+            blockedReason: nil
         )
         #expect(presentation.iconName == "waveform")
         #expect(presentation.accessibilityLabel == "Recordings, recording")
@@ -36,8 +40,10 @@ struct MenuBarPresentationTests {
         for status in ["Transcribing...", "Deciding...", "Answering...", "Rewriting...", "Pasting..."] {
             let presentation = MenuBarPresentation(
                 isRecording: false,
+                isWarmingUpCapture: false,
                 canStartRecording: false,
-                statusMessage: status
+                statusMessage: status,
+                blockedReason: nil
             )
             #expect(presentation.iconName == "ellipsis.circle", "expected busy icon for \(status)")
             #expect(!presentation.primaryActionEnabled, "Start must be disabled during \(status)")
@@ -56,11 +62,14 @@ struct MenuBarPresentationTests {
         let reason = "This field blocks typing (secure input) — transcript copied, press Cmd-V"
         let ready = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: true,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            blockedReason: nil
         )
         let blocked = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: true,
             statusMessage: "Ready",
             blockedReason: reason
@@ -85,6 +94,7 @@ struct MenuBarPresentationTests {
     func emptyReasonIsNotBlocked() {
         let presentation = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: true,
             statusMessage: "Ready",
             blockedReason: ""
@@ -97,6 +107,7 @@ struct MenuBarPresentationTests {
     func liveStatesWin() {
         let recording = MenuBarPresentation(
             isRecording: true,
+            isWarmingUpCapture: false,
             canStartRecording: false,
             statusMessage: "Recording",
             blockedReason: "stale reason"
@@ -106,6 +117,7 @@ struct MenuBarPresentationTests {
 
         let busy = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: false,
             statusMessage: "Transcribing...",
             blockedReason: "stale reason"
@@ -122,11 +134,71 @@ struct MenuBarPresentationTests {
         // the click. The contract requires busy.
         let deciding = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: false,
-            statusMessage: "Deciding..."
+            statusMessage: "Deciding...",
+            blockedReason: nil
         )
         #expect(!deciding.primaryActionEnabled)
         #expect(deciding.statusText == "Deciding")
+    }
+
+    @Test("the warm-up window presents as recording, never as busy or idle")
+    func warmUpPresentsAsRecording() {
+        // Between `recorder.start()` returning and the first PCM chunk the user is holding the
+        // key. `isRecording` is false there — no audio exists yet — so without this branch the
+        // glyph drops to the busy ellipsis for ~100 ms in the middle of a hold.
+        let presentation = MenuBarPresentation(
+            isRecording: false,
+            isWarmingUpCapture: true,
+            canStartRecording: false,
+            statusMessage: "Recording — release to stop",
+            blockedReason: nil
+        )
+        #expect(presentation.iconName == "waveform")
+        #expect(presentation.accessibilityLabel == "Recordings, recording")
+        #expect(presentation.statusText == "Recording")
+        #expect(presentation.primaryActionEnabled, "Stop must be live during warm-up")
+        #expect(!presentation.isBlocked)
+    }
+
+    @Test("an attempt that captured nothing is disclosed on the glyph, not just in a status line")
+    func emptyAttemptIsDisclosedOnTheGlyph() {
+        // Recordings is LSUIElement: a status line behind a popover click is not feedback. The
+        // engine routes these through `blockedReason`, so they must reach the always-visible
+        // icon and the VoiceOver label, and must not look like plain idle.
+        for alert in [RecordingAttemptAlert.releasedBeforeAudio, .noAudioCaptured] {
+            let presentation = MenuBarPresentation(
+                isRecording: false,
+                isWarmingUpCapture: false,
+                canStartRecording: true,
+                statusMessage: "Ready",
+                blockedReason: alert.message
+            )
+            #expect(presentation.iconName == MenuBarPresentation.blockedIconName, "expected the blocked glyph for \(alert)")
+            #expect(presentation.iconName != MenuBarPresentation.idleIconName)
+            #expect(presentation.statusText == alert.message)
+            #expect(presentation.accessibilityLabel == "Recordings, blocked: \(alert.message)")
+            #expect(presentation.isBlocked)
+            #expect(presentation.primaryActionEnabled, "the attempt is over — Start stays available")
+        }
+    }
+
+    @Test("a hold in progress outranks a still-visible empty-attempt disclosure")
+    func recordingOutranksADisclosure() {
+        // `blockedReason` is cleared by the next `startRecording`, but the warm-up branch must
+        // win regardless: showing "released too soon" over a live hold would be a lie.
+        for warmingUp in [true, false] {
+            let presentation = MenuBarPresentation(
+                isRecording: !warmingUp,
+                isWarmingUpCapture: warmingUp,
+                canStartRecording: false,
+                statusMessage: "Recording — release to stop",
+                blockedReason: RecordingAttemptAlert.releasedBeforeAudio.message
+            )
+            #expect(presentation.iconName == "waveform")
+            #expect(!presentation.isBlocked)
+        }
     }
 }
 

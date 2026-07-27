@@ -562,8 +562,10 @@ struct PasteSettlementObservationTests {
         #expect(engine.canStartRecording)
         let presentation = MenuBarPresentation(
             isRecording: engine.isRecording,
+            isWarmingUpCapture: engine.isWarmingUpCapture,
             canStartRecording: engine.canStartRecording,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            blockedReason: nil
         )
         #expect(presentation.iconName == "mic.fill")
         #expect(presentation.primaryActionEnabled, "Start must re-enable from the settlement event alone")
@@ -716,8 +718,10 @@ struct MenuBarEngineContractTests {
         #expect(!engine.canStartRecording)
         let busy = MenuBarPresentation(
             isRecording: engine.isRecording,
+            isWarmingUpCapture: engine.isWarmingUpCapture,
             canStartRecording: engine.canStartRecording,
-            statusMessage: engine.statusMessage
+            statusMessage: engine.statusMessage,
+            blockedReason: nil
         )
         #expect(busy.iconName == "ellipsis.circle")
         #expect(!busy.primaryActionEnabled)
@@ -732,8 +736,10 @@ struct MenuBarEngineContractTests {
         _ = await waitUntil { engine.canStartRecording }
         let idle = MenuBarPresentation(
             isRecording: engine.isRecording,
+            isWarmingUpCapture: engine.isWarmingUpCapture,
             canStartRecording: engine.canStartRecording,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            blockedReason: nil
         )
         #expect(idle.iconName == "mic.fill")
         #expect(idle.primaryActionEnabled)

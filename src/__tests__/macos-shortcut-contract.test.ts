@@ -209,6 +209,37 @@ describe("blocked-trigger reporting contract", () => {
     expectOrder(updateStatus, "if let blockedReason", 'statusMessage = "Ready"');
   });
 
+  /**
+   * `updateStatus()` is the only function that honours `triggerBlockedReason`, so any other
+   * writer of the idle status pair silently erases the warning. Three had already grown —
+   * `updateStatus()` itself, `cancelRecording()`, and the warm-up abandon path — and patching
+   * them one at a time is how a fourth lands. Pin the single-writer property instead.
+   */
+  test("only updateStatus writes the idle Ready status", () => {
+    const writes = engineSource.match(/^\s*statusMessage = "Ready"/gm) ?? [];
+    expect(writes.length).toBe(1);
+    const updateStatus = engineSource.slice(
+      engineSource.indexOf("public func updateStatus()"),
+      engineSource.indexOf("// MARK: - Trigger release"),
+    );
+    expect(updateStatus).toContain('statusMessage = "Ready"');
+    // Every other return-to-idle must route through it rather than assign directly.
+    for (const caller of [
+      "public func cancelRecording()",
+      "private func abandonWarmingCapture(",
+    ]) {
+      const from = engineSource.indexOf(caller);
+      expect(from, `missing caller: ${caller}`).toBeGreaterThan(-1);
+      const body = engineSource.slice(from, engineSource.indexOf("\n    }\n", from));
+      expect(body, `${caller} must not assign Ready directly`).not.toContain(
+        'statusMessage = "Ready"',
+      );
+      expect(body, `${caller} must return to idle through updateStatus()`).toContain(
+        "updateStatus()",
+      );
+    }
+  });
+
   test("the fn monitor sets its own half of the reason and clears it on success", () => {
     const updateFnMonitor = engineSource.slice(
       engineSource.indexOf("private func updateFnMonitor("),
@@ -470,9 +501,30 @@ describe("blocked state is visible in the always-on surface", () => {
   );
 
   test("the presentation takes the blocked reason instead of discarding statusMessage", () => {
-    expect(presentationSource).toContain("blockedReason: String? = nil");
+    expect(presentationSource).toContain("blockedReason: String?");
     expect(presentationSource).toContain("} else if let blockedReason, !blockedReason.isEmpty {");
     expect(presentationSource).toContain("public let isBlocked: Bool");
+  });
+
+  /**
+   * `blockedReason` was declared `String? = nil`, and the default was not theoretical:
+   * `App/RuntimeSmoke.swift` omitted the argument and compiled, so that surface rendered every
+   * blocked state as plain idle. `nil` is this argument's invisible value — the same property
+   * that denies `isWarmingUpCapture` a default two lines above — so it does not get one either.
+   */
+  test("no menu-bar surface can omit the blocked reason", () => {
+    expect(presentationSource).not.toContain("blockedReason: String? = nil");
+    for (const file of [
+      "src/native/Recordings/App/MenuBarStatusView.swift",
+      "src/native/Recordings/App/RuntimeSmoke.swift",
+    ]) {
+      const source = readFileSync(file, "utf8");
+      const sites = source.match(/MenuBarPresentation\(\n(?:.*\n)*?\s*\)/g) ?? [];
+      expect(sites.length, `no call sites found in ${file}`).toBeGreaterThan(0);
+      for (const site of sites) {
+        expect(site, `${file}: call site omits blockedReason`).toContain("blockedReason:");
+      }
+    }
   });
 
   /**
@@ -482,10 +534,18 @@ describe("blocked state is visible in the always-on surface", () => {
    * unreachable — the icon is always `ellipsis.circle` — with the body assertions untouched.
    */
   test("every presentation branch condition is exactly as written, so none can be starved", () => {
-    const initBody = sliceBetween(presentationSource, "        if isRecording {", "    }\n}");
+    // First condition is `isRecording || isWarmingUpCapture`, not `isRecording`: this branch makes
+    // warm-up present as recording, because the ~100 ms between `recorder.start()` returning and the
+    // first PCM chunk otherwise reads as a dead app mid-hold. The enumeration is updated rather than
+    // loosened — it is still the exact list, so a fourth condition or a widened one still fails.
+    const initBody = sliceBetween(
+      presentationSource,
+      "        if isRecording || isWarmingUpCapture {",
+      "    }\n}",
+    );
     const conditions = [...initBody.matchAll(/^\s*(?:\} else )?if (.+?) \{$/gm)].map((m) => m[1]);
     expect(conditions).toEqual([
-      "isRecording",
+      "isRecording || isWarmingUpCapture",
       "!canStartRecording",
       "let blockedReason, !blockedReason.isEmpty",
     ]);
@@ -773,44 +833,76 @@ describe("secure-input delivery contract", () => {
 
   test("a press consumed by a permission prompt says so instead of writing Ready", () => {
     expect(engineSource).toContain("static let pressConsumedByPermissionPromptMessage");
-    // Both released-before-start paths — fn and the hotkey — have the identical defect.
-    const consumedWrites =
-      engineSource.match(/Self\.pressConsumedByPermissionPromptMessage,\n\s+for: \.pressConsumed/g) ??
-      [];
-    expect(consumedWrites.length).toBe(2);
 
-    // The CONDITION, not only the text. Both assignments replaced by `= true` claim
-    // "Permission was requested" on every press released before recording starts — reporting a
-    // failure that did not happen; replaced by `= false` the disclosure never fires at all and
-    // the original silent-consumed-press bug is back. Both leave the message constant present and
-    // both write sites exactly as counted above.
-    // Anchored to END OF LINE, because the bare form is a PREFIX: appending `|| true` or
-    // `&& false` left it matching twice, verbatim, while inverting the behaviour in both
-    // directions. The literal check never fired either, because the RHS still starts with `self.`.
+    // Both released-before-start paths — fn and the hotkey — had the identical defect, and used
+    // to carry an identical copy of this disclosure. They now share one release path, so the
+    // guarantee is structural rather than duplicated: assert the single owner, and assert that
+    // both triggers reach it.
+    const consumedWrites =
+      engineSource.match(/Self\.pressConsumedByPermissionPromptMessage, for: \.pressConsumed/g) ??
+      [];
+    // ONE site, not two. #42 asserted two because the fn and the hotkey release handlers each
+    // carried their own copy of this disclosure; this branch unifies them into `cancelPendingStart`,
+    // so the count tracks the code's shape rather than a number. The guarantee #42's count existed
+    // for — that no site quietly loses its condition — is preserved below at the single site, and
+    // each of #42's mutations was re-measured against it rather than assumed.
+    expect(consumedWrites.length).toBe(1);
+
+    // The CONDITION, not only the text. Carried over from #42 and re-pointed at the unified site:
+    // replaced by `= true` this claims "Permission was requested" on every press released before
+    // recording starts — reporting a failure that did not happen; replaced by `= false` the
+    // disclosure never fires at all and the original silent-consumed-press bug is back. Both leave
+    // the message constant present and the write site exactly as counted above.
+    // Anchored to END OF LINE, because the bare form is a PREFIX: appending `|| true` or `&& false`
+    // left it matching, verbatim, while inverting the behaviour in both directions.
+    // `self.` is optional rather than required: #42's two sites sat inside escaping closures and
+    // needed the explicit capture, and the unified site is a plain method body that does not. A
+    // required `self\.` would have made this assertion vacuously true here.
     const conditions =
       engineSource.match(
-        /let consumedByPermissionPrompt\s*=\s*self\.microphonePermissionStartGate\.isAwaitingResponse\s*$/gm,
+        /let consumedByPermissionPrompt\s*=\s*(?:self\.)?microphonePermissionStartGate\.isAwaitingResponse\s*$/gm,
       ) ?? [];
-    expect(conditions.length).toBe(2);
+    expect(conditions.length).toBe(1);
     expect(engineSource).not.toMatch(/let consumedByPermissionPrompt\s*=[^\n]*(?:\|\||&&|true|false)/);
     // And the write is gated on it rather than unconditional.
     const gated = engineSource.match(/if consumedByPermissionPrompt \{/g) ?? [];
-    expect(gated.length).toBe(2);
+    expect(gated.length).toBe(1);
 
-    // Read BEFORE resetRecordingIntent(), which cancels the gate this is asking about.
-    for (const released of ["fn released before recording started", "shortcut released before recording started"]) {
-      const branch = sliceBetween(engineSource, released, "self.updateStatus()");
-      // `self.` prefix on purpose: the surrounding comment names `resetRecordingIntent()` too,
-      // and matching prose instead of the call would make this assertion meaningless.
-      //
-      // `expectOrder`, because `indexOf(...) < indexOf(...)` PASSED when the gate identifier was
-      // deleted: absent, it answers -1, and -1 is less than any index.
-      expectOrder(
-        branch,
-        "microphonePermissionStartGate.isAwaitingResponse",
-        "self.resetRecordingIntent()",
-      );
+    // `sliceBetween`, not two bare `indexOf` calls: a -1 from a missing start marker slices from the
+    // END of the file, and every assertion below it then passes over the wrong text.
+    const cancelPendingStart = sliceBetween(
+      engineSource,
+      "private func cancelPendingStart() {",
+      "\n    }\n",
+    );
+    expect(cancelPendingStart).toContain("pressConsumedByPermissionPromptMessage");
+    expect(cancelPendingStart).toContain("updateStatus()");
+    // Read BEFORE resetRecordingIntent(), which cancels the gate this is asking about. #42's
+    // `expectOrder` rather than comparing two `indexOf` results: absent, `indexOf` answers -1, and
+    // -1 is less than any index, so the comparison PASSED when the gate identifier was deleted.
+    // #42 asserted this on the two release branches by slicing on the log lines
+    // "fn released before recording started" / "shortcut released before recording started"; both
+    // strings are GONE in the merged tree (0 occurrences each) because this branch replaced them
+    // with one path, so that assertion is re-pointed here rather than deleted.
+    expectOrder(
+      cancelPendingStart,
+      "microphonePermissionStartGate.isAwaitingResponse",
+      "resetRecordingIntent()",
+    );
+
+    // Both triggers must route their key-up through the shared path, or one of them is silent
+    // again. `handleTriggerRelease` is the only caller of `cancelPendingStart`.
+    for (const trigger of ["handleTriggerRelease(.fnKey)", "handleTriggerRelease(.keyboardShortcut)"]) {
+      expect(engineSource, `no key-up route for ${trigger}`).toContain(trigger);
     }
+    const release = engineSource.slice(
+      engineSource.indexOf("func handleTriggerRelease(_ trigger: RecordingTrigger) {"),
+      engineSource.indexOf(
+        "\n    }\n",
+        engineSource.indexOf("func handleTriggerRelease(_ trigger: RecordingTrigger) {"),
+      ),
+    );
+    expect(release).toContain("cancelPendingStart()");
   });
 
   /**

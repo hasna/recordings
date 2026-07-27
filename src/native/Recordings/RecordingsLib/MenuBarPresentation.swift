@@ -34,13 +34,27 @@ public struct MenuBarPresentation: Equatable, Sendable {
     /// entirely — so a blocked app was **byte-identical to Ready** in that surface, for sighted
     /// and VoiceOver users alike, and the only channel carrying "press Cmd-V" was a popover the
     /// user had to click open. A reason with no view consumer is not a disclosure.
+    /// - Parameter isWarmingUpCapture: `RecordingEngine.isWarmingUpCapture` — the microphone is
+    ///   open but has not delivered a sample yet. No default: `false` is the *invisible* value,
+    ///   and a surface that forgot it would compile and drop the glyph to the busy ellipsis for
+    ///   ~100 ms in the middle of a hold.
+    ///
+    /// `blockedReason` has no default either, for exactly the same reason and after exactly the
+    /// same regression: `nil` is its invisible value, and while it was defaulted
+    /// `App/RuntimeSmoke.swift` omitted it and compiled — a surface silently rendering every
+    /// blocked state as plain idle. An argument whose absent value *is* the failure mode does
+    /// not get to be optional.
     public init(
         isRecording: Bool,
+        isWarmingUpCapture: Bool,
         canStartRecording: Bool,
         statusMessage: String,
-        blockedReason: String? = nil
+        blockedReason: String?
     ) {
-        if isRecording {
+        // Warm-up presents as recording. The user is holding the key and Stop is live; anything
+        // else would read as a dead app for the ~100 ms between `recorder.start()` returning and
+        // the first PCM chunk.
+        if isRecording || isWarmingUpCapture {
             iconName = "waveform"
             accessibilityLabel = "Recordings, recording"
             statusText = "Recording"

@@ -219,18 +219,27 @@ struct RecordingStartGateTests {
 
     @Test("recording cannot begin while already recording or transcribing")
     func cannotBeginWhenBusy() {
-        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false) == true)
-        #expect(RecordingEngine.canBeginRecording(isRecording: true, isTranscribing: false) == false)
-        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: true) == false)
+        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false, isWarmingUpCapture: false) == true)
+        #expect(RecordingEngine.canBeginRecording(isRecording: true, isTranscribing: false, isWarmingUpCapture: false) == false)
+        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: true, isWarmingUpCapture: false) == false)
         #expect(RecordingEngine.canBeginRecording(
             isRecording: false,
             isTranscribing: false,
+            isWarmingUpCapture: false,
             isAwaitingMicrophonePermission: true
         ) == false)
         #expect(RecordingEngine.canBeginRecording(
             isRecording: false,
             isTranscribing: false,
+            isWarmingUpCapture: false,
             isDeliveryPending: true
+        ) == false)
+        // The warm-up window: `isRecording` is false because no audio has arrived, but the
+        // microphone is open and a second start would open a second recorder on top of it.
+        #expect(RecordingEngine.canBeginRecording(
+            isRecording: false,
+            isTranscribing: false,
+            isWarmingUpCapture: true
         ) == false)
     }
 

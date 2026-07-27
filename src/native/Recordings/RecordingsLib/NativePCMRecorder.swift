@@ -127,6 +127,19 @@ final class NativePCMRecorder: @unchecked Sendable {
         }
 
         do {
+            // These two calls are the ~520 ms a cold start costs, and they are why a short tap
+            // cannot capture anything: `RecordingEngine` only reports a live capture once the
+            // tap above delivers its first buffer, ~100 ms after `start()` returns.
+            //
+            // Pre-warming (holding a started engine between recordings, or hoisting
+            // `prepare()` to app launch) is the only way to make a sub-500 ms press record.
+            // It is deliberately NOT done here: a running engine with an installed input tap
+            // holds the input device open, which lights the macOS microphone-in-use indicator
+            // and lists the app under Control Center's microphone recents for as long as it
+            // runs. A permanently lit indicator is a worse regression than the bug. Whether
+            // `prepare()` alone — resource allocation without starting the IO thread — both
+            // absorbs a useful share of the 520 ms and leaves the indicator dark has to be
+            // measured on real hardware before anyone acts on it.
             engine.prepare()
             try engine.start()
             finishStart()

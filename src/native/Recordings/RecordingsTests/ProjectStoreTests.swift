@@ -139,7 +139,7 @@ struct ProjectStoreTests {
         #expect(store.activeProject?.id == "local-id")
         #expect(store.activeCanonicalProjectIdForRecording == nil)
         #expect(store.effectiveSystemPrompt == "Keep this context")
-        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false))
+        #expect(RecordingEngine.canBeginRecording(isRecording: false, isTranscribing: false, isWarmingUpCapture: false))
 
         let successScript = """
         #!/bin/sh
