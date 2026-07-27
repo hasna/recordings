@@ -324,11 +324,29 @@ jobs:
         # microphone, the clipboard and accessibility APIs, all TCC-gated with no grantable state on
         # a headless runner. Whether that makes them wholly or only partly unrunnable has never been
         # measured, so this records the outcome instead of asserting one.
+        #
+        # `timeout-minutes` and `continue-on-error` are BOTH load-bearing, and this corrects an
+        # earlier comment here which argued continue-on-error was unnecessary because "the if/else
+        # below already absorbs the exit status". It absorbs an exit STATUS. It cannot absorb a HANG:
+        # unbounded, a wedged `swift test` eats the job's timeout-minutes: 45, the job fails, and
+        # `scope` fails with it because it treats any non-success native result as fatal. A step
+        # documented as non-gating must not be able to fail the job, and without a bound this one
+        # could.
+        #
+        # That path became reachable for the first time in #55. Before it the package did not
+        # compile, so this step's `if` was never true and `swift test` had never executed in CI at
+        # all — which is why an unbounded step survived review.
+        #
+        # 12 minutes is headroom, not an expectation: the suite is fully parallel and finishes in
+        # 10.0s on a TCC-granted Mac (station06, 368 tests in 48 suites, total wall time equal to its
+        # slowest single test at 9.995s). A low-parallelism headless runner burning 10s TCC budgets
+        # serially is the case this is sized for. A timeout kill shows up as this step's own red
+        # outcome rather than as the annotation below, since a killed step runs no trailing shell.
         if: steps.compile.outputs.compiled == 'true'
+        continue-on-error: true
+        timeout-minutes: 12
         shell: bash
         run: |
-          # No `continue-on-error` needed: the if/else below already absorbs the exit status. Having
-          # both invites a reader to think the flag is what makes this non-blocking.
           set -o pipefail
           if swift test --package-path src/native/Recordings 2>&1 | tee swift-test.log; then
             echo "::notice title=Native tests passed::swift test is green on this runner and can become a gate."
