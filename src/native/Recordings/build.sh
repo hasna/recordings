@@ -380,6 +380,8 @@ if [ "$SOURCE_PACKAGE_ROOT" != "$PACKAGE_ROOT" ]; then
         "$SOURCE_PACKAGE_ROOT/scripts/native_fs_guard.ts" \
         "$SOURCE_PACKAGE_ROOT/scripts/build_native_fs_guard.sh" \
         "$SOURCE_PACKAGE_ROOT/scripts/native/recordings_fs_guard.c" \
+        "$SOURCE_PACKAGE_ROOT/scripts/policy/local-only-approved-targets.txt" \
+        "$SOURCE_PACKAGE_ROOT/scripts/read_local_only_targets.sh" \
         "$SOURCE_PACKAGE_ROOT/packaging/macos/build_release_pkg.sh" \
         "$SOURCE_PACKAGE_ROOT/packaging/macos/release_lifecycle.ts" \
         "$SOURCE_PACKAGE_ROOT/packaging/macos/Verifier.entitlements" \
@@ -991,8 +993,25 @@ if [ "$MODE" = "release" ]; then
         fi
     fi
 elif [ "$MODE" = "local" ]; then
-    if [ "$LOCAL_APPROVED_TARGET" != "station06" ]; then
-        echo "Local-only builds currently require RECORDINGS_LOCAL_APPROVED_TARGET=station06." >&2
+    # Same policy file and same sourced reader the installer uses. The artifact tool
+    # re-implements the same rules in TypeScript and re-checks the target later, so
+    # agreement between the two implementations rests on their shared contract test,
+    # not on shared code.
+    LOCAL_TARGET_POLICY="${PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
+    LOCAL_TARGET_READER="${PACKAGE_ROOT}/scripts/read_local_only_targets.sh"
+    [ -f "$LOCAL_TARGET_READER" ] && [ ! -L "$LOCAL_TARGET_READER" ] || {
+        echo "Packaged local-only approved target reader is missing." >&2
+        exit 1
+    }
+    # shellcheck source=/dev/null
+    . "$LOCAL_TARGET_READER"
+    LOCAL_APPROVED_TARGET_MATCHED=0
+    LOCAL_APPROVED_TARGET_LIST=""
+    read_local_only_targets \
+        "$LOCAL_TARGET_POLICY" LOCAL_APPROVED_TARGET_LIST LOCAL_APPROVED_TARGET_MATCHED \
+        "$LOCAL_APPROVED_TARGET" || exit 1
+    if [ "$LOCAL_APPROVED_TARGET_MATCHED" -ne 1 ]; then
+        echo "Local-only builds require an approved RECORDINGS_LOCAL_APPROVED_TARGET (${LOCAL_APPROVED_TARGET_LIST})." >&2
         exit 1
     fi
     if ! [[ "$LOCAL_APPROVED_TARGET_IDENTITY_SHA256" =~ ^[a-f0-9]{64}$ ]]; then

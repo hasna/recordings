@@ -115,7 +115,10 @@ RECORDINGS_RELEASE_COMPATIBLE_COHORT_MANIFEST="/Library/Application Support/Hasn
   ./build.sh release app-update
 
 # Explicit local-only alternative when Developer ID credentials are unavailable.
-# Build on a Mac other than the approved target; this does not replace a release:
+# Build on a Mac other than the approved target; this does not replace a release.
+# The approved targets are declared once in
+# scripts/policy/local-only-approved-targets.txt, which the builder, the installer,
+# and the artifact tool all read; add a Mac there rather than in any guard:
 RECORDINGS_LOCAL_APPROVED_TARGET="station06" \
 RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND="tailscale_node_id_sha256" \
 RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256="AUTHENTICATED_TAILSCALE_NODE_ID_SHA256" \
@@ -236,7 +239,9 @@ signature check. The mutable `/Applications` path is never executed, caller stat
 not inherited, and all snapshot paths are removed by normal installer cleanup. The builder applies
 the same checks in its private build directory and removes the snapshot with the rest of the build
 workspace. The status parser then
-requires online `Self` with hostname `station06`,
+requires online `Self` whose hostname equals the caller's `--expected-hostname` — the
+approved target when the installer verifies the target, and the builder's own host when
+the builder verifies itself, which `build.sh` requires to differ from the target —
 requires the single nonempty `Self.ID` to contain no whitespace or NUL, hashes its exact decoded
 bytes without a newline, and compares the digest. Neither raw node ID is written to the manifest,
 build log, or installer log. Older schema-v3 artifacts without an
