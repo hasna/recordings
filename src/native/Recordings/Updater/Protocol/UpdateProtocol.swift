@@ -102,17 +102,36 @@ public protocol RecordingsUpdateXPCProtocol {
     func queryStatus(withReply reply: @escaping (NSDictionary) -> Void)
 }
 
+/// Builds the secure-coding allowlist that `NSXPCInterface` expects for one argument.
+///
+/// `-[NSXPCInterface setClasses:forSelector:argumentIndex:ofReply:]` takes an
+/// `NSSet<Class>`, which Swift imports as `Set<AnyHashable>` because Objective-C class
+/// objects do not conform to Swift's `Hashable`. A set literal of metatypes therefore
+/// does not type-check, and the members must stay *class objects*: XPC reads each one
+/// as a `Class`. Satisfying the type checker some other way is not a workaround —
+/// `AnyHashable(ObjectIdentifier(cls))` compiles but yields a set in which no member is
+/// a class, which crashes inside `setClasses`. Bridging an `NSSet` of the class objects
+/// is the only shape that both compiles and preserves the intended allowlist.
+private func xpcAllowedClasses(_ classes: [AnyClass]) -> Set<AnyHashable> {
+    guard let allowed = NSSet(array: classes) as? Set<AnyHashable> else {
+        // Fail closed rather than install a widened or empty allowlist on the
+        // privileged updater interface.
+        preconditionFailure("NSXPCInterface class allowlist failed to bridge from NSSet")
+    }
+    return allowed
+}
+
 /// XPC decoding is intentionally limited to retained file handles on request and
 /// scalar dictionaries on reply. No path-bearing or arbitrary option object is accepted.
 public func makeRecordingsUpdateXPCInterface() -> NSXPCInterface {
     let interface = NSXPCInterface(with: RecordingsUpdateXPCProtocol.self)
     let installSelector = NSSelectorFromString("installWithArchive:manifest:envelope:reply:")
     let statusSelector = NSSelectorFromString("queryStatusWithReply:")
-    let fileHandleClasses: Set<AnyHashable> = [FileHandle.self]
+    let fileHandleClasses = xpcAllowedClasses([FileHandle.self])
     for index in 0..<3 {
         interface.setClasses(fileHandleClasses, for: installSelector, argumentIndex: index, ofReply: false)
     }
-    let replyClasses: Set<AnyHashable> = [NSDictionary.self, NSString.self, NSNumber.self]
+    let replyClasses = xpcAllowedClasses([NSDictionary.self, NSString.self, NSNumber.self])
     interface.setClasses(replyClasses, for: installSelector, argumentIndex: 0, ofReply: true)
     interface.setClasses(replyClasses, for: statusSelector, argumentIndex: 0, ofReply: true)
     return interface
