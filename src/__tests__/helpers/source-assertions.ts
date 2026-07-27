@@ -125,30 +125,75 @@ export function withoutComments(source: string): string {
  * Line count is preserved so any assertion that anchors on `\n` still sees the same shape.
  */
 export function withoutAnyComments(source: string): string {
-  // Block comments first, keeping their newlines so line-anchored patterns are unaffected.
-  const withoutBlocks = source.replace(/\/\*[\s\S]*?\*\//g, (match) =>
-    match.replace(/[^\n]/g, " "),
-  );
-  return withoutBlocks
-    .split("\n")
-    .map((line) => {
-      // A `//` inside a string literal is text, not a comment. Only cut at a `//` that is not
-      // inside quotes; counting unescaped quotes before it is enough for this codebase's log lines.
-      let inString = false;
-      for (let index = 0; index < line.length; index += 1) {
-        const character = line[index];
-        if (character === "\\") {
-          index += 1;
+  const out = source.split("");
+  const blank = (from: number, to: number): void => {
+    for (let index = from; index < to; index += 1) {
+      if (out[index] !== "\n") out[index] = " ";
+    }
+  };
+  let index = 0;
+  while (index < source.length) {
+    // Line comment: blank to end of line.
+    if (source.startsWith("//", index)) {
+      const newline = source.indexOf("\n", index);
+      const stop = newline === -1 ? source.length : newline;
+      blank(index, stop);
+      index = stop;
+      continue;
+    }
+    // Block comment. Swift NESTS these, so a non-greedy match to the first `*/` left the tail
+    // `c */` of `/* a /* b */ c */` behind as if it were code.
+    if (source.startsWith("/*", index)) {
+      let depth = 1;
+      let at = index + 2;
+      while (at < source.length && depth > 0) {
+        if (source.startsWith("/*", at)) {
+          depth += 1;
+          at += 2;
+        } else if (source.startsWith("*/", at)) {
+          depth -= 1;
+          at += 2;
+        } else at += 1;
+      }
+      blank(index, at);
+      index = at;
+      continue;
+    }
+    // String literal: skipped WHOLE and left intact, tracked across lines and by KIND. Per-line
+    // quote parity got this wrong in the obvious way — a `"""` block reset its state at every
+    // newline, so `https://x` on the second line of a multiline literal was cut to `https:`.
+    // Stripping real code is the inverse of the bug this function exists for and just as bad:
+    // an assertion then passes over text that is no longer there.
+    let hashes = 0;
+    while (source[index + hashes] === "#") hashes += 1;
+    const quoteAt = index + hashes;
+    const delimiter = source.startsWith('"""', quoteAt)
+      ? '"""'
+      : source[quoteAt] === '"'
+        ? '"'
+        : null;
+    if (delimiter !== null) {
+      const pounds = "#".repeat(hashes);
+      const terminator = delimiter + pounds;
+      const escape = `\\${pounds}`;
+      let at = quoteAt + delimiter.length;
+      while (at < source.length) {
+        if (source.startsWith(escape, at)) {
+          at += escape.length + 1;
           continue;
         }
-        if (character === '"') inString = !inString;
-        else if (!inString && character === "/" && line[index + 1] === "/") {
-          return line.slice(0, index).trimEnd();
+        if (source.startsWith(terminator, at)) {
+          at += terminator.length;
+          break;
         }
+        at += 1;
       }
-      return line;
-    })
-    .join("\n");
+      index = at;
+      continue;
+    }
+    index += 1;
+  }
+  return out.join("");
 }
 
 /**
