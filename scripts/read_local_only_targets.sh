@@ -42,7 +42,13 @@
 # byte rules: bracket expressions in bash patterns are collation- and locale-dependent in
 # principle (restoring [[:space:]] under this pin still leaves 5 divergent rows, versus 21
 # without it), so pinning keeps a future edit that reaches for a character class from
-# quietly handing the caller's locale a say in the policy.
+# quietly handing the caller's locale a say in the policy. It is also the idiom this repo
+# already uses: scripts/install_macos_app.sh:4-6 exports LC_ALL=C, LANG=C and TZ=UTC0.
+#
+# Be aware, if you are deciding whether to keep this line: NO TEST IN THIS REPOSITORY
+# FAILS IF YOU DELETE IT. It is unguarded by construction — on this platform every
+# observable rule above is already locale-independent, so any test written for it would
+# pass with the pin removed and would be a guard that protects nothing.
 
 # read_local_only_targets <policy-path> <out-list-var> <out-match-var> <requested-target>
 # Sets <out-list-var> to a comma-separated list for error messages and
