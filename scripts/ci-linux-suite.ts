@@ -60,6 +60,31 @@ export function parseQuarantine(text: string): string[] {
 }
 
 /**
+ * Entries not directly preceded by a `# reason:` line.
+ *
+ * An exemption without a stated reason cannot be told apart from a suite somebody muted to get a
+ * green check, which is the whole failure mode this file guards. Implemented in the script rather
+ * than in the test so that it is enforced whenever an entry is ADDED — the list is currently empty,
+ * and a check living only in a test runs against the list as it stands today.
+ *
+ * The marker is required rather than accepting any comment, and that is not pedantry: the first
+ * version accepted "the line above starts with #", which the explanatory header at the top of the
+ * file satisfies. Appending an entry to the end of that header therefore passed with no reason of
+ * its own — found by running the negative control rather than by reading the code.
+ */
+const REASON_MARKER = /^#\s*reason:\s*\S/;
+
+export function entriesMissingReason(text: string): string[] {
+  const lines = text.split("\n").map((line) => line.trim());
+  const missing: string[] = [];
+  lines.forEach((line, index) => {
+    if (line.length === 0 || line.startsWith("#")) return;
+    if (!REASON_MARKER.test(lines[index - 1] ?? "")) missing.push(line);
+  });
+  return missing;
+}
+
+/**
  * Enumerate tracked test files with git.
  *
  * git is the authoritative enumeration in CI, where the checkout contains tracked files and
@@ -215,6 +240,14 @@ function loadPartition(repoRoot: string): Partition & { discovered: string[] } {
     fail("Discovered zero test files. A gate over zero files is green for the wrong reason.");
   }
   const quarantineText = readFileSync(join(repoRoot, QUARANTINE_FILE), "utf8");
+  const unexplained = entriesMissingReason(quarantineText);
+  if (unexplained.length > 0) {
+    fail(
+      `Every entry in ${QUARANTINE_FILE} needs a reason comment on the line directly above it. ` +
+        `Without one an exemption is indistinguishable from a muted suite:\n` +
+        unexplained.map((entry) => `  ${entry}`).join("\n"),
+    );
+  }
   let split: Partition;
   try {
     split = partition(fromGit, parseQuarantine(quarantineText));
@@ -267,6 +300,12 @@ function main(argv: string[]): void {
   if (mode === "--verify-run") {
     const reportPath = argv[1];
     if (!reportPath) fail("usage: --verify-run <junit.xml>");
+    // Reported as a verdict rather than as an exception. This step runs with `if: always()`, so it
+    // is the step that speaks when the suite crashed before writing anything, and a stack trace
+    // there buries the actual failure under a Node error.
+    if (!statSync(reportPath, { throwIfNoEntry: false })) {
+      fail(`${reportPath} does not exist; the gated run produced no report at all.`);
+    }
     const xml = readFileSync(reportPath, "utf8");
     if (!isCompleteJUnit(xml)) {
       fail(`${reportPath} is not a complete JUnit report; the gated run did not finish.`);

@@ -1,29 +1,39 @@
-# Suites excluded from the Linux CI gate.
+# Suites excluded from the Linux CI gate. Currently EMPTY, deliberately.
 #
-# Every line is a repo-relative path to a `*.test.ts` file that CANNOT pass on Linux for
-# ENVIRONMENTAL reasons — not because the code under test is broken. Each entry must carry the
-# reason, because an entry without one is indistinguishable from a suite somebody muted to get a
-# green check.
+# The gate covers every discovered `*.test.ts`. Nothing is skipped, so a green `typescript` job means
+# the whole TypeScript suite passed rather than the part somebody chose.
 #
-# This file is the single source of truth for the split. `scripts/ci-linux-suite.ts` reads it to
-# build both the gated list and the quarantined list, so the two can never disagree, and it
-# REJECTS an entry that no longer names a discovered test file — a renamed or deleted suite cannot
-# keep a stale exemption alive.
+# WHY THIS FILE EXISTS EMPTY, rather than not existing:
 #
-# The quarantine is checked in BOTH directions. CI also runs these files and requires each one to
-# still fail: a suite that starts passing on Linux makes its own entry stale, and the job fails
-# telling you to delete the line rather than leaving a permanent hole nobody revisits.
+# It was created with three entries, taken from the record in
+# src/__tests__/helpers/source-assertions.ts, which stated that three suites were "PERMANENTLY RED on
+# Linux" for environmental reasons — measured 3 of 3 runs on `main` at 40c37b1. The first CI run this
+# repository has ever had (run 30302342895) then re-ran all three on a GitHub Actions ubuntu-24.04
+# runner and every one of them passed:
 #
-# Measured 3 of 3 runs each on `main` at 40c37b1 with `bun install --frozen-lockfile`, recorded in
-# src/__tests__/helpers/source-assertions.ts. Counts are deliberately NOT asserted anywhere: the
-# suite is nondeterministic at the margin, so a count is a flake generator. Only the direction
-# (still red / now green) is gated.
-
-# BSD `stat -f` and hardcoded macOS tool paths; the fixture server port also reads NaN here.
-src/__tests__/macos-app-lifecycle.test.ts
-
-# Reads a companion artifact layout that only the Darwin build produces.
-src/__tests__/native-app-companion-contract.test.ts
-
-# `getDataDir` assumes the checkout is a descendant of HOME, which does not hold on this platform.
-src/__tests__/config.test.ts
+#   src/__tests__/config.test.ts                          44 pass /  0 fail    (   0.10s)
+#   src/__tests__/macos-app-lifecycle.test.ts            140 pass /  0 fail    ( 358.85s)
+#   src/__tests__/native-app-companion-contract.test.ts   14 pass /  0 fail    (   4.50s)
+#
+# So "permanently red on Linux" was never a property of Linux. It is a property of the STATION: that
+# box routinely runs several full recordings suites at once out of different worktrees, and this
+# suite scans a shared /tmp, so the suites corrupt each other's fixtures — which is exactly what
+# source-assertions.ts warns about two paragraphs above the list. The 92 failures in
+# macos-app-lifecycle were FIFO synchronisation timeouts under that contention, not defects.
+#
+# That is why the mechanism is kept with an empty list instead of being deleted. It is the only
+# reason the three entries were ever disproven: `scripts/ci-linux-suite.ts` re-runs each quarantined
+# suite and FAILS when one passes, so the exemptions invalidated themselves on their first run
+# against a clean machine. A quarantine without that property is where suites go to be forgotten.
+#
+# TO ADD AN ENTRY: one repo-relative path per line, directly under a line of the form
+#
+#     # reason: <why this suite cannot pass in CI>
+#
+# Both halves are enforced by `bun run verify:ci-suite` — an entry naming a suite that does not
+# exist fails, and so does an entry without its own `# reason:` line immediately above it. The
+# marker is required rather than any comment because the prose above would otherwise satisfy the
+# check for whatever entry got appended to it first.
+#
+# And measure on a QUIET machine, or in CI, before you add anything: the record this file replaced
+# was produced on a contended one and named three suites that were never actually broken.

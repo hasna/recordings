@@ -1,0 +1,28 @@
+# Compiler errors that `swift build --build-tests` ALREADY produces on main.
+#
+# main at 32c5538 does not compile. This was not known before the first CI run on this repository,
+# because scripts/build_native_fs_guard.sh exits on any non-Darwin host and the stations were the
+# only thing that ever built the native half — which is exactly why three PRs have been able to hold
+# 300+ Swift lines reviewed "by shape and call-site analysis only".
+#
+# Listing them here does NOT make them acceptable. It makes the native job useful in spite of them:
+# a build that is simply allowed to fail catches nothing, whereas comparing the error SET catches a
+# newly introduced compile error on the very first run that introduces it. The job fails when an
+# error appears that is not listed here, and it also fails when a listed error stops appearing, so
+# this file cannot outlive the defect it describes.
+#
+# Format: <repo-relative source file>: <clang/swift message, truncated at the first ';'>
+# Line and column numbers are deliberately NOT part of the signature — they move whenever anything
+# above them is edited, and a signature that churns is a signature nobody maintains.
+#
+# Both entries are missing DECLARATIONS, not missing functionality, and neither is safe to fix
+# blind: `closefrom` is hidden unless the translation unit opts into the full Darwin C level, and
+# `sandbox_init_with_parameters` is a private SPI absent from the public sandbox.h, so it needs a
+# local prototype that has to match Apple's exactly. Getting that prototype wrong in a
+# privilege-separation launcher is undefined behaviour rather than a compile error, so it is filed
+# as its own change rather than fixed inside a CI pull request.
+#
+# Measured on macos-latest = macOS 26.4, Apple Swift 6.3.2, Xcode 26.5, SDK MacOSX26.5.sdk.
+
+src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c: call to undeclared function 'closefrom'
+src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c: call to undeclared function 'sandbox_init_with_parameters'

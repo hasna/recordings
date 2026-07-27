@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   QUARANTINE_FILE,
   compareDiscovery,
+  entriesMissingReason,
   executedFilesFromJUnit,
   isCompleteJUnit,
   parseQuarantine,
@@ -23,6 +24,45 @@ import {
  * only on inputs it accepts proves nothing about the one job it has.
  */
 const repoRoot = join(import.meta.dir, "..", "..");
+
+describe("entriesMissingReason", () => {
+  test("accepts an entry with a reason: marker directly above it", () => {
+    expect(entriesMissingReason("# reason: BSD stat -f\nsrc/a.test.ts\n")).toEqual([]);
+  });
+
+  test("rejects an entry with no comment above it", () => {
+    // The list is empty today, so this synthetic input is the ONLY thing that proves the check
+    // fires. Asserting it against the committed file would pass over zero entries and prove nothing.
+    expect(entriesMissingReason("src/a.test.ts\n")).toEqual(["src/a.test.ts"]);
+  });
+
+  test("rejects an entry explained only by the file's prose header", () => {
+    // The regression that motivated the marker. An earlier version accepted any line starting with
+    // '#', so appending an entry to the end of the explanatory header at the top of the file passed
+    // with no reason of its own. The negative control caught it; reading the code had not.
+    expect(
+      entriesMissingReason("# TO ADD AN ENTRY: one path per line, with a reason.\nsrc/a.test.ts\n"),
+    ).toEqual(["src/a.test.ts"]);
+  });
+
+  test("rejects an entry separated from its reason by a blank line", () => {
+    // A blank line means the comment above documents the section rather than this entry, and the
+    // next person adding a line underneath inherits a reason that was never about their suite.
+    expect(entriesMissingReason("# reason: BSD stat -f\n\nsrc/a.test.ts\n")).toEqual([
+      "src/a.test.ts",
+    ]);
+  });
+
+  test("rejects a reason: marker with nothing after it", () => {
+    expect(entriesMissingReason("# reason:\nsrc/a.test.ts\n")).toEqual(["src/a.test.ts"]);
+  });
+
+  test("reports only the unexplained entry when a sibling is fine", () => {
+    expect(entriesMissingReason("# reason: why\nsrc/a.test.ts\nsrc/b.test.ts\n")).toEqual([
+      "src/b.test.ts",
+    ]);
+  });
+});
 
 describe("parseQuarantine", () => {
   test("drops comments and blank lines and trims each entry", () => {
@@ -133,25 +173,16 @@ describe("the committed quarantine list", () => {
     expect(() => partition(discovered, entries)).not.toThrow();
   });
 
-  test("every entry carries a reason comment above it", () => {
-    // An entry without a stated reason cannot be told apart from a suite muted to get a green
-    // check, which is the failure mode this whole file exists to prevent.
-    const lines = readFileSync(join(repoRoot, QUARANTINE_FILE), "utf8").split("\n");
-    for (const entry of entries) {
-      const at = lines.findIndex((line) => line.trim() === entry);
-      expect(at, `entry not found in ${QUARANTINE_FILE}: ${entry}`).toBeGreaterThan(-1);
-      const previous = lines[at - 1]?.trim() ?? "";
-      expect(
-        previous.startsWith("#") && previous.length > 1,
-        `${entry} has no reason comment on the line above it`,
-      ).toBe(true);
-    }
+  test("carries no unexplained entry", () => {
+    expect(entriesMissingReason(readFileSync(join(repoRoot, QUARANTINE_FILE), "utf8"))).toEqual([]);
   });
 
-  test("the gate covers strictly more than it excludes", () => {
-    // Not a coverage target, a sanity floor: if the quarantine ever outgrew the gated set, the
-    // honest response is to fix the environment, not to keep calling the remainder a gate.
-    const { gated } = partition(discovered, entries);
-    expect(gated.length).toBeGreaterThan(entries.length);
+  test("is currently empty, so the gate covers every discovered suite", () => {
+    // Pinned as a fact rather than left implicit. The list started with three entries copied from
+    // src/__tests__/helpers/source-assertions.ts, and the first CI run disproved all three by
+    // passing them on a clean runner. If an entry is ever added, this test is where the reviewer is
+    // forced to notice that the gate stopped being total.
+    expect(entries).toEqual([]);
+    expect(partition(discovered, entries).gated).toEqual(discovered);
   });
 });

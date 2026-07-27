@@ -34,14 +34,21 @@ jobs:
   typescript:
     name: TypeScript (Linux — native/Swift NOT covered here)
     runs-on: ubuntu-24.04
-    # Generous on purpose. Hundreds of tests in this suite spawn subprocesses, and the honest
-    # measurement to tighten this against is the wall time of the run below, not an estimate.
-    timeout-minutes: 45
+    # Set from measurement, not from optimism. Run 30302342895 on this runner: 974 tests across 51
+    # files in 23.30s, plus macos-app-lifecycle alone at 358.85s, so the whole 54-file suite is
+    # ~6.5 minutes and the job about 8. Thirty leaves roughly 3.7x headroom, which is enough to
+    # absorb a slow runner without letting a genuinely hung suite sit for three quarters of an hour.
+    timeout-minutes: 30
     env:
-      # Raised well above bun's 5000ms default because a subprocess-spawning test that trips the
-      # default reports as `Received: ""` — a message that reads like a logic bug and has cost this
-      # repository real time. Note that tests carrying their own hardcoded budget (the FIFO waits in
-      # macos-app-lifecycle) cannot be rescued by this value; they are quarantined instead.
+      # Raised above bun's 5000ms default because a subprocess-spawning test that trips the default
+      # reports as `Received: ""` — a message that reads like a logic bug and has cost this
+      # repository real time. Measured headroom: the slowest of the 974 tests in the JUnit report
+      # from run 30302342895 took 1.88s, so this is ~64x the slowest observed test.
+      #
+      # It cannot rescue a test carrying its own hardcoded budget — the FIFO waits in
+      # macos-app-lifecycle reject at an internal 5000ms setTimeout that no flag reaches. Those pass
+      # on a runner and fail only on a contended machine, so the fix there is an uncontended
+      # machine, not a larger number here.
       RECORDINGS_TEST_TIMEOUT_MS: "120000"
       JUNIT_REPORT: gated-junit.xml
     steps:
@@ -119,13 +126,25 @@ jobs:
         # environmental cause is fixed the suite goes green, this step goes red, and it tells you to
         # delete the line. Without this a quarantine is permanent by default and nobody revisits it.
         #
-        # Run one file per invocation. Several of these scan a shared /tmp, and concurrent suites
-        # corrupt each other's fixtures, which is how a quarantined suite could appear to pass.
+        # This has already paid for itself. The list was seeded with the three suites that
+        # src/__tests__/helpers/source-assertions.ts recorded as permanently red on Linux, and this
+        # step passed all three on the first run, which is why the list is empty today.
+        #
+        # Run one file per invocation when the list is non-empty. Several of these suites scan a
+        # shared /tmp and corrupt each other's fixtures when run concurrently — the very contention
+        # that produced the false "permanently red" record.
         if: always()
         shell: bash
         run: |
+          suites="$(bun scripts/ci-linux-suite.ts --quarantined)"
+          if [ -z "$suites" ]; then
+            # Say so out loud. An empty list producing no output is indistinguishable from a step
+            # that silently failed to read the file.
+            echo "::notice title=Quarantine is empty::The Linux gate covers every discovered suite; nothing is excluded."
+            exit 0
+          fi
           stale=0
-          for suite in $(bun scripts/ci-linux-suite.ts --quarantined); do
+          for suite in $suites; do
             if bun test --timeout "$RECORDINGS_TEST_TIMEOUT_MS" "$suite" > "quarantine.log" 2>&1; then
               echo "::error title=Stale quarantine::$suite now passes on Linux. Delete its line from .github/linux-quarantine.txt so the gate covers it."
               stale=1
@@ -180,9 +199,14 @@ jobs:
           retention-days: 14
 
   native:
-    name: Native (macOS — Swift build)
+    name: Native (macOS — Swift/C compile)
     runs-on: macos-latest
     timeout-minutes: 45
+    outputs:
+      # Surfaced so the `scope` job can state whether the native half actually compiled, rather than
+      # inferring it from this job's green tick. The tick means "no NEW compile error", which is a
+      # much weaker claim; see .github/native-known-errors.txt.
+      compiled: ${{ steps.compile.outputs.compiled }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -219,29 +243,40 @@ jobs:
             exit 1
           fi
 
-      - name: Build every native target
-        # The whole point of this job. Three open PRs have been holding 300+ uncompiled Swift lines
-        # reviewed "by shape and call-site analysis only" because nothing could compile them.
-        run: swift build --package-path src/native/Recordings
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
 
-      - name: Compile the native test targets
-        # --build-tests compiles the test code without running it. Separated from `swift test`
-        # because a test that cannot COMPILE is a defect in the change under review, whereas a test
-        # that cannot RUN on a headless runner is a property of the runner; conflating them means
-        # neither is trustworthy.
-        run: swift build --build-tests --package-path src/native/Recordings
+      - name: Resolve the Swift dependencies
+        run: swift package resolve --package-path src/native/Recordings
 
       - name: The Swift dependency pins are unchanged by resolving them
-        # Package.resolved is committed and both dependencies are exact/revision pinned. A diff here
-        # means the build silently moved off a pin.
+        # Package.resolved is committed and both dependencies are pinned exactly (KeyboardShortcuts
+        # by version, swift-testing by revision). A diff here means resolution moved off a pin —
+        # which matters more than usual for swift-testing, whose comment in Package.swift records
+        # that a mismatched version silently corrupted `#expect` Bool evaluation and passed false
+        # assertions.
         run: git diff --exit-code -- src/native/Recordings/Package.resolved
 
+      - name: Compile every native and native-test target
+        id: compile
+        # Compiles all products AND all test targets, then compares the compiler's error SET against
+        # .github/native-known-errors.txt. `main` does not currently compile, discovered by the first
+        # run of this workflow, so a plain build gate would be red on arrival for a defect it does
+        # not own. Comparing the set instead still catches a NEWLY introduced compile error on the
+        # first run that introduces it, and fails if the recorded errors are fixed or disappear so
+        # the exemption cannot outlive its cause. Read that file before trusting this step's tick.
+        run: bun run verify:ci-native
+
       - name: Run the native test suites
-        # NOT a gate yet, and the reason is stated rather than implied: these targets touch the
-        # microphone, the clipboard and accessibility APIs, all of which are TCC-gated and have no
-        # grantable state on a headless runner. Whether that makes them unrunnable or merely partly
-        # unrunnable has never been measured, so this step records the outcome instead of asserting
-        # one. Promote to a gate, or quarantine per-suite the way Linux does, once measured.
+        # Only attempted when the package actually compiled — running it against a failed build
+        # produces the compile errors a second time and reads like a test failure.
+        #
+        # NOT a gate, and the reason is stated rather than implied: these targets touch the
+        # microphone, the clipboard and accessibility APIs, all TCC-gated with no grantable state on
+        # a headless runner. Whether that makes them wholly or only partly unrunnable has never been
+        # measured, so this records the outcome instead of asserting one.
+        if: steps.compile.outputs.compiled == 'true'
         continue-on-error: true
         shell: bash
         run: |
@@ -249,12 +284,20 @@ jobs:
           if swift test --package-path src/native/Recordings 2>&1 | tee swift-test.log; then
             echo "::notice title=Native tests passed::swift test is green on this runner and can become a gate."
           else
-            echo "::warning title=Native tests NOT gated::swift test did not pass on a headless runner. The native targets COMPILE (gated above) but their behaviour is unverified. See swift-test.log."
+            echo "::warning title=Native tests NOT gated::swift test did not pass on a headless runner. The native targets COMPILE but their behaviour is unverified. See the swift-test.log artifact."
           fi
 
+      - name: Native test suites were not attempted
+        if: steps.compile.outputs.compiled != 'true'
+        run: |
+          echo "::warning title=Native tests NOT run::The package did not compile, so swift test was not attempted. Nothing about native RUNTIME behaviour is verified by this run."
+
       - name: Build the native filesystem guard addon
-        # scripts/build_native_fs_guard.sh exits 1 on any non-Darwin host, so this line has never
-        # been executed by any automation. It is what `prepack` runs before a publish.
+        # scripts/build_native_fs_guard.sh exits 1 on any non-Darwin host, so this line had never
+        # been executed by any automation before this workflow. It is what `prepack` runs before a
+        # publish, which means the publish path itself was unexercised outside a developer's Mac.
+        # Independent of the Swift build: a separate clang invocation over scripts/native.
+        if: always()
         run: |
           bun install --frozen-lockfile
           bun run build:native-fs-guard
@@ -286,29 +329,43 @@ jobs:
         env:
           TS_RESULT: ${{ needs.typescript.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
+          NATIVE_COMPILED: ${{ needs.native.outputs.compiled }}
         run: |
+          if [ "$NATIVE_COMPILED" = "true" ]; then
+            native_scope='compiled cleanly'
+          else
+            native_scope='**DID NOT COMPILE** — pre-existing errors, see `.github/native-known-errors.txt`'
+          fi
           {
             echo '## Coverage scope for this run'
             echo
-            echo "| Half of the repository | Job | Result |"
-            echo "| --- | --- | --- |"
-            echo "| TypeScript / CLI / MCP / server | \`typescript\` (Linux) | \`$TS_RESULT\` |"
-            echo "| Swift / native (src/native) | \`native\` (macOS) | \`$NATIVE_RESULT\` |"
+            echo "| Half of the repository | Job | Job result | Compile status |"
+            echo "| --- | --- | --- | --- |"
+            echo "| TypeScript / CLI / MCP / server | \`typescript\` (Linux) | \`$TS_RESULT\` | typechecked and built |"
+            echo "| Swift / C native (src/native) | \`native\` (macOS) | \`$NATIVE_RESULT\` | $native_scope |"
             echo
-            echo 'Verified by this workflow: typecheck (3 projects), the gated bun suite proven to be'
-            echo 'exactly the gated set, build, release guard, Swift compilation of every target and'
-            echo 'every native test target, the Swift dependency pins, and the Darwin-only native'
-            echo 'filesystem guard addon.'
+            echo '**Verified:** three tsc projects; the gated bun suite, proven against the runner'"'"'s own'
+            echo 'JUnit report to be exactly the gated set; build; release guard; the Swift dependency'
+            echo 'pins; the Darwin-only native filesystem guard addon; and that no NEW native compile'
+            echo 'error was introduced.'
             echo
-            echo 'NOT verified by this workflow: the suites in `.github/linux-quarantine.txt`, the'
-            echo 'RUNTIME behaviour of the Swift test targets (TCC-gated; compiled but not asserted),'
-            echo 'code signing and notarization, and the vacuity mutation battery.'
+            echo '**NOT verified:** the suites listed in `.github/linux-quarantine.txt`; the RUNTIME'
+            echo 'behaviour of the Swift test targets (TCC-gated on a headless runner); code signing'
+            echo 'and notarization; and the vacuity mutation battery.'
+            if [ "$NATIVE_COMPILED" != "true" ]; then
+              echo
+              echo '> A green tick on the `native` job means "no NEW compile error", NOT "the native'
+              echo '> code compiles". It does not. Nothing in `src/native` on this branch has been'
+              echo '> proven to build.'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           fail=0
           if [ "$NATIVE_RESULT" != "success" ]; then
-            echo "::error title=Native half unverified::The macOS job result is '$NATIVE_RESULT'. No Swift code in this change has been compiled by CI. Do not read the other checks as covering src/native."
+            echo "::error title=Native half unverified::The macOS job result is '$NATIVE_RESULT', so the native half was not examined at all. Do not read the other checks as covering src/native."
             fail=1
+          elif [ "$NATIVE_COMPILED" != "true" ]; then
+            echo "::warning title=Native half does not compile::The macOS job ran and introduced no new compile error, but src/native still does NOT build. Its behaviour is unverified by this run."
           fi
           if [ "$TS_RESULT" != "success" ]; then
             echo "::error title=TypeScript half unverified::The Linux job result is '$TS_RESULT'."
