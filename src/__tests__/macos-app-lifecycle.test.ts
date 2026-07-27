@@ -205,22 +205,45 @@ fi
   cpSync(join(bin, "tailscale"), join(tailscaleApp, "Contents", "MacOS", "Tailscale"));
   chmodSync(join(tailscaleApp, "Contents", "MacOS", "Tailscale"), 0o755);
   writeExecutable(join(bin, "sw_vers"), "#!/usr/bin/env bash\nprintf '26.0\\n'\n");
+  // Every answer this stub gives is written RAW, and `FORCE_COLOR` is unset for its children.
+  //
+  // The installer compares these answers as STRINGS -- `[ "$(stat -f '%u' "$candidate")" =
+  // "$(id -u)" ]` at install_macos_app.sh:143, and literal `600` / `700` mode comparisons
+  // further down. Bun's `console.log` of a NUMBER is SGR-wrapped whenever colour is enabled,
+  // so with `FORCE_COLOR` set in the environment this stub answered `%u` with
+  // `\x1b[0m\x1b[33m1000\x1b[0m`, the uid comparison failed against a bare `1000`, and the
+  // installer aborted at :143 before reaching anything under test -- 26 to 38 fixtures per run,
+  // all reported as "Home ancestor has an unexpected owner." `NO_COLOR=1` does not help:
+  // FORCE_COLOR wins in Bun.
+  //
+  // `process.stdout.write` fixes it at the source for the two numeric answers. The `%Lp`
+  // answer goes through `.toString(8)`, and a STRING is not colourised, so it was already
+  // immune -- it is converted here for uniformity, so that no reader has to know which of the
+  // three depended on that distinction. `unset FORCE_COLOR` then makes a future `console.log`
+  // added here unable to silently reintroduce the failure.
+  //
+  // The variable is deliberately NOT stripped from the installer's own environment: the real
+  // installer calls the real `/usr/bin/stat`, which no colour setting can affect, so the
+  // problem is created entirely by stubbing `stat` with Bun. Fixing it at the stub keeps the
+  // rest of the child environment faithful to an operator's shell instead of hiding a class of
+  // bug behind a sanitised env.
   writeExecutable(
     join(bin, "stat"),
     `#!/usr/bin/env bash
+unset FORCE_COLOR
 path="\${3:-}"
 case "\${2:-}" in
   '%u')
     if [ "$path" = "$HOME/.hasna/recordings" ] && [ -n "\${FIXTURE_STATE_UID:-}" ]; then
       printf '%s\\n' "$FIXTURE_STATE_UID"
     else
-      "$REAL_BUN" -e 'import { statSync } from "node:fs"; console.log(statSync(process.argv.at(-1)).uid)' "$path"
+      "$REAL_BUN" -e 'import { statSync } from "node:fs"; process.stdout.write(\`\${statSync(process.argv.at(-1)).uid}\\n\`)' "$path"
     fi
     ;;
-  '%m') "$REAL_BUN" -e 'import { statSync } from "node:fs"; console.log(Math.floor(statSync(process.argv.at(-1)).mtimeMs / 1000))' "$path" ;;
+  '%m') "$REAL_BUN" -e 'import { statSync } from "node:fs"; process.stdout.write(\`\${Math.floor(statSync(process.argv.at(-1)).mtimeMs / 1000)}\\n\`)' "$path" ;;
   '%Lp')
     case "$path" in
-      "$HOME/.hasna/recordings") "$REAL_BUN" -e 'import { statSync } from "node:fs"; console.log((statSync(process.argv.at(-1)).mode & 0o777).toString(8))' "$path" ;;
+      "$HOME/.hasna/recordings") "$REAL_BUN" -e 'import { statSync } from "node:fs"; process.stdout.write(\`\${(statSync(process.argv.at(-1)).mode & 0o777).toString(8)}\\n\`)' "$path" ;;
       "$HOME") printf '%s\\n' "\${FIXTURE_HOME_MODE:-700}" ;;
       */owner|*/.Recordings-install-transaction.json) printf '600\\n' ;;
       *) printf '700\\n' ;;

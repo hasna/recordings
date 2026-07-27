@@ -39,20 +39,28 @@ import { join } from "node:path";
  *   config                          44 pass / 0 fail   (  0.10s)
  *
  * So the cause is not the platform. Measure on a quiet machine, or in CI, before recording a suite
- * as red. There are TWO independent station-local causes, and every earlier version of this comment
+ * as red. There were TWO independent station-local causes, and every earlier version of this comment
  * named only one of them. In a 92-fail run of `macos-app-lifecycle.test.ts` on this station the
- * failure messages break down as 38 × `Home ancestor has an unexpected owner.`, 22 × FIFO
- * synchronisation timeout, 24 × ENOENT on a fixture marker:
+ * failure messages broke down as 38 × `Home ancestor has an unexpected owner.`, 22 × FIFO
+ * synchronisation timeout, 24 × ENOENT on a fixture marker. The first cause is now fixed in the
+ * fixture and only the second remains; do not collapse them into one, because a quiet machine with
+ * `FORCE_COLOR` set still showed all 38 aborts, so "measure on a quiet machine" was necessary and
+ * not sufficient:
  *
- *   1. `FORCE_COLOR`. The fixture's `stat` stub answers `%u` by shelling out to
- *      `bun -e '… console.log(statSync(…).uid)'` (`macos-app-lifecycle.test.ts:217`) and spreads
- *      `...Bun.env` into the installer, so with `FORCE_COLOR` set Bun COLOURS the number. The
- *      installer then compares `\e[0m\e[33m1000\e[0m` against `id -u`'s `1000` at
- *      `install_macos_app.sh:143` and aborts before reaching any gate. `env -u FORCE_COLOR` takes
- *      that message from 38 to 0, positive-controlled. `NO_COLOR=1` does NOT help — FORCE_COLOR
- *      wins in Bun. Nothing about ancestor MODE is involved: `verify_secure_parent` and
+ *   1. `FORCE_COLOR` — **FIXED IN THE FIXTURE, no longer a live cause.** The `stat` stub answered
+ *      `%u` by shelling out to `bun -e '… console.log(statSync(…).uid)'`
+ *      (`macos-app-lifecycle.test.ts:217`) and spread `...Bun.env` into the installer, so with
+ *      `FORCE_COLOR` set Bun COLOURED the number: the installer compared `\e[0m\e[33m1000\e[0m`
+ *      against `id -u`'s `1000` at `install_macos_app.sh:143` and aborted before reaching any gate.
+ *      `NO_COLOR=1` did NOT help — FORCE_COLOR wins in Bun. The stub now writes bare integers with
+ *      `process.stdout.write` and `unset FORCE_COLOR`s its own children, which takes that message
+ *      from 38 to 0 in place, positive-controlled (the same grep still finds 38 in the pre-fix log).
+ *      Nothing about ancestor MODE was ever involved: `verify_secure_parent` and
  *      `verify_safe_home_ancestor` each `stat` only the one path handed to them, the sole call is
  *      `verify_safe_home_ancestor "$HOME"`, and the stub hardcodes every `%Lp` answer anyway.
+ *      Kept here rather than deleted because it is the reason this file's split moved, and because
+ *      the same trap recurs in any stub that parses `console.log` of a NUMBER: only strings are
+ *      left uncoloured.
  *   2. CONTENTION. The station routinely runs several full recordings suites at once out of
  *      different worktrees, and this suite scans a shared /tmp — the hazard this very comment warns
  *      about below. Those are the FIFO timeouts, at an internal 5000ms budget that no `--timeout`

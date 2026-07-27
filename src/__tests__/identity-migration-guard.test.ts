@@ -11,6 +11,7 @@ import {
   CANDIDATE_IDENTITY_SHA256,
   EXISTING_IDENTITY_SHA256,
   runInstallerToIdentityGuard,
+  type IncompatibleDirection,
 } from "./helpers/installer-guard-execution";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
@@ -990,6 +991,86 @@ describe("designated-requirement identity-migration guard", () => {
           `${policy}: the guard refused an unnecessary approval but the install continued into the transaction`,
         ).toBeFalse();
       }
+    });
+
+    // The installer checks designated-requirement compatibility in BOTH directions
+    // (install_macos_app.sh:1753-1754) joined by `||`, so every case above that denies
+    // short-circuits before `:1754` and it is executed by no denying run: the deny path makes 3
+    // codesign calls, not 4. This drives the SECOND direction alone, which is the only way to
+    // reach that clause with the flag raised.
+    test("the second direction of the requirement comparison also raises the migration flag", () => {
+      const run = runInstallerToIdentityGuard({
+        identityMigration: true,
+        incompatibleDirection: "candidate-requirement-vs-installed",
+      });
+
+      // Four calls, not three: two `-d -r-` reports plus both `-R` cross-checks. The count is
+      // the witness that `:1754` executed -- with the first direction refusing, the fourth call
+      // never happens.
+      const crossChecks = run.codesignInvocations.filter((invocation) =>
+        invocation.includes("--verify --strict -R "),
+      );
+      expect(
+        crossChecks.length,
+        `expected both directions to run; codesign log was ${JSON.stringify(run.codesignInvocations)}`,
+      ).toBe(2);
+      // And the flag was raised by that second direction alone, so the guard still refused.
+      expect(run.stderr, `exit ${run.exitCode}`).toContain(REFUSAL);
+      expect(run.reachedTransaction).toBeFalse();
+    });
+
+    // The deny path's asymmetry, recorded as a fact rather than left as a surprise: with the
+    // FIRST direction refusing, `||` short-circuits and the fourth call is never made.
+    test("the first direction short-circuits the second, so a deny path makes three codesign calls", () => {
+      const run = runInstallerToIdentityGuard({
+        identityMigration: true,
+        incompatibleDirection: "installed-requirement-vs-candidate",
+      });
+      expect(run.codesignInvocations.length, JSON.stringify(run.codesignInvocations)).toBe(3);
+      expect(run.stderr, `exit ${run.exitCode}`).toContain(REFUSAL);
+    });
+
+    // Both stubs now REFUSE an argument vector they do not recognise. Before that, each fell
+    // through to `exit 0`, so an installer change adding a parsed pre-guard call would have left
+    // this harness green while it no longer proved anything -- the exact failure mode the harness
+    // exists to prevent, occurring in the harness itself.
+    //
+    // Asserted across the shapes that reach the furthest, and read from the fixture's log rather
+    // than from stderr: the installer runs its cross-checks as
+    // `codesign --verify --strict -R … >/dev/null 2>&1` (install_macos_app.sh:1753-1754), so a
+    // stderr-only marker on that path is thrown away by the caller.
+    test("no stubbed tool is asked for something it does not recognise", () => {
+      for (const [label, options] of [
+        ["local-only deny", { identityMigration: true }],
+        [
+          "local-only allow",
+          { identityMigration: true, extraArguments: ["--allow-adhoc-identity-migration"] },
+        ],
+        ["local-only no-migration", { identityMigration: false }],
+        ["release deny", { identityMigration: true, artifactPolicy: "release" as const }],
+      ] as const) {
+        const run = runInstallerToIdentityGuard(options);
+        expect(run.unstubbedInvocations, label).toEqual([]);
+        // ... and the stubs really were driven, so the emptiness above is not the emptiness of a
+        // run that never invoked them.
+        expect(run.bunInvocations.length, label).toBeGreaterThan(0);
+        expect(run.codesignInvocations.length, label).toBeGreaterThan(0);
+      }
+    });
+
+    // POSITIVE CONTROL for the assertion above, through the real fixture rather than a mock: an
+    // `incompatibleDirection` the stub cannot answer must be RECORDED as unstubbed. Without this,
+    // `toEqual([])` would pass just as happily against a stub that never records anything, or a
+    // log the harness reads from the wrong path.
+    test("an unrecognised stub input is recorded rather than answered", () => {
+      const run = runInstallerToIdentityGuard({
+        identityMigration: true,
+        incompatibleDirection: "not-a-real-direction" as IncompatibleDirection,
+      });
+      expect(run.unstubbedInvocations.join("\n")).toContain("codesign direction: not-a-real-direction");
+      // And the harness surfaces it even though the installer discarded the stub's stderr, which
+      // is the whole reason the marker is logged instead of only printed.
+      expect(run.stderr).not.toContain("codesign direction:");
     });
   });
 });
