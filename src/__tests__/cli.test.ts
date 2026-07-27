@@ -741,14 +741,27 @@ describe("recordings CLI", () => {
     const cli = readFileSync("src/cli/index.ts", "utf8");
     const permissions = readFileSync("src/cli/macos-permissions.ts", "utf8");
     const permissionReader = cli.slice(
-      cli.indexOf("function getTccPermission"),
+      cli.indexOf("function getTccGrant"),
       cli.indexOf("function findPackageRoot"),
     );
 
     // The reader delegates and never re-implements an identity heuristic inline.
-    expect(permissionReader).toContain("resolveTccPermission({ service, home, appPath })");
+    expect(permissionReader).toContain("resolveTccGrant({ service, home, appPath })");
     expect(permissionReader).not.toContain("currentCodeHash");
     expect(permissionReader).not.toContain("auth_value");
+
+    // The bundle actually on disk is what gets reported on. Pinning the canonical path meant
+    // that wherever the app was installed elsewhere, every answer described a bundle that did
+    // not exist and the real grants were never read.
+    expect(cli).toContain("existsSync(canonicalAppPath)");
+    // Ambiguity is a warning about which bundle answered, never a replacement for the answer.
+    expect(cli).not.toContain('?? getTccPermission(');
+    expect(cli).not.toContain('"ambiguous_multiple_installations"');
+
+    // A grant-destroying tool is never resolved through PATH: `security` on a Hasna station
+    // already resolves to a shadowing CLI ahead of /usr/bin.
+    expect(cli).toContain('"/usr/bin/tccutil"');
+    expect(cli).not.toMatch(/spawnSync\(\s*"tccutil"/);
 
     // The stored grant requirement is settled by codesign evaluating the csreq blob against
     // the installed bundle — never by searching the blob for a CDHash substring, which is
@@ -764,6 +777,17 @@ describe("recordings CLI", () => {
     // verification first. Behavioural coverage lives in macos-permissions.test.ts.
     expect(permissions).toContain("stale_allowed_for_previous_app_build");
     expect(permissions).toContain("allowed_identity_unverified");
+
+    // Durability is classified from the requirement the grant was STORED with, decoded from
+    // the blob — never from the bundle's current signature, which says nothing about an
+    // existing grant.
+    expect(permissions).toContain("describeStoredRequirement");
+    expect(permissions).toContain('["-r", requirementPath, "-t"]');
+    expect(cli).not.toContain("designatedRequirement: status.designated_requirement");
+
+    // No grant state that means "unverified" may begin with "allowed", or a skim and a
+    // `grep allowed` both read it as a pass.
+    expect(permissions).toContain("unverified_no_installed_bundle");
   });
 
   test("app status is compact by default and verbose on request", async () => {

@@ -4,6 +4,7 @@ import {
   classifyTccGrantDurability,
   describeTccAuthorizationSubject,
   RECORDINGS_BUNDLE_IDENTIFIER,
+  resolveTccGrant,
   resolveTccPermission,
   runMacOSPermissionRequest,
   tccDatabasePaths,
@@ -120,7 +121,10 @@ describe("TCC grant identity verification", () => {
     });
 
     expect(unverifiable).toBe("allowed_identity_unverified");
-    expect(noInstalledApp).toBe("allowed_identity_unverified");
+    // No bundle to check is NOT an "allowed_" state: a human skim or a `grep allowed` over
+    // this output must not read "there is nothing installed" as a pass.
+    expect(noInstalledApp).toBe("unverified_no_installed_bundle");
+    expect(noInstalledApp.startsWith("allowed")).toBeFalse();
   });
 
   test("non-allowed decisions are returned without consulting the signature", () => {
@@ -341,6 +345,105 @@ describe("TCC grant durability across rebuilds", () => {
 /// The system TCC database only opens for a process holding Full Disk Access, so telling
 /// "could not read" apart from "no grant recorded" is the whole point of the lookup type.
 /// Exit codes measured against sqlite3 3.45.1 and 3.51.0.
+/// Durability must be read from the requirement the grant was STORED with. The bundle's
+/// current signature cannot answer it: an app re-signed with a certificate still holds the
+/// cdhash-pinned grant it was given while ad-hoc, and classifying the bundle would promise a
+/// durability the stored grant does not have. Both shapes are live on station03.
+describe("grant durability comes from the stored requirement", () => {
+  const CERT_ROOT_REQUIREMENT =
+    'identifier "com.hasna.recordings" and certificate root = H"6eb85e38b7750391e313d7ed4119972cb4bddfe4"';
+  const CDHASH_REQUIREMENT = 'cdhash H"d7e467f995dc72102c86f15c6ed5bdebc7918c2e"';
+
+  function grantProbe(storedRequirement: string | null): TccPermissionProbe {
+    return {
+      databaseExists: () => true,
+      readAccessRow: () => ({
+        kind: "row",
+        row: { authValue: "2", csreqHex: STATION_CSREQ_HEX },
+      }),
+      verifyStoredRequirement: () => "satisfied",
+      describeStoredRequirement: () => storedRequirement,
+    };
+  }
+
+  test("a cdhash-pinned stored grant is reported fragile even though the bundle is cert-signed", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: grantProbe(CDHASH_REQUIREMENT),
+    });
+
+    expect(report.state).toBe("allowed");
+    expect(report.durability).toBe("dies_on_rebuild_cdhash_pinned");
+    expect(report.storedRequirement).toBe(CDHASH_REQUIREMENT);
+  });
+
+  test("a certificate-rooted stored grant is reported durable", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: grantProbe(CERT_ROOT_REQUIREMENT),
+    });
+
+    expect(report.state).toBe("allowed");
+    expect(report.durability).toBe("survives_rebuild_certificate_anchored");
+  });
+
+  test("an undecodable stored requirement is unknown, never assumed durable", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: grantProbe(null),
+    });
+
+    expect(report.durability).toBe("unknown");
+    expect(report.storedRequirement).toBeNull();
+  });
+
+  test("durability is per service, so one app can hold one durable and one fragile grant", () => {
+    const probe: TccPermissionProbe = {
+      databaseExists: () => true,
+      readAccessRow: (_dbPath, service) => ({
+        kind: "row",
+        row: { authValue: "2", csreqHex: STATION_CSREQ_HEX, service } as TccAccessRow,
+      }),
+      verifyStoredRequirement: () => "satisfied",
+      describeStoredRequirement: () => CERT_ROOT_REQUIREMENT,
+    };
+    const accessibility = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe,
+    });
+    const microphone = resolveTccGrant({
+      service: "kTCCServiceMicrophone",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: { ...probe, describeStoredRequirement: () => CDHASH_REQUIREMENT },
+    });
+
+    expect(accessibility.durability).toBe("survives_rebuild_certificate_anchored");
+    expect(microphone.durability).toBe("dies_on_rebuild_cdhash_pinned");
+  });
+
+  test("a state with no row carries no durability claim", () => {
+    const report = resolveTccGrant({
+      service: "kTCCServiceAccessibility",
+      home: "/Users/tester",
+      appPath: APP_PATH,
+      probe: probeReturning(null),
+    });
+
+    expect(report.state).toBe("not_determined");
+    expect(report.durability).toBe("unknown");
+    expect(report.storedRequirement).toBeNull();
+  });
+});
+
 describe("TCC database read failures", () => {
   function probeWithSqliteFailure(detail: string): TccPermissionProbe {
     return {

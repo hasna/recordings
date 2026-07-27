@@ -74,11 +74,15 @@ export type TccAuthorizationState =
   | "allowed"
   | "stale_allowed_for_previous_app_build"
   | "allowed_identity_unverified"
+  // Deliberately does not start with "allowed": a `grep allowed` or a human skim must not
+  // read "there is no bundle to check" as a pass.
+  | "unverified_no_installed_bundle"
   | "denied"
   | "unknown"
   | "limited"
   | "not_determined"
   | "undetermined_tcc_database_unreadable"
+  | "unsupported"
   | `unknown(${string})`;
 
 export type CodesignRequirementRunner = (
@@ -90,6 +94,10 @@ export interface TccPermissionProbe {
   databaseExists: (dbPath: string) => boolean;
   readAccessRow: (dbPath: string, service: string) => TccAccessLookup;
   verifyStoredRequirement: (csreqHex: string, appPath: string) => TccIdentityVerification;
+  /// Renders the stored requirement blob as requirement text, or null when it cannot be
+  /// decoded. Durability is a property of the requirement the grant was *stored* with, so it
+  /// can only be classified from this — never from the bundle's current signature.
+  describeStoredRequirement?: (csreqHex: string) => string | null;
 }
 
 /// `codesign --verify -R <requirement>` exit codes, measured on macOS 26.5.1 (station03):
@@ -166,12 +174,16 @@ export function verifyStoredRequirementWithCodesign(
 const defaultTccPermissionProbe: TccPermissionProbe = {
   databaseExists: existsSync,
   readAccessRow: (dbPath, service) => {
+    // Both columns need ifnull: concatenating a NULL in SQLite yields NULL, which would arrive
+    // as empty stdout and be read as "no row" — reporting "never asked" for a row that exists.
+    // client_type = 0 pins bundle-identifier rows; client_type = 1 rows key on absolute paths
+    // and would never match this identifier.
     const sql =
-      "select auth_value || '|' || ifnull(hex(csreq), '') from access where service = '" +
+      "select ifnull(auth_value, '') || '|' || ifnull(hex(csreq), '') from access where service = '" +
       service.replace(/'/g, "''") +
       "' and client = '" +
       RECORDINGS_BUNDLE_IDENTIFIER +
-      "' order by last_modified desc limit 1;";
+      "' and client_type = 0 order by last_modified desc limit 1;";
     const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -195,7 +207,46 @@ const defaultTccPermissionProbe: TccPermissionProbe = {
   },
   verifyStoredRequirement: (csreqHex, appPath) =>
     verifyStoredRequirementWithCodesign(csreqHex, appPath),
+  describeStoredRequirement: (csreqHex) => describeStoredRequirementWithCsreq(csreqHex),
 };
+
+/// Decodes a stored `csreq` blob to its requirement text with `csreq -r <file> -t`, the
+/// inverse of how macOS stored it. Returns null rather than guessing when the tool is absent
+/// or the blob will not parse.
+export function describeStoredRequirementWithCsreq(
+  csreqHex: string,
+  runner: (requirementPath: string) => { status: number | null; stdout?: string; error?: Error } = (
+    requirementPath,
+  ) =>
+    spawnSync("/usr/bin/csreq", ["-r", requirementPath, "-t"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }),
+): string | null {
+  const normalized = csreqHex.trim();
+  if (
+    normalized.length === 0
+    || normalized.length % 2 !== 0
+    || !/^[0-9a-fA-F]+$/.test(normalized)
+  ) {
+    return null;
+  }
+
+  let scratchDirectory: string | null = null;
+  try {
+    scratchDirectory = mkdtempSync(join(tmpdir(), "recordings-tcc-decode-"));
+    const requirementPath = join(scratchDirectory, "tcc-requirement.bin");
+    writeFileSync(requirementPath, Buffer.from(normalized, "hex"));
+    const result = runner(requirementPath);
+    if (result.error || result.status !== 0) return null;
+    const text = (result.stdout ?? "").trim();
+    return text.length > 0 ? text : null;
+  } catch {
+    return null;
+  } finally {
+    if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
+  }
+}
 
 /// Resolves the real authorization state for one TCC service, verifying that an `allowed`
 /// row still binds to the installed bundle. Never reports a bare `allowed` on the strength
@@ -207,6 +258,25 @@ export function resolveTccPermission(options: {
   appPath: string | null;
   probe?: TccPermissionProbe;
 }): TccAuthorizationState {
+  return resolveTccGrant(options).state;
+}
+
+/// The authorization state for one service together with the requirement that decision was
+/// stored against. Durability is per-service because each service stores its own `csreq`: one
+/// app can hold a rebuild-durable Accessibility grant and a cdhash-pinned Microphone grant at
+/// the same time, and a single per-app verdict cannot express that.
+export interface TccGrantReport {
+  state: TccAuthorizationState;
+  storedRequirement: string | null;
+  durability: TccGrantDurability;
+}
+
+export function resolveTccGrant(options: {
+  service: string;
+  home: string;
+  appPath: string | null;
+  probe?: TccPermissionProbe;
+}): TccGrantReport {
   const probe = options.probe ?? defaultTccPermissionProbe;
   let sawUnreadableDatabase = false;
 
@@ -220,22 +290,40 @@ export function resolveTccPermission(options: {
     if (lookup.kind === "absent") continue;
     const row = lookup.row;
 
-    const label = tccAuthValueLabel(row.authValue.trim());
-    if (label !== "allowed") return label as TccAuthorizationState;
+    // Classify the requirement the grant was STORED with. The bundle's current signature says
+    // nothing about an existing grant: a bundle re-signed with a certificate still holds a
+    // cdhash-pinned grant from when it was ad-hoc, and reporting the bundle's shape there
+    // would promise durability the stored grant does not have.
+    const storedRequirement = probe.describeStoredRequirement?.(row.csreqHex) ?? null;
+    const durability = classifyTccGrantDurability({
+      designatedRequirement: storedRequirement,
+      adHocSigned: false,
+    });
 
-    if (!options.appPath) return "allowed_identity_unverified";
+    const label = tccAuthValueLabel(row.authValue.trim());
+    if (label !== "allowed") {
+      return { state: label as TccAuthorizationState, storedRequirement, durability };
+    }
+
+    if (!options.appPath) {
+      return { state: "unverified_no_installed_bundle", storedRequirement, durability };
+    }
     switch (probe.verifyStoredRequirement(row.csreqHex, options.appPath)) {
       case "satisfied":
-        return "allowed";
+        return { state: "allowed", storedRequirement, durability };
       case "unsatisfied":
-        return "stale_allowed_for_previous_app_build";
+        return { state: "stale_allowed_for_previous_app_build", storedRequirement, durability };
       default:
-        return "allowed_identity_unverified";
+        return { state: "allowed_identity_unverified", storedRequirement, durability };
     }
   }
 
   // Only claim "never asked" when every database that exists was actually readable.
-  return sawUnreadableDatabase ? "undetermined_tcc_database_unreadable" : "not_determined";
+  return {
+    state: sawUnreadableDatabase ? "undetermined_tcc_database_unreadable" : "not_determined",
+    storedRequirement: null,
+    durability: "unknown",
+  };
 }
 
 /// How long a TCC grant given to this bundle will outlive the build it was granted to.
