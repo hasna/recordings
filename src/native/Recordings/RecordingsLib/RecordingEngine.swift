@@ -315,8 +315,16 @@ enum PasteDeliveryOutcome: Equatable, Sendable {
     case eventConstructionFailed
     /// Some process holds secure event input (a password field, a password manager, certain
     /// lock states). macOS then discards synthetic keystrokes and reports nothing, so the
-    /// paste cannot land. The transcript stays on the clipboard for a manual Cmd-V.
+    /// paste cannot land. Secure input was already held *before* anything was posted, so
+    /// nothing was typed and the transcript stays on the clipboard for a manual Cmd-V.
     case secureInputBlocked
+    /// The Cmd-V events were posted, and secure input was held by the time the post returned.
+    /// Kept separate from `secureInputBlocked` because the keystroke may well have been
+    /// delivered: the events went out before the state changed. Nothing can confirm it either
+    /// way, so this outcome claims neither success nor failure — the transcript is kept on the
+    /// clipboard, but the owner is not told to press Cmd-V, because doing so would duplicate
+    /// text that did land.
+    case secureInputEngagedAfterPost
 }
 
 /// What actually happened when the paste keystroke was attempted.
@@ -327,7 +335,12 @@ enum PasteDeliveryOutcome: Equatable, Sendable {
 enum PastePostResult: Equatable, Sendable {
     case posted
     case eventConstructionFailed
+    /// Secure input was already held when the paste was attempted; nothing was posted.
     case secureInputActive
+    /// The events were posted and secure input was held afterwards. Distinct from
+    /// `secureInputActive` because the post already happened, so this is an unconfirmable
+    /// delivery rather than a refusal.
+    case postedThenSecureInputEngaged
 }
 
 struct PasteboardWriteResult: Equatable, Sendable {
@@ -453,6 +466,11 @@ final class PasteTransactionCoordinator {
                 settlement(transaction, .secureInputBlocked)
                 self.state = .idle
                 completion(transaction, .secureInputBlocked)
+                return
+            case .postedThenSecureInputEngaged:
+                settlement(transaction, .secureInputEngagedAfterPost)
+                self.state = .idle
+                completion(transaction, .secureInputEngagedAfterPost)
                 return
             }
             completion(transaction, .pasted)
@@ -677,7 +695,22 @@ public final class RecordingEngine: ObservableObject {
     /// settles. A transient success message can afford that; "this field blocks typing, press
     /// Cmd-V" cannot, because it is the only thing telling the owner their transcript is
     /// recoverable. Held here so the idle status keeps carrying it until the next delivery.
+    ///
+    /// Only ever written through `setBlockedReason`, which pairs it with the generation below.
     @Published public private(set) var blockedReason: String?
+    /// The recording generation `blockedReason` was produced for, so that an explanation cannot
+    /// outlive its pipeline.
+    ///
+    /// The reason used to be assigned in exactly one place — the paste-completion closure — and
+    /// every route that ends a pipeline *without* a `PasteDeliveryOutcome` writes `statusMessage`
+    /// directly and never reaches that closure: the four `finish(_:)` transcription failures, the
+    /// "Failed to save audio" path, `cancelIntentDelivery`, the recorder-start failure, and the
+    /// conversation route's "Answered". Each of those left the reason set, and `updateStatus()`
+    /// then resurfaced Cmd-V advice for a paste one or more recordings old. Scoping it to a
+    /// generation is how the rest of this engine settles staleness — see
+    /// `pipelineDeliveryGate.shouldApplyStatus`, `shouldApplyConversationReply` and
+    /// `shouldApplyBackgroundRecoveryStatus` — and it holds for paths nobody has enumerated yet.
+    private var blockedReasonGeneration: UInt64?
     @Published public var isTranscribing = false
     @Published public var recordingDuration: TimeInterval = 0
     @Published public var liveTranscriptionText = ""
@@ -795,6 +828,14 @@ public final class RecordingEngine: ObservableObject {
             // is checked twice on purpose — a password field can take secure input between
             // the check and the post, and a pre-check alone would just narrow the window in
             // which the app claims a paste that never happened.
+            //
+            // The two checks deliberately do NOT return the same answer. Before the post,
+            // nothing has been delivered, so refusing is certain and correct. After the post,
+            // the events are already out; secure input engaging in that window says nothing
+            // about whether they landed. Reporting that as a flat failure would just invert
+            // the original defect — swapping an unfalsifiable success for an unfalsifiable
+            // failure — and would tell the owner to press Cmd-V over text that may already
+            // be there.
             if IsSecureEventInputEnabled() { return .secureInputActive }
             let source = CGEventSource(stateID: .hidSystemState)
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
@@ -805,7 +846,7 @@ public final class RecordingEngine: ObservableObject {
             up.flags = .maskCommand
             down.post(tap: .cgSessionEventTap)
             up.post(tap: .cgSessionEventTap)
-            if IsSecureEventInputEnabled() { return .secureInputActive }
+            if IsSecureEventInputEnabled() { return .postedThenSecureInputEngaged }
             return .posted
         }
     )
@@ -1031,13 +1072,24 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    /// The only writer of `blockedReason`. Tags the reason with the generation it explains so a
+    /// later pipeline cannot inherit it; `generation` is the transaction's own pipeline
+    /// generation, falling back to the current one when a delivery carried none.
+    private func setBlockedReason(_ reason: String?, generation: UInt64?) {
+        blockedReason = reason
+        blockedReasonGeneration = reason == nil ? nil : (generation ?? recordingGeneration)
+    }
+
     public func updateStatus() {
         if isRecording || isTranscribing || deliveryIsPending { return }
-        if let blockedReason {
+        if let blockedReason, blockedReasonGeneration == recordingGeneration {
             statusMessage = blockedReason
             flowPhase = .idle
             return
         }
+        // Superseded by a newer recording: drop it rather than leave a published value that
+        // reads as current to anything that looks at `blockedReason` without the generation.
+        setBlockedReason(nil, generation: nil)
         statusMessage = "Ready"
         flowPhase = .idle
     }
@@ -2902,12 +2954,18 @@ public final class RecordingEngine: ObservableObject {
         return args
     }
 
+    /// Terminal for a pipeline that failed before any delivery — "Recording configuration
+    /// unavailable", "Failed to save transcription", "No audio captured", and the rewrite
+    /// failure. These write `statusMessage` directly and never reach `updateDeliveryStatus`,
+    /// so the persisted reason is cleared here too: nothing was pasted on this pass, and the
+    /// previous paste's Cmd-V advice must not be what the owner is left looking at.
     private func finish(_ msg: String) {
         log("finish status=\(msg)")
         isTranscribing = false
         liveTranscriptionText = ""
         statusMessage = msg
         flowPhase = .failed(msg)
+        setBlockedReason(nil, generation: nil)
     }
 
     private func resetRecordingIntent() {
@@ -3395,15 +3453,33 @@ public final class RecordingEngine: ObservableObject {
             // is something the owner can actually act on rather than a dead end.
             case .secureInputBlocked:
                 "This field blocks typing (secure input) — transcript copied, press Cmd-V"
+            // Deliberately does NOT say "press Cmd-V". The events were posted before secure
+            // input engaged, so the text may already be in the field and a second paste would
+            // duplicate it. This says what is known (delivery unconfirmed) and where the
+            // transcript is, and leaves the decision to the owner, who can see the field.
+            case .secureInputEngagedAfterPost:
+                "Secure input started mid-paste — delivery unconfirmed, transcript kept on the clipboard"
             }
-            // Only a blocker the owner must act on is persisted. Everything else clears it,
-            // so a stale explanation can never outlive the condition it described.
-            self.blockedReason = outcome == .secureInputBlocked ? message : nil
+            // Only an outcome whose remedy the owner still has to act on is persisted past
+            // this status write; everything else clears it. Assigned *after*
+            // `updateDeliveryStatus`, which clears the persisted reason, because any delivery
+            // status that reaches the screen replaces the previous explanation.
+            // Switched, not compared, so that a new outcome cannot silently default to
+            // "nothing to tell the owner".
+            let reasonToPersist: String?
+            switch outcome {
+            case .secureInputBlocked, .secureInputEngagedAfterPost:
+                reasonToPersist = message
+            case .pasted, .targetUnavailable, .clipboardOwnershipLost, .clipboardWriteFailed,
+                 .eventConstructionFailed:
+                reasonToPersist = nil
+            }
             self.updateDeliveryStatus(
                 message,
                 kind: posted ? .success : .failure,
                 pipelineGeneration: transaction.generation
             )
+            self.setBlockedReason(reasonToPersist, generation: transaction.generation)
         } settlement: { transaction, outcome in
             let pasteboard = NSPasteboard.general
             let stillOwnsChangeCount = ownedPasteboardChangeCount.map {
@@ -3425,10 +3501,13 @@ public final class RecordingEngine: ObservableObject {
                 stillOwnsChangeCount
             case .targetUnavailable, .clipboardOwnershipLost, .eventConstructionFailed, .pasted:
                 stillOwnsPayload
-            // Never restore over a secure-input failure: the status line just told the owner
-            // to press Cmd-V, and restoring the previous clipboard would delete the very
-            // transcript they were told to paste.
-            case .secureInputBlocked:
+            // Never restore over either secure-input outcome. For `.secureInputBlocked` the
+            // status line just told the owner to press Cmd-V, and restoring the previous
+            // clipboard would delete the very transcript they were told to paste. For
+            // `.secureInputEngagedAfterPost` the paste is unconfirmed, so the clipboard copy
+            // is the only one that might still exist; restoring would destroy the transcript
+            // on exactly the reading where it never landed.
+            case .secureInputBlocked, .secureInputEngagedAfterPost:
                 false
             }
             if shouldRestore {
@@ -3452,7 +3531,21 @@ public final class RecordingEngine: ObservableObject {
         hasOwnershipToken: Bool,
         stillOwnsPayload: Bool
     ) -> Bool {
-        outcome == .targetUnavailable && hasOwnershipToken && !stillOwnsPayload
+        // Switched rather than compared against `.targetUnavailable` so the compiler forces a
+        // decision here when an outcome is added. A `==` comparison answers `false` for every
+        // new case without anyone having considered it, and this predicate decides whether the
+        // engine still believes it owns the transcript — guessing wrong loses the text.
+        let outcomeCanStrandThePayload: Bool
+        switch outcome {
+        case .targetUnavailable:
+            outcomeCanStrandThePayload = true
+        // Neither secure-input outcome can strand the payload: nothing else wrote to the
+        // clipboard, and the transcript is deliberately kept there in both.
+        case .pasted, .clipboardOwnershipLost, .clipboardWriteFailed, .eventConstructionFailed,
+             .secureInputBlocked, .secureInputEngagedAfterPost:
+            outcomeCanStrandThePayload = false
+        }
+        return outcomeCanStrandThePayload && hasOwnershipToken && !stillOwnsPayload
     }
 
     @discardableResult
@@ -3533,7 +3626,20 @@ public final class RecordingEngine: ObservableObject {
         clipboardOwnershipWasLost: Bool = false,
         completedTranscriptAlreadyOnClipboard: Bool = false
     ) -> Bool {
-        outcome == .targetUnavailable
+        // Switched rather than compared against `.targetUnavailable` for the same reason as
+        // `clipboardOwnershipWasLostAfterPasteFailure`: a `==` test silently answers `false`
+        // for any outcome added later. Both secure-input outcomes already leave the transcript
+        // on the clipboard, so re-copying it would be redundant at best — but that is a
+        // decision the compiler should make someone state, not one to inherit by accident.
+        let outcomeNeedsClipboardFallback: Bool
+        switch outcome {
+        case .targetUnavailable:
+            outcomeNeedsClipboardFallback = true
+        case .pasted, .clipboardOwnershipLost, .clipboardWriteFailed, .eventConstructionFailed,
+             .secureInputBlocked, .secureInputEngagedAfterPost:
+            outcomeNeedsClipboardFallback = false
+        }
+        return outcomeNeedsClipboardFallback
             && !accessibilityTrusted
             && !clipboardOwnershipWasLost
             && !completedTranscriptAlreadyOnClipboard
@@ -3625,6 +3731,14 @@ public final class RecordingEngine: ObservableObject {
         }
         statusMessage = message
         flowPhase = Self.flowPhase(forDeliveryStatus: message, kind: kind)
+        // A delivery status that actually reaches the screen replaces whatever explanation was
+        // there, so the persisted reason must not survive it — otherwise `updateStatus()`
+        // resurfaces it on the next return to idle. This is what clears the two same-generation
+        // leaks: the "Finish the previous paste before trying again" rejection and the
+        // conversation route's "Answered", neither of which produces a `PasteDeliveryOutcome`.
+        // The one caller that needs a reason to outlive its status re-sets it immediately after
+        // this returns.
+        setBlockedReason(nil, generation: nil)
     }
 
     private func selectedRunningPasteTarget(

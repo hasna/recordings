@@ -172,6 +172,65 @@ struct PasteTargetTests {
         #expect(completions != [.secureInputBlocked])
     }
 
+    @Test("secure input engaging after the post is not reported as a refusal")
+    @MainActor
+    func secureInputAfterPostIsDistinctFromARefusal() {
+        // The regression this locks: the poster checks secure input both before and after the
+        // post, and both answers used to collapse into .secureInputBlocked. When secure input
+        // engages *after* the events are out, they may well have been delivered — so calling it
+        // a refusal replaced an unfalsifiable success with an unfalsifiable failure, and the
+        // status line told the owner to press Cmd-V over text that had already landed.
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+        var completions: [PasteDeliveryOutcome] = []
+        var settlements: [PasteDeliveryOutcome] = []
+        let coordinator = PasteTransactionCoordinator(
+            schedule: { _, operation in scheduled.append(operation) },
+            writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
+            postPaste: { .postedThenSecureInputEngaged }
+        )
+
+        #expect(coordinator.submit(text: "hello", generation: 1, delay: 0) { _, outcome in
+            completions.append(outcome)
+        } settlement: { _, outcome in
+            settlements.append(outcome)
+        })
+        scheduled.removeFirst()()
+
+        #expect(completions == [.secureInputEngagedAfterPost])
+        #expect(settlements == [.secureInputEngagedAfterPost])
+        // Neither of the two answers it must stay distinct from: it is not a refusal (nothing
+        // was withheld) and it is not a confirmed paste (nothing confirmed it).
+        #expect(!completions.contains(.secureInputBlocked))
+        #expect(!completions.contains(.pasted))
+        #expect(!coordinator.hasPendingTransaction)
+    }
+
+    @Test("neither secure-input outcome re-copies or disowns the transcript")
+    func secureInputOutcomesLeaveTheTranscriptWhereItIs() {
+        // These two predicates were `== .targetUnavailable` comparisons, so every outcome added
+        // after them answered `false` without anyone deciding that. `false` happens to be right
+        // for both secure-input outcomes — the transcript is deliberately left on the clipboard
+        // and nothing else wrote over it — and this pins that it is right on purpose.
+        for outcome in [PasteDeliveryOutcome.secureInputBlocked, .secureInputEngagedAfterPost] {
+            #expect(!RecordingEngine.shouldCopyAfterPasteFailure(
+                outcome: outcome,
+                deliveryKind: .ordinaryDictation,
+                accessibilityTrusted: false
+            ))
+            #expect(!RecordingEngine.clipboardOwnershipWasLostAfterPasteFailure(
+                outcome: outcome,
+                hasOwnershipToken: true,
+                stillOwnsPayload: false
+            ))
+        }
+        // The one outcome that does mean the payload was stranded still does.
+        #expect(RecordingEngine.clipboardOwnershipWasLostAfterPasteFailure(
+            outcome: .targetUnavailable,
+            hasOwnershipToken: true,
+            stillOwnsPayload: false
+        ))
+    }
+
     @Test("paste failures complete once with exact write and post outcomes")
     @MainActor
     func pasteFailureOutcomesAreExact() {

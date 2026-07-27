@@ -527,6 +527,18 @@ struct RecentRetentionTests {
 
 @MainActor
 struct PasteSettlementObservationTests {
+    @Test("an idle engine with nothing blocked still reports Ready")
+    func idleStatusIsReadyWhenNothingIsBlocked() {
+        // `updateStatus()` grew a generation-scoped branch that re-surfaces a persisted blocked
+        // reason. This pins the ordinary path through it: with no reason recorded, the return to
+        // idle must still land on "Ready" rather than inheriting a stale explanation. Getting the
+        // generation comparison backwards would make every idle status show the last blocker.
+        let engine = makeEngine()
+        engine.updateStatus()
+        #expect(engine.blockedReason == nil)
+        #expect(engine.statusMessage == "Ready")
+    }
+
     @Test("settlement back to idle publishes an observation so canStartRecording recomputes")
     func settlementEmitsObservation() {
         let engine = makeEngine()
