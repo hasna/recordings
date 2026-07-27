@@ -2,10 +2,18 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  RECORDINGS_BUNDLE_IDENTIFIER,
+  TCC_DATABASE_UNREADABLE_STATE,
+} from "../lib/macos-bundle.js";
 
 /// Bundle identifier TCC keys every Recordings.app grant to. Single source for the
 /// permission lookups, the reset path, and the reported status object.
-export const RECORDINGS_BUNDLE_IDENTIFIER = "com.hasna.recordings";
+///
+/// Re-exported rather than defined here so this module keeps the import path the review ruling
+/// named, while the one definition lives in `lib/macos-bundle.ts` — `lib/capture-probe.ts`
+/// publishes the same constant through `src/index.ts` and must not import upward from `cli/`.
+export { RECORDINGS_BUNDLE_IDENTIFIER, TCC_DATABASE_UNREADABLE_STATE };
 
 export interface PermissionHelperProcessResult {
   status: number | null;
@@ -327,7 +335,7 @@ export function resolveTccGrant(options: {
 
   // Only claim "never asked" when every database that exists was actually readable.
   return {
-    state: sawUnreadableDatabase ? "undetermined_tcc_database_unreadable" : "not_determined",
+    state: sawUnreadableDatabase ? TCC_DATABASE_UNREADABLE_STATE : "not_determined",
     storedRequirement: null,
     durability: "unknown",
   };

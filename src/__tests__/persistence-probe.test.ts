@@ -397,10 +397,75 @@ describe("writing to a shared store requires consent", () => {
 
     expect(result.attempted).toBe(false);
     expect(rows.size).toBe(0);
-    expect(result.message).toContain("SKIPPED");
     expect(result.message).toContain("--probe-store-write");
-    // A skip is not a failure: it must not turn `check --probe` red.
-    expect(result.ok).toBe(true);
+
+    // REWRITTEN. This test previously asserted `result.ok === true` for the skip, which locked in
+    // the defect rather than guarding against it: `ok:true` made `check --probe` print a green ✓
+    // next to the word SKIPPED and exit 0 while writing, reading and deleting nothing — and since
+    // a shared API store is skipped by default, that was the DEFAULT outcome on the machine this
+    // probe was written for. "I declined to measure" is now its own state.
+    expect(result.outcome).toBe("skipped");
+    expect(result.ok).toBe(false);
+    expect(result.read_back).toBe(false);
+    expect(result.cleaned_up).toBe(false);
+    // The wording must not read as a pass either.
+    expect(result.message).toContain("NOT MEASURED");
+    expect(result.message).not.toContain("SKIPPED:");
+  });
+
+  // A skip must still not turn `check --probe` red. The exit code keys off `outcome === "failed"`,
+  // which is the distinction `ok` alone could not express and why the third state exists.
+  test("a skip is reported as not-measured, and is not a failure", async () => {
+    const { store } = makeFakeStore({
+      mode: "cloud-http",
+      baseUrl: "https://recordings.example.test/v1",
+    });
+
+    const result = await probeRecordingPersistence({ store });
+
+    expect(result.outcome).not.toBe("failed");
+    expect(result.outcome).not.toBe("proved");
+  });
+
+  // The skip used to make ZERO network contact, so it did not establish that the store was even
+  // reachable — only that the probe had chosen not to write. A read-only stats call proves
+  // reachability and credential acceptance without adding a row to production.
+  test("a skip still probes reachability read-only, and reports what it found", async () => {
+    const reachableStore = makeFakeStore({
+      mode: "cloud-http",
+      baseUrl: "https://recordings.example.test/v1",
+    });
+    let statsCalls = 0;
+    (reachableStore.store as unknown as { getRecordingStats: () => Promise<unknown> })
+      .getRecordingStats = async () => {
+      statsCalls += 1;
+      return { total: 3 };
+    };
+
+    const reachable = await probeRecordingPersistence({ store: reachableStore.store });
+    expect(statsCalls).toBe(1);
+    expect(reachable.reachable).toBe(true);
+    expect(reachable.outcome).toBe("skipped");
+    // Reachable is still not proved: no write happened.
+    expect(reachable.ok).toBe(false);
+    // And a read-only probe must not have created anything.
+    expect(reachableStore.rows.size).toBe(0);
+    expect(reachableStore.created).toHaveLength(0);
+
+    const unreachableStore = makeFakeStore({
+      mode: "cloud-http",
+      baseUrl: "https://recordings.example.test/v1",
+    });
+    (unreachableStore.store as unknown as { getRecordingStats: () => Promise<unknown> })
+      .getRecordingStats = async () => {
+      throw new Error("connect ECONNREFUSED");
+    };
+
+    const unreachable = await probeRecordingPersistence({ store: unreachableStore.store });
+    expect(unreachable.reachable).toBe(false);
+    expect(unreachable.message).toContain("did NOT answer");
+    // An unreachable store is still a skip, not a failure — the probe was never going to write.
+    expect(unreachable.outcome).toBe("skipped");
   });
 
   test("writes to a local store without any extra consent", async () => {

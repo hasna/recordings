@@ -39,6 +39,7 @@
     "generate:sdk": "bun run scripts/generate-sdk.ts",
     "migrate": "bun run scripts/migrate.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:tcc-contract": "tsc --noEmit -p tsconfig.tcc-contract.json",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "dev:cli": "bun run src/cli/index.ts",

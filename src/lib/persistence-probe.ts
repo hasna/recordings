@@ -16,13 +16,17 @@ import type { RecordingsConfig } from "../types/index.js";
  * variable to make it visible.
  *
  * `check` never reported which store it had resolved. That blind spot is not
- * theoretical: on station03 those two variables are set in the LAUNCHD USER
- * SESSION, so every process in the session inherits them — the GUI app, its CLI
- * helper, and any ssh shell alike. Writes go to the API while
- * ~/.hasna/recordings/recordings.db sits frozen at 936 rows from 2026-07-24,
- * and the live store holds 1288. Two separate audits read the stale SQLite file
- * and concluded that recording had stopped persisting. It had not; they were
- * looking at the wrong store.
+ * theoretical: on an affected fleet Mac those two variables are set in the
+ * LAUNCHD USER SESSION, so every process in the session inherits them — the GUI
+ * app, its CLI helper, and any ssh shell alike. Writes go to the API while
+ * ~/.hasna/recordings/recordings.db sits frozen at the row count it held when the
+ * machine last ran in local mode, and the live store has since grown well past
+ * it. Two separate audits read the stale SQLite file and concluded that recording
+ * had stopped persisting. It had not; they were looking at the wrong store.
+ *
+ * Deliberately no hostname, row counts or dates here: they are live production
+ * figures and fleet topology, this repo is public, and the mechanism above is the
+ * part that has engineering value.
  *
  * So: naming the active store is part of proving persistence, and a persistence
  * probe must round-trip against the ACTIVE store, never against whichever one is
@@ -187,9 +191,38 @@ export function describeActiveStore(
 }
 
 export interface PersistenceProbeResult {
+  /**
+   * True ONLY when a write was performed and read back. Never true for a skip.
+   *
+   * This used to be `true` on the skip path, which is how `check --probe` came to print
+   * `✓ Persistence round-trip: SKIPPED…` and exit 0 while writing, reading and deleting nothing —
+   * and because a shared API store is skipped by default, that was the DEFAULT outcome on
+   * the fleet Mac whose blind spot this probe was written to close. Read `outcome` to
+   * distinguish "declined to measure" from "measured and passed"; `ok` is exactly
+   * `outcome === "proved"`.
+   */
   ok: boolean;
+  /**
+   * Three-valued because "I declined to measure" is not a pass and not a failure.
+   *
+   * - `proved`  — a marker was written, read back byte-identical, and cleaned up.
+   * - `failed`  — a write, read-back or cleanup step actively failed.
+   * - `skipped` — the probe refused to write to a shared API store without `allowRemoteWrite`.
+   *
+   * The exit code must key off `failed` alone; the rendered marker must distinguish all three.
+   */
+  outcome: "proved" | "failed" | "skipped";
   /** False when the probe declined to write, e.g. to a live API store. */
   attempted: boolean;
+  /**
+   * Whether the active store answered a read-only request, and what it said.
+   *
+   * Only meaningful on the skip path, and it exists because the skip previously made ZERO network
+   * contact: it did not establish that the store was resolvable, reachable or authenticating —
+   * only that the probe had chosen not to write. A read-only `getRecordingStats()` proves
+   * reachability plus credential acceptance without adding a row to production.
+   */
+  reachable: boolean | null;
   transport: "local" | "cloud-http";
   base_url: string | null;
   /** Id of the marker recording, kept for cleanup follow-up when needed. */
@@ -253,7 +286,7 @@ export async function probeRecordingPersistence(
   const stamp = (options.now?.() ?? new Date()).toISOString();
   const marker = `${PERSISTENCE_PROBE_MARKER_PREFIX} ${stamp}`;
   const transport = store.mode === "cloud-http" ? "cloud-http" : "local";
-  const base: Omit<PersistenceProbeResult, "ok" | "message"> = {
+  const base: Omit<PersistenceProbeResult, "ok" | "message" | "outcome"> = {
     attempted: false,
     transport,
     base_url: safeBaseUrl(store.baseUrl),
@@ -261,16 +294,37 @@ export async function probeRecordingPersistence(
     read_back: false,
     cleaned_up: false,
     created_local_store: false,
+    reachable: null,
   };
 
   if (transport === "cloud-http" && !options.allowRemoteWrite) {
+    // Prove what CAN be proved without writing to production. A read-only stats call establishes
+    // that the resolved base URL is reachable and that the credential is accepted — the skip used
+    // to make no network contact at all, so it did not even show the store existed.
+    let reachable: boolean | null = null;
+    let reachabilityDetail = "";
+    try {
+      await store.getRecordingStats();
+      reachable = true;
+      reachabilityDetail = " The store did answer a read-only stats request, so it is reachable " +
+        "and the credential is accepted.";
+    } catch (error) {
+      reachable = false;
+      reachabilityDetail =
+        " The store did NOT answer a read-only stats request: " +
+        `${redactKeyMaterial((error as Error).message)}.`;
+    }
     return {
       ...base,
-      ok: true,
+      reachable,
+      // NOT `ok: true`. Nothing was written, nothing was read back, nothing was deleted.
+      ok: false,
+      outcome: "skipped",
       message:
-        `SKIPPED: this would write a marker recording to the shared API store at ` +
-        `${safeBaseUrl(store.baseUrl)}, which is production for every machine pointed at it. ` +
-        "Re-run with --probe-store-write to prove the write path for real.",
+        `NOT MEASURED: the write round-trip was skipped, because it would add a marker recording ` +
+        `to the shared API store at ${safeBaseUrl(store.baseUrl)}, which is production for every ` +
+        `machine pointed at it. Re-run with --probe-store-write to prove the write path for real.` +
+        reachabilityDetail,
     };
   }
 
@@ -293,6 +347,7 @@ export async function probeRecordingPersistence(
       ...base,
       attempted: true,
       ok: false,
+      outcome: "failed",
       message:
         `store rejected the write: ${redactKeyMaterial((error as Error).message)}. ` +
         "If this was a timeout rather than a refusal, the write may still have committed under " +
@@ -305,6 +360,7 @@ export async function probeRecordingPersistence(
       ...base,
       attempted: true,
       ok: false,
+      outcome: "failed",
       message: "store accepted the write but returned no id",
     };
   }
@@ -320,7 +376,17 @@ export async function probeRecordingPersistence(
       readError = "the write was accepted but the recording could not be read back";
     }
   } catch (error) {
-    readError = `read-back failed: ${(error as Error).message}`;
+    // Redacted like every other error path in this file (`:137`, `:297`, `:349`); this one was
+    // simply missed.
+    //
+    // Defense-in-depth, stated honestly: NO current code path can produce a leak here. Bun's
+    // fetch failure message is exactly "Unable to connect. Is the computer able to access the
+    // url?" with no URL in it, and `HasnaHttpError` carries the RELATIVE path, not the full URL
+    // (`src/http/client.ts`). Demonstrating a leak required hand-constructing a `getRecording`
+    // that throws an error already containing userinfo and an `x-api-key` value. The wrap costs
+    // one call, and the destination is an operator's terminal or a diagnostics file — which is
+    // why this is unrelated to the repo being public.
+    readError = `read-back failed: ${redactKeyMaterial((error as Error).message)}`;
   }
 
   // Always attempt cleanup, including after a failed read-back — a probe must
@@ -366,6 +432,7 @@ export async function probeRecordingPersistence(
       cleaned_up: cleanedUp,
       created_local_store: createdLocalStore,
       ok: false,
+      outcome: "failed",
       message: `${readError} (${where}, id ${created.id.slice(0, 8)})${createdNote}`,
     };
   }
@@ -382,6 +449,7 @@ export async function probeRecordingPersistence(
       cleaned_up: false,
       created_local_store: createdLocalStore,
       ok: false,
+      outcome: "failed",
       message:
         `wrote and read back a marker recording in ${where}, but could NOT confirm its removal ` +
         `(${cleanupError ?? "cleanup failed"}). The probe recording ${created.id} may still be ` +
@@ -397,6 +465,7 @@ export async function probeRecordingPersistence(
     cleaned_up: true,
     created_local_store: createdLocalStore,
     ok: true,
+    outcome: "proved",
     message: `wrote, read back and confirmed removal of a marker recording in ${where}${createdNote}`,
   };
 }

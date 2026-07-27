@@ -36,9 +36,23 @@ export function resetClient(): void {
  * must not land in terminal scrollback, CI logs or a diagnostics file.
  */
 export function redactKeyMaterial(text: string): string {
-  return text
-    .replace(/\b(sk|rk|org)-[A-Za-z0-9_*\-]{4,}/g, "[redacted]")
-    .replace(/\bBearer\s+[A-Za-z0-9._*\-]{4,}/gi, "Bearer [redacted]");
+  return (
+    text
+      .replace(/\b(sk|rk|org)-[A-Za-z0-9_*\-]{4,}/g, "[redacted]")
+      .replace(/\bBearer\s+[A-Za-z0-9._*\-]{4,}/gi, "Bearer [redacted]")
+      // `Authorization: Basic <base64>` carries user:password. The `sk-` allowlist never saw it.
+      .replace(/\bBasic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [redacted]")
+      // URL userinfo (`https://user:secret@host/…`). `safeBaseUrl` strips this correctly but is
+      // only applied to base URLs, never to error text — and provider errors quote URLs.
+      .replace(/:\/\/[^/\s:@]+(?::[^/\s@]*)?@/g, "://[redacted]@")
+      // Header-shaped secrets. `x-api-key` is the header this package's own transport sets
+      // (`src/http/client.ts`), so it is the single most likely value to appear in a store error,
+      // and the prefix allowlist above could never match it: a Hasna API key is not `sk-` shaped.
+      .replace(
+        /\b(x-api-key|api[-_]?key|authorization|token|secret|password)(\s*[:=]\s*)("?)[^\s"',;}&]+\3/gi,
+        (_match, name: string, separator: string) => `${name}${separator}[redacted]`
+      )
+  );
 }
 
 export interface CredentialProbeResult {
@@ -50,6 +64,33 @@ export interface CredentialProbeResult {
   role: "transcription" | "enhancement";
   message: string;
 }
+
+/**
+ * Performs the one authenticated request the credential probe rests on.
+ *
+ * Injected so the request path can be tested. Before this existed, review deleted the
+ * `models.retrieve` call and its success return outright — replacing them with an unconditional
+ * `{ok: true, status: 200}` that made no request at all — and `bun test
+ * src/__tests__/credential-probe.test.ts` still reported **7 pass / 0 fail, exit 0**. Every
+ * existing test passed an empty key, so all of them returned at the missing-key branch before a
+ * client was ever constructed, leaving the 401 rejection (the probe's headline claim), the 404
+ * model-unavailable case, the 200 success path, and `redactKeyMaterial` applied to a real error
+ * body all uncovered. A probe whose request can be removed without a failing test proves nothing.
+ *
+ * Mirrors the `executable` injection the capture probe already uses for the same reason.
+ */
+export type CredentialModelRetriever = (
+  model: string,
+  apiKey: string
+) => Promise<{ id?: string }>;
+
+const defaultCredentialModelRetriever: CredentialModelRetriever = async (model, apiKey) => {
+  // A throwaway client, not getClient(): that one caches by key at module scope, so probing the
+  // enhancement role would evict the transcription client and leave the wrong key cached for
+  // whatever ran next.
+  const client = new OpenAI({ apiKey });
+  return await client.models.retrieve(model);
+};
 
 /**
  * Verify that the configured credential is ACCEPTED by the API, not merely
@@ -74,10 +115,16 @@ export interface CredentialProbeResult {
 export async function verifyTranscriptionCredential(
   config: RecordingsConfig,
   model: string,
-  options: { apiKey?: string; role?: "transcription" | "enhancement" } = {}
+  options: {
+    apiKey?: string;
+    role?: "transcription" | "enhancement";
+    /** Test seam. Defaults to a real authenticated `models.retrieve`. */
+    retrieveModel?: CredentialModelRetriever;
+  } = {}
 ): Promise<CredentialProbeResult> {
   const role = options.role ?? "transcription";
   const apiKey = options.apiKey ?? config.openai_api_key;
+  const retrieveModel = options.retrieveModel ?? defaultCredentialModelRetriever;
   if (!apiKey) {
     return {
       ok: false,
@@ -90,18 +137,8 @@ export async function verifyTranscriptionCredential(
     };
   }
 
-  let client: OpenAI;
   try {
-    // A throwaway client, not getClient(): that one caches by key at module
-    // scope, so probing the enhancement role would evict the transcription
-    // client and leave the wrong key cached for whatever ran next.
-    client = new OpenAI({ apiKey });
-  } catch (error) {
-    return { ok: false, status: null, model, role, message: (error as Error).message };
-  }
-
-  try {
-    const retrieved = await client.models.retrieve(model);
+    const retrieved = await retrieveModel(model, apiKey);
     return {
       ok: true,
       status: 200,

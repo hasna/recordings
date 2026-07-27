@@ -1220,7 +1220,9 @@ program
             seconds,
             samples: 0,
             peak: 0,
-            silent: true,
+            // The recording tool is not even installed, so nothing was captured and no amplitude
+            // was measured. `true` here would report digital silence for a probe that never ran.
+            silent: null,
             message: deps.message,
           };
       credential = await verifyTranscriptionCredential(config, transcriptionModel, {
@@ -1239,12 +1241,16 @@ program
       });
     }
 
+    // `persistence.outcome === "failed"`, NOT `!persistence.ok`. `ok` is now false for a skip as
+    // well as for a failure — a deliberate refusal to write to a production store must not turn
+    // `check --probe` red, but it must also not be reported as a pass. The exit code answers "did
+    // anything actively fail"; the rendered marker answers "was it proved".
     const probeFailed = Boolean(
       opts.probe &&
         ((capture && !capture.ok) ||
           (credential && !credential.ok) ||
           (enhancementCredential && !enhancementCredential.ok) ||
-          (persistence && !persistence.ok))
+          (persistence && persistence.outcome === "failed"))
     );
 
     if (parentOpts.json) {
@@ -1338,7 +1344,14 @@ program
 
     if (macStatus) {
       const micState = macStatus.microphone_permission;
+      // `startsWith("allowed")` covers exactly two of #24's states — `allowed` (stored
+      // requirement re-validated against the installed bundle) and `allowed_identity_unverified`
+      // (row says allowed, binding undecidable). It deliberately does NOT cover
+      // `stale_allowed_for_previous_app_build` or `unverified_no_installed_bundle`, which #24
+      // named so that a `grep allowed` or a human skim cannot read them as a pass.
       const micOk = micState.startsWith("allowed");
+      const micVerified = micState === "allowed";
+      const micStaleGrant = micState === "stale_allowed_for_previous_app_build";
       const micUnreadable = micState === TCC_UNREADABLE_STATE;
       // Three outcomes, three markers. A refused database read is not a denial,
       // and rendering it red-with-instructions told operators to grant a
@@ -1348,23 +1361,51 @@ program
           ` Microphone permission: ${micState}`
       );
       if (micOk) {
-        // The value's own suffix says the signing identity was never checked
-        // against the installed bundle, so a bare green tick overstates it.
+        // Rebase note (#24 x #25): this note used to be unconditional for any `allowed*` state
+        // and asserted the requirement "was NOT verified". Under #24 that is false for the
+        // `allowed` state, which reaches this branch precisely BECAUSE codesign re-validated the
+        // grant's stored requirement against the installed bundle. Printing "not verified" over
+        // a verified result is the same class of false statement this queue exists to remove, so
+        // the two cases now say what actually happened.
         console.log(
           chalk.dim(
-            "  Note: this is the TCC row for bundle id com.hasna.recordings. The row's code-signing " +
-              "requirement was NOT verified against the installed bundle, so a bundle re-signed with " +
-              "a different identity can still be denied at runtime. Confirm in the app's log."
+            micVerified
+              ? `  Note: this is the TCC row for bundle id ${RECORDINGS_BUNDLE_IDENTIFIER}, and its ` +
+                  "stored code-signing requirement still validates against the installed bundle — " +
+                  "so the grant binds to the app that is installed, not to a previous build."
+              : `  Note: this is the TCC row for bundle id ${RECORDINGS_BUNDLE_IDENTIFIER}. The row's ` +
+                  "code-signing requirement was NOT verified against the installed bundle, so a " +
+                  "bundle re-signed with a different identity can still be denied at runtime. " +
+                  "Confirm in the app's log."
+          )
+        );
+      }
+      if (micStaleGrant) {
+        // A grant exists and reads "allowed", and it is dead: codesign says the stored
+        // requirement does not match the installed bundle, so macOS will refuse at runtime while
+        // System Settings still shows the toggle on. Without this line the operator sees a red
+        // cross plus "grant it" instructions and flips a switch that is already flipped.
+        console.log(
+          chalk.dim(
+            "  The TCC row says allowed, but its stored code-signing requirement does NOT match " +
+              "the installed bundle — the grant belongs to a previous build and macOS will deny " +
+              "at runtime. Toggling it in System Settings will not fix it; the row must be reset " +
+              "(`recordings app reset-permissions`) and re-granted so it binds to the bundle " +
+              "that is installed now."
           )
         );
       }
       if (micUnreadable) {
         console.log(
           chalk.dim(
-            "  Could not read the TCC database: that needs Full Disk Access for whatever process " +
-              "runs this command, which tmux and bun usually lack while sshd and the terminal app " +
-              "have it. This is NOT a denial and NOT proof the app never asked — re-run from a " +
-              "plain ssh shell or a terminal with Full Disk Access."
+            "  Could not read the TCC database. This is NOT a denial and NOT proof the app never " +
+              "asked. Reading it needs Full Disk Access, which is held by the session's " +
+              "RESPONSIBLE process and inherited by its children — not granted per-tool: on " +
+              "a fleet Mac `bun` is explicitly denied and still reads the database over SSH, " +
+              "because it inherits sshd's grant. So re-run from a plain ssh shell rather than " +
+              "granting Full Disk Access to tmux or bun, and not under sudo, which changes the " +
+              "responsible process. A missing sqlite3, a locked database or a corrupt file " +
+              "produce this same state, so the cause is not established either."
           )
         );
       }
@@ -1419,10 +1460,16 @@ program
       );
     }
     if (persistence) {
-      console.log(
-        (persistence.ok ? chalk.green("✓") : chalk.red("✗")) +
-          ` Persistence round-trip: ${persistence.message}`
-      );
+      // Three states, three markers. A green ✓ on the word SKIPPED is what made this check report
+      // PASS while writing, reading and deleting nothing — and on a machine pointed at a shared
+      // API store that was the DEFAULT path, so the round-trip was never proved there.
+      const persistenceMarker =
+        persistence.outcome === "proved"
+          ? chalk.green("✓")
+          : persistence.outcome === "skipped"
+            ? chalk.yellow("?")
+            : chalk.red("✗");
+      console.log(persistenceMarker + ` Persistence round-trip: ${persistence.message}`);
     }
 
     if (probeFailed) process.exitCode = 1;
