@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -30,6 +30,58 @@ const settingsSource = readFileSync(
   "utf8",
 );
 const packageSwift = readFileSync(join(repoRoot, "src/native/Recordings/Package.swift"), "utf8");
+
+/**
+ * Every Swift source in the app, so an absence claim can be made about the app rather than about
+ * whichever two files were on the reviewer's mind.
+ *
+ * A scoped absence assertion is indistinguishable from a satisfied one: naming
+ * `RecordingEngine.swift` and `PasteDeliveryVerification.swift` left 30 other files free to
+ * reintroduce the thing being forbidden, which is exactly how a NEW file carrying the deleted
+ * boolean secure-input detector passed.
+ */
+function swiftSources(): Array<[path: string, source: string]> {
+  const root = join(repoRoot, "src/native/Recordings");
+  return readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((entry) => entry.endsWith(".swift"))
+    .map((entry) => [entry, readFileSync(join(root, entry), "utf8")] as [string, string]);
+}
+
+/**
+ * Assert `first` appears before `second`, requiring BOTH to exist.
+ *
+ * `indexOf` answers -1 when the needle is absent and `-1 < anything` is true, so the bare form
+ * `expect(indexOf(a)).toBeLessThan(indexOf(b))` PASSES when `a` is DELETED — it asserts the
+ * ordering of a thing that is no longer there. Three assertions in this file had that hole, and in
+ * one of them a `lastIndexOf` -1 meant deleting the status write passed the ordering test and was
+ * caught only incidentally by a sibling suite.
+ */
+function expectOrder(
+  haystack: string,
+  first: string,
+  second: string,
+  options: { firstMatch?: "first" | "last" } = {},
+): void {
+  const firstIndex =
+    options.firstMatch === "last" ? haystack.lastIndexOf(first) : haystack.indexOf(first);
+  const secondIndex = haystack.indexOf(second);
+  expect(firstIndex, `ordering operand is missing entirely: ${first}`).toBeGreaterThan(-1);
+  expect(secondIndex, `ordering operand is missing entirely: ${second}`).toBeGreaterThan(-1);
+  expect(firstIndex).toBeLessThan(secondIndex);
+}
+
+/**
+ * Slice between two markers, requiring both to exist. `indexOf` -1 bounds silently produce a
+ * slice from the end of the file or to its start — a region assertion over the wrong text, or
+ * over none of it, reads exactly like a satisfied one.
+ */
+function sliceBetween(source: string, open: string, close: string): string {
+  const from = source.indexOf(open);
+  const to = source.indexOf(close, from + 1);
+  expect(from, `slice start marker is missing: ${open}`).toBeGreaterThan(-1);
+  expect(to, `slice end marker is missing: ${close}`).toBeGreaterThan(from);
+  return source.slice(from, to);
+}
 
 /**
  * The CLI writes the same UserDefaults the Swift app reads. If either side is renamed
@@ -221,17 +273,52 @@ describe("blocked-trigger reporting contract", () => {
    * `updateStatus()` erasing the warning outright.
    */
   test("only the source-keyed writer assigns the published reason", () => {
-    const writes = engineSource.match(/^\s*blockedReason = /gm) ?? [];
+    // Anchored at line start (`/^\s*blockedReason = /`), this counted 1 and could not see
+    // `self.blockedReason = …` — and `self.` is exactly the form Swift REQUIRES inside the
+    // escaping closures where the erasure bug lived. A second per-source writer added there
+    // clobbers the composed value and every assertion stays green.
+    //
+    // Matches an assignment to the property under any prefix, and excludes the sibling
+    // identifiers (`blockedReasons[...]`, `blockedReasonEntries`, `setBlockedReason(`) by
+    // requiring the name to end where the assignment begins.
+    const writes = engineSource.match(/(?:^|[^.\w])(?:self\.)?blockedReason\s*=(?!=)/gm) ?? [];
     expect(writes.length).toBe(1);
-    const compositor = engineSource.slice(
-      engineSource.indexOf("private func setBlockedReason("),
-      engineSource.indexOf("static func systemReservedShortcuts()"),
+    const compositor = sliceBetween(
+      engineSource,
+      "private func setBlockedReason(",
+      "static func systemReservedShortcuts()",
     );
     expect(compositor).toContain("blockedReason = ");
     expect(compositor).toContain("blockedReasons[source]");
     // Composition order comes from the enum's declaration order, so the same set of blockers
     // renders the same string no matter which source was written last.
     expect(compositor).toContain("sorted { $0.key < $1.key }");
+    // The structured form is composed in the SAME call from the SAME sorted entries, so the two
+    // published shapes of one field cannot disagree.
+    expect(compositor).toContain("blockedReasonEntries = entries");
+    expect(compositor).toMatch(/entries\s*\.map\(\\\.message\)/);
+  });
+
+  /**
+   * Precedence is declaration order, and `.delivery` was declared LAST — so with a blocked trigger
+   * as well, "transcript copied, press Cmd-V" landed at the tail of a `.font(.caption)` `Text` in a
+   * 260-pt popover, behind two messages about key bindings. It is the only reason that says the
+   * owner's transcript is still recoverable; the trigger reasons are about a next press and can
+   * wait.
+   */
+  test("the recoverable-data reason sorts first, not last", () => {
+    const sources = sliceBetween(
+      engineSource,
+      "enum BlockedReasonSource",
+      "static func < (lhs: Self, rhs: Self)",
+    );
+    for (const [earlier, later] of [
+      ["case delivery", "case hotkey"],
+      ["case hotkey", "case fnKey"],
+      ["case fnKey", "case pressConsumed"],
+    ] as const) {
+      expectOrder(sources, earlier, later);
+    }
   });
 
   /**
@@ -300,9 +387,33 @@ describe("blocked-trigger reporting contract", () => {
     expect(health).toContain("AXIsProcessTrusted()");
   });
 
-  test("Settings shows the blocked reason next to the toggle that is blocked", () => {
-    expect(settingsSource).toContain("engine.blockedReason");
-    expect(settingsSource).toContain("openAccessibilitySettings()");
+  /**
+   * The field collapse introduced a regression here. At #26 this block rendered the trigger-only
+   * `triggerBlockedReason`, so the remedy always matched the cause. Rendering the composed
+   * `blockedReason` instead meant a secure-input paste failure showed
+   * "transcript copied, press Cmd-V" under **Recording Shortcut** beside an
+   * "Open Accessibility Settings" button — wrong remedy, wrong section, wrong cause. A hotkey
+   * chord collision took that button too, and the Accessibility pane does nothing for a clash
+   * either. The old assertion was `toContain("engine.blockedReason")`, which cannot see any of it.
+   */
+  test("the Settings trigger section shows only trigger reasons, each with its own remedy", () => {
+    const section = sliceBetween(settingsSource, 'Section("Recording Shortcut")', 'Section("Permissions")');
+
+    // Scoped to trigger sources, not to whatever is composed.
+    expect(section).toContain("engine.blockedReasonEntries.filter(\\.isTriggerHealth)");
+    expect(section).not.toContain("engine.blockedReason {");
+    // The button is keyed to the remedy, so only the cause Accessibility actually fixes offers it.
+    expectOrder(section, "entry.remedy == .openAccessibilitySettings", "openAccessibilitySettings()");
+
+    // And the remedy mapping is the engine's, exhaustive, so a new source must decide rather than
+    // inherit a button that does not fit it.
+    const sources = sliceBetween(engineSource, "var remedy: BlockedReasonEntry.Remedy", "}\n    }");
+    expect(sources).toContain("case .fnKey: .openAccessibilitySettings");
+    expect(sources).toContain("case .hotkey: .chooseAnotherShortcut");
+    expect(sources).toContain("case .delivery, .pressConsumed: .messageOnly");
+    const triggerHealth = sliceBetween(engineSource, "var isTriggerHealth: Bool", "var remedy:");
+    expect(triggerHealth).toContain("case .hotkey, .fnKey: true");
+    expect(triggerHealth).toContain("case .delivery, .pressConsumed: false");
   });
 
   test("a trigger that fires and is dropped is logged rather than swallowed", () => {
@@ -337,9 +448,10 @@ describe("blocked state is visible in the always-on surface", () => {
   });
 
   test("blocked changes BOTH the icon and the accessibility label", () => {
-    const blockedBranch = presentationSource.slice(
-      presentationSource.indexOf("} else if let blockedReason"),
-      presentationSource.indexOf("iconName = Self.idleIconName"),
+    const blockedBranch = sliceBetween(
+      presentationSource,
+      "} else if let blockedReason",
+      "iconName = Self.idleIconName",
     );
     // The menu-bar item renders only these two, so fixing one leaves half the users blind.
     expect(blockedBranch).toContain("iconName = Self.blockedIconName");
@@ -358,6 +470,55 @@ describe("blocked state is visible in the always-on surface", () => {
     expect(passes.length).toBe(2);
     expect(menuBarViewSource).toContain("presentation.isBlocked ? .orange : .accentColor");
   });
+
+  /**
+   * Passing the reason IN is not rendering it OUT, and only the two assertions above existed.
+   * Hardcoding the always-visible label back to `Image(systemName: "mic.fill")` with
+   * `.accessibilityLabel("Recordings")` makes Blocked byte-identical to Ready for sighted and
+   * VoiceOver users alike — the precise defect this surface exists to fix — while every
+   * input-counting assertion above stays green, because the inputs are still passed in. They just
+   * reach nothing.
+   *
+   * Asserted as a rule rather than as two literals: every symbol and label a menu-bar surface
+   * renders must come from `presentation`. That also catches the next literal, which is the point —
+   * `MenuBarPresentation` is pinned exactly, and the wiring from it to pixels was not pinned at all.
+   *
+   * Honest limit, stated because the whole failure being fixed here is guards that look like proof:
+   * this is still a source assertion. Nothing on Linux can rasterise SwiftUI, and no builder Mac
+   * exists (incident #598191), so "the icon changed on screen" remains unobserved.
+   */
+  test("both menu-bar surfaces render the presentation's icon and label, never a literal", () => {
+    const label = sliceBetween(
+      menuBarViewSource,
+      "struct MenuBarStatusLabel",
+      "struct MenuBarStatusView",
+    );
+    const popover = menuBarViewSource.slice(menuBarViewSource.indexOf("struct MenuBarStatusView"));
+    expect(popover.length).toBeGreaterThan(0);
+
+    // The always-visible menu-bar item renders exactly these two things.
+    expect(label).toMatch(/Image\(systemName: presentation\.iconName\)/);
+    expect(label).toMatch(/\.accessibilityLabel\(presentation\.accessibilityLabel\)/);
+
+    // And in BOTH surfaces every rendered symbol/label argument is presentation-derived. The
+    // record button's own `systemImage:` is a different control and is state-driven by
+    // `isRecording`, so only `Image(systemName:)` and `.accessibilityLabel(...)` are constrained.
+    let inspected = 0;
+    for (const [name, surface] of [["label", label], ["popover", popover]] as const) {
+      for (const pattern of [/Image\(systemName:([^)]*)\)/g, /\.accessibilityLabel\(([^)]*)\)/g]) {
+        for (const match of surface.matchAll(pattern)) {
+          inspected += 1;
+          expect(
+            (match[1] ?? "").trim(),
+            `${name}: rendered a value that cannot change with state`,
+          ).toMatch(/^presentation\./);
+        }
+      }
+    }
+    // Guard the guard: a rename that emptied both sweeps would otherwise pass by inspecting
+    // nothing. Three today — the label's icon, the label's accessibility label, the popover's icon.
+    expect(inspected).toBeGreaterThanOrEqual(3);
+  });
 });
 
 /**
@@ -373,20 +534,61 @@ describe("secure-input delivery contract", () => {
    * the reason is wiped, silently reinstating the invisible-blocked bug with every test green.
    */
   test("the secure-input reason is re-set AFTER the status write that clears it", () => {
-    const completion = engineSource.slice(
-      engineSource.indexOf("Self.isSecureInputOutcome(outcome) ? message : nil") - 3000,
-      engineSource.indexOf("Self.isSecureInputOutcome(outcome) ? message : nil") + 200,
-    );
-    expect(completion.lastIndexOf("self.updateDeliveryStatus(")).toBeLessThan(
-      completion.indexOf("self.setBlockedReason("),
-    );
+    const anchor = engineSource.indexOf("Self.isSecureInputOutcome(outcome) ? message : nil");
+    expect(anchor).toBeGreaterThan(-1);
+    const completion = engineSource.slice(anchor - 3000, anchor + 200);
+    // `expectOrder`, not a bare `indexOf(a) < indexOf(b)`: `lastIndexOf` answers -1 when the
+    // status write is DELETED, and -1 is less than any index, so the deletion used to pass here
+    // and was caught only incidentally by a sibling suite asserting the status kind.
+    expectOrder(completion, "self.updateDeliveryStatus(", "self.setBlockedReason(", {
+      firstMatch: "last",
+    });
 
-    const deliveryStatus = engineSource.slice(
-      engineSource.indexOf("private func updateDeliveryStatus("),
-      engineSource.indexOf("private func selectedRunningPasteTarget("),
+    const deliveryStatus = sliceBetween(
+      engineSource,
+      "private func updateDeliveryStatus(",
+      "private func selectedRunningPasteTarget(",
     );
     expect(deliveryStatus).toContain("setBlockedReason(nil, for: .delivery)");
     expect(deliveryStatus).toContain("setBlockedReason(nil, for: .pressConsumed)");
+  });
+
+  /**
+   * The set and the clear are asymmetric: `updateDeliveryStatus` withholds a *status* for a
+   * superseded generation and clears nothing on that path, while the completion's
+   * `setBlockedReason(…, for: .delivery)` is ungated. So a suppressed completion persists
+   * "press Cmd-V" while withholding the line that explains it — pointing at a clipboard that has
+   * moved on, on the app's own instruction.
+   *
+   * Closed structurally rather than by adding a fifth enumerated clear site, because the four
+   * existing ones cover the paths someone thought of. `cancelIntentProcessing()` bumps the
+   * generation without clearing, and `PasteTransactionCoordinator.failNow` releases the pending
+   * fence BEFORE running the completion — so a single inserted `await` makes the interleaving
+   * reachable rather than latent.
+   */
+  test("a delivery reason is stamped with its own generation and expires when that moves on", () => {
+    // Stamped with the DELIVERY's generation, not the engine's current one: the completion can run
+    // after `recordingGeneration` has advanced, and binding to the current value would mark a
+    // superseded reason fresh — the bug, wearing the fix's clothes.
+    expect(engineSource).toContain("generation: transaction.generation");
+    const compositor = sliceBetween(
+      engineSource,
+      "private func setBlockedReason(",
+      "static func systemReservedShortcuts()",
+    );
+    expect(compositor).toContain("deliveryBlockedReasonGeneration = generation ?? recordingGeneration");
+    expect(compositor).toContain("deliveryBlockedReasonGeneration = nil");
+
+    // And the reader expires it before anything renders it as current state.
+    const updateStatus = sliceBetween(engineSource, "public func updateStatus()", "// MARK: - Toggle");
+    expectOrder(updateStatus, "expireStaleDeliveryBlockedReason()", "if let blockedReason {");
+    const expiry = sliceBetween(
+      engineSource,
+      "private func expireStaleDeliveryBlockedReason()",
+      "// MARK: - Toggle",
+    );
+    expect(expiry).toContain("generation != recordingGeneration");
+    expect(expiry).toContain("setBlockedReason(nil, for: .delivery)");
   });
 
   /**
@@ -431,9 +633,10 @@ describe("secure-input delivery contract", () => {
    * `restoreClipboard` is an explicit opt-in.
    */
   test("secure input never restores the clipboard, and the message says so", () => {
-    const settlement = engineSource.slice(
-      engineSource.indexOf("let shouldRestore = switch outcome {"),
-      engineSource.indexOf("if shouldRestore {"),
+    const settlement = sliceBetween(
+      engineSource,
+      "let shouldRestore = switch outcome {",
+      "if shouldRestore {",
     );
     expect(settlement).toContain("case .secureInputActive:\n                false");
     // The other outcomes still honour the opt-in.
@@ -444,6 +647,31 @@ describe("secure-input delivery contract", () => {
     expect(engineSource).toContain("transcript copied, press Cmd-V");
   });
 
+  /**
+   * The switch above decides correctly and the assertion above stops at `if shouldRestore {` — so
+   * the restore CALL SITE was outside every assertion in the suite. Widening the condition to
+   * `if shouldRestore || outcome == .secureInputActive(…)` restores the previous clipboard over
+   * secure input, deleting the exact text the status line has just told the owner to press Cmd-V
+   * for, and leaves the switch — and all 63 assertions — untouched.
+   */
+  test("the restore call site is guarded by shouldRestore and by nothing else", () => {
+    // Scoped to the settlement closure: `writeClipboardPreservingOnFailure` legitimately restores
+    // the previous clipboard when its OWN write failed, which is a different decision.
+    const settlementClosure = sliceBetween(
+      engineSource,
+      "} settlement: { transaction, outcome in",
+      "guard accepted else {",
+    );
+    const restores = [...settlementClosure.matchAll(/previousClipboard\.restore\(/g)];
+    expect(restores.length).toBe(1);
+    // The full condition, captured, so any added disjunct fails rather than passing unseen.
+    const guard = settlementClosure.match(
+      /if ([^\n{]+?)\s*\{\s*previousClipboard\.restore\(to: pasteboard\)/,
+    );
+    expect(guard, "the restore is no longer guarded by a single `if`").not.toBeNull();
+    expect(guard?.[1]).toBe("shouldRestore");
+  });
+
   test("a press consumed by a permission prompt says so instead of writing Ready", () => {
     expect(engineSource).toContain("static let pressConsumedByPermissionPromptMessage");
     // Both released-before-start paths — fn and the hotkey — have the identical defect.
@@ -451,16 +679,34 @@ describe("secure-input delivery contract", () => {
       engineSource.match(/Self\.pressConsumedByPermissionPromptMessage,\n\s+for: \.pressConsumed/g) ??
       [];
     expect(consumedWrites.length).toBe(2);
+
+    // The CONDITION, not only the text. Both assignments replaced by `= true` claim
+    // "Permission was requested" on every press released before recording starts — reporting a
+    // failure that did not happen; replaced by `= false` the disclosure never fires at all and
+    // the original silent-consumed-press bug is back. Both leave the message constant present and
+    // both write sites exactly as counted above.
+    const conditions =
+      engineSource.match(
+        /let consumedByPermissionPrompt\s*=\s*self\.microphonePermissionStartGate\.isAwaitingResponse\b/g,
+      ) ?? [];
+    expect(conditions.length).toBe(2);
+    expect(engineSource).not.toMatch(/let consumedByPermissionPrompt\s*=\s*(?:true|false)\b/);
+    // And the write is gated on it rather than unconditional.
+    const gated = engineSource.match(/if consumedByPermissionPrompt \{/g) ?? [];
+    expect(gated.length).toBe(2);
+
     // Read BEFORE resetRecordingIntent(), which cancels the gate this is asking about.
     for (const released of ["fn released before recording started", "shortcut released before recording started"]) {
-      const branch = engineSource.slice(
-        engineSource.indexOf(released),
-        engineSource.indexOf("self.updateStatus()", engineSource.indexOf(released)),
-      );
+      const branch = sliceBetween(engineSource, released, "self.updateStatus()");
       // `self.` prefix on purpose: the surrounding comment names `resetRecordingIntent()` too,
       // and matching prose instead of the call would make this assertion meaningless.
-      expect(branch.indexOf("microphonePermissionStartGate.isAwaitingResponse")).toBeLessThan(
-        branch.indexOf("self.resetRecordingIntent()"),
+      //
+      // `expectOrder`, because `indexOf(...) < indexOf(...)` PASSED when the gate identifier was
+      // deleted: absent, it answers -1, and -1 is less than any index.
+      expectOrder(
+        branch,
+        "microphonePermissionStartGate.isAwaitingResponse",
+        "self.resetRecordingIntent()",
       );
     }
   });
@@ -486,13 +732,26 @@ describe("secure-input delivery contract", () => {
    * off", so the degrade-to-false is avoidable and the boolean detector is gone.
    */
   test("there is exactly one secure-input detector, and it is the three-state one", () => {
-    expect(engineSource).not.toContain("IsSecureEventInputEnabled");
+    // Scoped to two files, this absence claim covered 2 of 32 Swift sources — so a NEW file
+    // carrying the deleted `IsSecureEventInputEnabled()` detector, used to gate the canonical
+    // probe, reinstated two detectors (one degrading to `false` when the state is undeterminable,
+    // which is the reason the boolean one was deleted) with every assertion green.
+    const sources = swiftSources();
+    const offenders = sources
+      .filter(([, source]) => source.includes("IsSecureEventInputEnabled"))
+      .map(([path]) => path);
+    expect(offenders).toEqual([]);
+    // Positive control: prove the sweep read the right tree, so an empty offender list means
+    // "searched and found none" rather than "searched nothing".
+    expect(sources.length).toBeGreaterThan(30);
+    expect(sources.filter(([, source]) => source.includes("SecureInputProbe")).length)
+      .toBeGreaterThanOrEqual(2);
+
     expect(engineSource).toContain("SecureInputProbe.current()");
     const verification = readFileSync(
       "src/native/Recordings/RecordingsLib/PasteDeliveryVerification.swift",
       "utf8",
     );
-    expect(verification).not.toContain("IsSecureEventInputEnabled");
     expect(verification).toContain("CGSessionCopyCurrentDictionary()");
     expect(verification).toContain("case unknown");
   });

@@ -3,14 +3,18 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { readFileSync } from "fs";
 import {
   describeActiveStore,
   localStoreIsBehindSchema,
+  persistenceOutcomeSeverity,
   probeRecordingPersistence,
+  renderPersistenceMarker,
   safeBaseUrl,
   AUTO_FLIP_MODE_SOURCE,
   PERSISTENCE_PROBE_TAG,
   PERSISTENCE_PROBE_MARKER_PREFIX,
+  PROBE_SEVERITY_GLYPHS,
 } from "../lib/persistence-probe.js";
 import type { Store } from "../store.js";
 import type { CreateRecordingInput, Recording, RecordingsConfig } from "../types/index.js";
@@ -586,5 +590,68 @@ describe("localStoreIsBehindSchema", () => {
     localStoreIsBehindSchema(dbPath);
 
     expect(existsSync(dbPath)).toBe(false);
+  });
+});
+
+/**
+ * `PersistenceProbeResult.outcome` documents that "the exit code must key off `failed` alone; the
+ * rendered marker must distinguish all three" — and nothing asserted the second half. The CLI held
+ * the mapping as an inline ternary inside a 2900-line command file, so flipping the `skipped` arm
+ * from `chalk.yellow("?")` to `chalk.green("✓")` put a green tick back on the word SKIPPED and
+ * survived the FULL suite with a byte-identical failure set. That green tick on a skip is the
+ * original defect this probe was written to close, and the skip is the DEFAULT path on a machine
+ * pointed at a shared API store.
+ */
+describe("probe marker rendering", () => {
+  test("every outcome maps to its own severity, and a skip is never a pass", () => {
+    expect(persistenceOutcomeSeverity("proved")).toBe("pass");
+    expect(persistenceOutcomeSeverity("skipped")).toBe("warn");
+    expect(persistenceOutcomeSeverity("failed")).toBe("fail");
+    // Three distinct severities, so no two outcomes can read alike.
+    expect(
+      new Set(
+        (["proved", "skipped", "failed"] as const).map((outcome) =>
+          persistenceOutcomeSeverity(outcome),
+        ),
+      ).size,
+    ).toBe(3);
+  });
+
+  test("the glyphs are distinct and the tick belongs to proved alone", () => {
+    expect(PROBE_SEVERITY_GLYPHS.pass).toBe("✓");
+    expect(PROBE_SEVERITY_GLYPHS.warn).toBe("?");
+    expect(PROBE_SEVERITY_GLYPHS.fail).toBe("✗");
+    expect(new Set(Object.values(PROBE_SEVERITY_GLYPHS)).size).toBe(3);
+  });
+
+  /**
+   * The colour too, not only the glyph: a mutation that keeps `?` and paints it green is just as
+   * misleading, and `renderPersistenceMarker` takes the palette as an argument precisely so the
+   * pairing can be asserted without a terminal.
+   */
+  test("each outcome renders its own glyph in its own colour", () => {
+    const paint = {
+      pass: (text: string) => `green(${text})`,
+      warn: (text: string) => `yellow(${text})`,
+      fail: (text: string) => `red(${text})`,
+    };
+    expect(renderPersistenceMarker("proved", paint)).toBe("green(✓)");
+    expect(renderPersistenceMarker("skipped", paint)).toBe("yellow(?)");
+    expect(renderPersistenceMarker("failed", paint)).toBe("red(✗)");
+  });
+
+  /**
+   * And the CLI has to actually use it. An exhaustively-tested helper the renderer ignores is the
+   * same vacuous check in a new place.
+   */
+  test("the CLI renders the persistence marker through the asserted mapping", () => {
+    const cli = readFileSync("src/cli/index.ts", "utf8");
+    expect(cli).toContain("renderPersistenceMarker(persistence.outcome, {");
+    expect(cli).toContain("pass: chalk.green");
+    expect(cli).toContain("warn: chalk.yellow");
+    expect(cli).toContain("fail: chalk.red");
+    // The unguarded ternary is gone, not merely shadowed.
+    expect(cli).not.toContain('persistence.outcome === "skipped"');
+    expect(cli).not.toContain('persistence.outcome === "proved"');
   });
 });

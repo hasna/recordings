@@ -222,6 +222,63 @@ describe("native paste delivery verification contract", () => {
       return [...region.matchAll(/\\\(([^)]*)\)/g)].map((match) => match[1] ?? "");
     }
 
+    /**
+     * Names that hold the user's text, closed over assignment.
+     *
+     * A fixed denylist of eight identifier substrings is not a leak guard, it is a spelling test:
+     * `let fieldContents = observed.value` followed by `log("field=\(fieldContents)")` writes the
+     * target app's focused-field text — password fields included — into
+     * `~/.hasna/recordings/Recordings.log` in plaintext, and every assertion stayed green because
+     * `fieldContents` is not on the list. One `let` breaks the chain.
+     *
+     * So the taint is propagated instead: seeded from the denylist plus any `.value` read (the AX
+     * accessor that returns the text) and any `.read(let x)` / `.readBack()` binding, then closed
+     * transitively over `let`/`var`/`guard let`/`if let`/`case let` bindings and over
+     * `_ = <tainted>` reassignment until it stops growing.
+     */
+    function taintedIdentifiers(source: string): Set<string> {
+      const tainted = new Set<string>(TEXT_BEARING);
+      /// A snapshot binding carries the text even before `.value` is read off it, so interpolating
+      /// the binding itself would print the struct — text and all.
+      for (const match of source.matchAll(/case\s+\.read\((?:let|var)\s+(\w+)\)/g)) {
+        tainted.add(match[1] ?? "");
+      }
+
+      /// Propagation is through ACCESS, not through calls. `let x = observed.value` is the text;
+      /// `let ok = writeClipboardAttempt(text, …)` is a Bool that merely touched some. Taking the
+      /// leading access chain — everything up to the first `(` — keeps
+      /// `snapshot.value.trimmingCharacters(…)` tainted while leaving a function whose ARGUMENT is
+      /// tainted alone, which is what a whole-expression match got wrong.
+      const isTainted = (expression: string): boolean => {
+        const chain = (expression.split("(")[0] ?? "").trim();
+        if (!chain) return false;
+        if (/(?:^|[^.\w])(?:\w+\.)*(?:value|readBack)\b/.test(chain)) return true;
+        return [...tainted].some((identifier) => {
+          const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          // A count derived from the text is not the text.
+          if (new RegExp(`${escaped}\\s*\\.\\s*count\\b`).test(chain)) return false;
+          return new RegExp(`(?:^|[^.\\w])${escaped}\\b`).test(chain);
+        });
+      };
+
+      const bindings = [
+        ...source.matchAll(/(?:let|var)\s+(\w+)\s*(?::[^=\n]+)?=\s*([^\n]+)/g),
+        ...source.matchAll(/(?:if|guard)\s+(?:let|var)\s+(\w+)\s*=\s*([^\n,{]+)/g),
+      ];
+      // Fixed point: `a = snapshot.value; b = a; c = b` must all be tainted, and source order
+      // cannot be relied on.
+      for (let pass = 0; pass < 8; pass += 1) {
+        const before = tainted.size;
+        for (const binding of bindings) {
+          const name = binding[1] ?? "";
+          if (!name || tainted.has(name)) continue;
+          if (isTainted(binding[2] ?? "")) tainted.add(name);
+        }
+        if (tainted.size === before) break;
+      }
+      return tainted;
+    }
+
     test("no logging expression interpolates the focused field's text", () => {
       const sources = [
         [ENGINE_PATH, engineSource()],
@@ -229,14 +286,19 @@ describe("native paste delivery verification contract", () => {
       ] as const;
 
       let inspected = 0;
+      let checked = 0;
       for (const [path, source] of sources) {
+        const tainted = taintedIdentifiers(source);
         for (const region of loggingRegions(source)) {
           inspected += 1;
           for (const interpolation of interpolationsIn(region)) {
-            for (const identifier of TEXT_BEARING) {
+            for (const identifier of tainted) {
+              checked += 1;
               expect(
-                interpolation.includes(identifier),
-                `${path}: a logging expression interpolates ${identifier}: ${region.slice(0, 200)}`,
+                new RegExp(`(?:^|[^.\\w])${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(
+                  interpolation,
+                ) && !new RegExp(`${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\.\\s*count\\b`).test(interpolation),
+                `${path}: a logging expression interpolates text-bearing ${identifier}: ${region.slice(0, 200)}`,
               ).toBe(false);
             }
           }
@@ -244,8 +306,27 @@ describe("native paste delivery verification contract", () => {
       }
 
       // Guard the guard: if the log lines are ever renamed out from under this, it must fail
-      // loudly rather than pass by inspecting nothing.
+      // loudly rather than pass by inspecting nothing. `checked` proves the taint set was
+      // non-empty too — an empty set would make every interpolation trivially clean.
       expect(inspected).toBeGreaterThan(10);
+      expect(checked).toBeGreaterThan(10);
+    });
+
+    /**
+     * Defence in depth, and the structurally cheaper half: the `prepare:` and `verify:` closures
+     * are the only places holding a `FocusedTextSnapshot`, so nothing inside them needs to log at
+     * all. Forbidding the sink outright means a future leak has to first move the code somewhere
+     * the taint analysis above is watching.
+     */
+    test("the closures that hold the focused-field read do not log at all", () => {
+      const engine = engineSource();
+      for (const closure of ["prepare: {", "verify: {"]) {
+        const start = engine.indexOf(closure);
+        expect(start, `closure not found: ${closure}`).toBeGreaterThan(-1);
+        const region = balancedRegion(engine, start + closure.length - 1, "{", "}");
+        expect(region.length).toBeGreaterThan(0);
+        expect(region, `${closure} must not reach the log`).not.toMatch(/\blog\(/);
+      }
     });
 
     test("the delivery report carries counts and tokens, never the text", () => {
@@ -277,6 +358,54 @@ describe("native paste delivery verification contract", () => {
       expect(readme).toContain("20,000 characters");
       expect(readme).toMatch(/No additional permission is requested/);
     });
+  });
+
+  /**
+   * The read-back is a superset of the old detector for "did the text land" and a strict SUBSET for
+   * "why not". `#29`'s original commit probed secure input twice — once before constructing the
+   * events and once after posting them — and the consolidation kept only the first.
+   *
+   * The case that loses: a password field takes secure input AFTER the pre-post probe and while the
+   * events are posted. The window server drops the keystroke, the coordinator answers `.posted`, and
+   * the read-back — two AX reads of the focused field — has no vocabulary for secure input at all,
+   * topping out at `.notObservedFocusedValueUnchanged` / `.unverified(.readBackUnreadable)`. So the
+   * outcome is `.deliveryNotObserved` or `.deliveredUnverified`, neither of which is an
+   * `isSecureInputOutcome`, and nothing is persisted: no warning icon, no VoiceOver "blocked" label,
+   * and no "press Cmd-V" — the only thing telling the owner the transcript is recoverable.
+   *
+   * Worse than silent: `lastPasteSecureInputProbe` still held the PRE-post reading, so the delivery
+   * log recorded `secureInput=inactive` for a paste secure input had actually eaten. It did not omit
+   * the cause, it asserted the opposite.
+   */
+  test("secure input is probed again after the keystroke is posted, and the log follows the later reading", () => {
+    const engine = engineSource();
+    const poster = engine.slice(
+      engine.indexOf("postPaste: { [weak self] in"),
+      engine.indexOf("return .posted"),
+    );
+    expect(poster.length).toBeGreaterThan(0);
+
+    // Two probes, and the second one after both posts.
+    const probes = [...poster.matchAll(/SecureInputProbe\.current\(\)/g)];
+    expect(probes.length).toBe(2);
+    const secondProbe = poster.lastIndexOf("SecureInputProbe.current()");
+    for (const post of ["down.post(tap: .cgSessionEventTap)", "up.post(tap: .cgSessionEventTap)"]) {
+      const at = poster.indexOf(post);
+      expect(at, `missing post call: ${post}`).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(secondProbe);
+    }
+
+    // The later reading refuses the delivery AND becomes what the log reports, or the report still
+    // says `secureInput=inactive` for the paste it just lost.
+    const afterPost = poster.slice(secondProbe);
+    expect(afterPost).toMatch(/if case \.active\(let holder\) = secureInputAfterPost/);
+    expect(afterPost).toContain("lastPasteSecureInputProbe = secureInputAfterPost");
+    expect(afterPost).toContain("return .refusedSecureInput(holder)");
+
+    // And `.refusedSecureInput` is still the route to the outcome that persists a reason, so the
+    // recheck actually reaches a surface rather than only the log.
+    expect(engine).toContain(".secureInputActive(holder)");
+    expect(engine).toContain("Self.isSecureInputOutcome(outcome) ? message : nil");
   });
 
   test("the Swift regression tests that pin the defect are part of the test target", () => {
