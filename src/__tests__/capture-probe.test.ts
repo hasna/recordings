@@ -2,10 +2,14 @@ import { describe, expect, test, afterEach } from "bun:test";
 import { chmodSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { mkdirSync } from "fs";
 import {
   probeMicrophoneCapture,
+  captureProbeSubject,
+  microphoneGrantInstruction,
   readWavPeak,
   DEFAULT_PROBE_SECONDS,
+  RECORDINGS_BUNDLE_IDENTIFIER,
 } from "../lib/capture-probe.js";
 import type { RecordingsConfig } from "../types/index.js";
 
@@ -185,6 +189,22 @@ describe("probeMicrophoneCapture", () => {
     expect(result.message).toMatch(/could not run/);
   });
 
+  test("names the responsible process, not Recordings.app, when a capture is silent", () => {
+    const dir = makeTempDir();
+    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(
+      dir,
+      buildWav(new Array(64).fill(0))
+    );
+
+    const result = probeMicrophoneCapture(makeConfig());
+
+    expect(result.ok).toBe(false);
+    // A CLI probe exercises the terminal's (or sshd's) grant. Telling the reader
+    // to fix Recordings.app on the strength of this sends them to a pane that
+    // will not change the outcome.
+    expect(result.message).toContain(captureProbeSubject().subject);
+  });
+
   test("leaves no probe artifacts behind in the temp dir", () => {
     const dir = makeTempDir();
     process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(
@@ -199,5 +219,104 @@ describe("probeMicrophoneCapture", () => {
       /^recordings-capture-probe-\d+-\d+\.wav$/.test(entry)
     );
     expect(leftovers).toEqual([]);
+  });
+});
+
+describe("captureProbeSubject", () => {
+  test("marks an SSH session as unable to be prompted", () => {
+    const subject = captureProbeSubject({ SSH_CONNECTION: "10.0.0.1 22 10.0.0.2 22" });
+
+    if (process.platform === "darwin") {
+      expect(subject.headless).toBe(true);
+      expect(subject.subject).toContain("sshd");
+      // The point of the flag: over SSH a silent capture is INCONCLUSIVE about
+      // the app, because macOS cannot show a consent sheet to a GUI-less session.
+      expect(subject.note).toContain("NOTHING");
+    } else {
+      expect(subject.headless).toBe(false);
+    }
+  });
+
+  test("attributes a local terminal run to the terminal, never to the app", () => {
+    const subject = captureProbeSubject({ TERM_PROGRAM: "ghostty" });
+
+    expect(subject.headless).toBe(false);
+    if (process.platform === "darwin") {
+      expect(subject.subject).toContain("ghostty");
+      expect(subject.subject).toContain("not Recordings.app");
+    }
+  });
+});
+
+describe("microphoneGrantInstruction", () => {
+  /** A bundle skeleton — the instruction resolves paths that exist on disk. */
+  function makeBundle(dir: string, name = "Recordings.app"): string {
+    const bundle = join(dir, name);
+    mkdirSync(join(bundle, "Contents", "MacOS"), { recursive: true });
+    return bundle;
+  }
+
+  test("names the pane, the section, the bundle and the binary", () => {
+    const bundle = makeBundle(makeTempDir());
+
+    const instruction = microphoneGrantInstruction({ installedAppPath: bundle });
+
+    expect(instruction.bundle_path).toBe(bundle);
+    expect(instruction.bundle_identifier).toBe(RECORDINGS_BUNDLE_IDENTIFIER);
+    const text = instruction.steps.join(" ");
+    // "Grant Microphone" is not actionable. Pane, section, control and binary are.
+    expect(text).toContain("System Settings → Privacy & Security → Microphone");
+    expect(text).toContain(bundle);
+    expect(text).toContain(join(bundle, "Contents", "MacOS", "Recordings"));
+  });
+
+  test("says the Settings row does not exist yet when the app has never asked", () => {
+    const bundle = makeBundle(makeTempDir());
+
+    const instruction = microphoneGrantInstruction({
+      installedAppPath: bundle,
+      everRequested: false,
+    });
+
+    // Sending someone to a toggle that is not in the list is how this loops.
+    expect(instruction.steps.join(" ")).toContain("will NOT contain");
+  });
+
+  test("warns when several bundles could receive the grant", () => {
+    const dir = makeTempDir();
+    const canonical = makeBundle(dir);
+    const legacy = makeBundle(dir, "Recordings.app.legacy");
+
+    const instruction = microphoneGrantInstruction({
+      installedAppPath: canonical,
+      otherAppPaths: [legacy],
+    });
+
+    expect(instruction.candidate_bundle_paths).toEqual([canonical, legacy]);
+    expect(instruction.steps[0]).toContain("AMBIGUOUS");
+  });
+
+  test("ignores bundle paths that do not exist on disk", () => {
+    const dir = makeTempDir();
+    const bundle = makeBundle(dir);
+
+    const instruction = microphoneGrantInstruction({
+      installedAppPath: join(dir, "Applications", "Recordings.app"),
+      otherAppPaths: [bundle],
+    });
+
+    expect(instruction.candidate_bundle_paths).toEqual([bundle]);
+    expect(instruction.bundle_path).toBe(bundle);
+  });
+
+  test("says there is nothing to grant when no bundle is installed", () => {
+    const dir = makeTempDir();
+
+    const instruction = microphoneGrantInstruction({
+      installedAppPath: join(dir, "Recordings.app"),
+    });
+
+    expect(instruction.bundle_path).toBeNull();
+    expect(instruction.steps.join(" ")).toContain("Install the app first");
   });
 });

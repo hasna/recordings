@@ -184,6 +184,10 @@ export function probeMicrophoneCapture(
       };
     }
     if (peak.peak === 0) {
+      // Name the subject. The grant this probe needs belongs to whatever is
+      // responsible for THIS process, not to Recordings.app, and conflating the
+      // two sends the reader to a pane that will not fix anything.
+      const subject = captureProbeSubject();
       return {
         ...base,
         tool,
@@ -191,13 +195,13 @@ export function probeMicrophoneCapture(
         ok: false,
         silent: true,
         message:
-          process.platform === "darwin"
-            ? `captured ${peak.samples} samples of digital silence (peak 0.000000). ` +
-              "On macOS this is what a process WITHOUT the Microphone permission receives — " +
+          `captured ${peak.samples} samples of digital silence (peak 0.000000). ` +
+          (process.platform === "darwin"
+            ? "On macOS this is what a process WITHOUT the Microphone permission receives — " +
               "CoreAudio zero-fills its buffers instead of returning an error. " +
-              "Grant Microphone to Recordings.app, or check that the input device is not hardware-muted."
-            : `captured ${peak.samples} samples of digital silence (peak 0.000000). ` +
-              "The input device delivered no signal — check that it is selected and not muted.",
+              "Also rule out a hardware-muted or unselected input device. "
+            : "The input device delivered no signal — check that it is selected and not muted. ") +
+          `This probe's capture is attributed to ${subject.subject}. ${subject.note}`,
       };
     }
 
@@ -208,11 +212,164 @@ export function probeMicrophoneCapture(
       peak: peak.peak,
       silent: false,
       ok: true,
-      message: `captured ${peak.samples} samples, peak amplitude ${peak.peak.toFixed(6)}`,
+      // State the limit of the claim in the same breath as the claim. A pass
+      // proves a live device delivered signal to THIS process; the app holds a
+      // separate grant and can still be silent.
+      message:
+        `captured ${peak.samples} samples, peak amplitude ${peak.peak.toFixed(6)} ` +
+        `(proves capture for ${captureProbeSubject().subject})`,
     };
   } finally {
     rmSync(filepath, { force: true });
   }
+}
+
+export interface CaptureProbeSubject {
+  /** True when this process cannot be shown a TCC prompt at all. */
+  headless: boolean;
+  /** What macOS will attribute the probe's microphone access to. */
+  subject: string;
+  note: string;
+}
+
+/**
+ * Name whose Microphone grant this probe actually exercises.
+ *
+ * macOS attributes microphone access to the RESPONSIBLE process — for a CLI that
+ * is the terminal application (or sshd), never Recordings.app. So a silent probe
+ * means "the thing running this command has no grant", which is a different
+ * finding, with a different fix, from "the app has no grant". Reporting the one
+ * as the other is how a diagnostic sends someone to the wrong settings pane.
+ *
+ * Over SSH it is worse than ambiguous: there is no GUI session to display a
+ * consent prompt, so the status stays `not_determined` forever and a silent
+ * capture proves nothing about the app. Say so instead of implying a verdict.
+ */
+export function captureProbeSubject(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env
+): CaptureProbeSubject {
+  if (process.platform !== "darwin") {
+    return {
+      headless: false,
+      subject: "this process",
+      note: "microphone access is not gated by TCC on this platform",
+    };
+  }
+
+  const overSsh = Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
+  const termProgram = env.TERM_PROGRAM?.trim();
+  const subject = overSsh
+    ? "the SSH session (sshd), not Recordings.app"
+    : `${termProgram || "the terminal application running this command"}, not Recordings.app`;
+
+  return {
+    headless: overSsh,
+    subject,
+    note: overSsh
+      ? "Running over SSH: macOS cannot display a consent prompt to a session with no GUI, " +
+        "so Microphone stays not_determined and a silent capture here says NOTHING about " +
+        "whether Recordings.app can record. Judge the app by its own TCC entry and its log."
+      : `Grants are per responsible process: this probe exercises ${subject}. ` +
+        "A pass proves the microphone hardware and the input device work; it does not " +
+        "transfer to Recordings.app, which needs its own grant.",
+  };
+}
+
+export interface MicrophoneGrantInstruction {
+  /** The bundle that must receive the grant, or null when none was found. */
+  bundle_path: string | null;
+  bundle_identifier: string;
+  /** Every Recordings.app on disk — more than one makes the grant ambiguous. */
+  candidate_bundle_paths: string[];
+  /** Ordered steps, already naming the pane, the section and the bundle. */
+  steps: string[];
+}
+
+export const RECORDINGS_BUNDLE_IDENTIFIER = "com.hasna.recordings";
+
+/**
+ * Build the instruction a human must follow at the keyboard, naming the exact
+ * pane, section, control and bundle.
+ *
+ * Microphone consent CANNOT be granted remotely: `tccutil` only resets entries,
+ * there is no supported way to insert an authorization, and the user TCC.db is
+ * SIP-protected. The only paths are the app's own request prompt or the Settings
+ * toggle — and the toggle only exists once the app has asked at least once, so
+ * the request must come first. "Grant Microphone" on its own is not actionable;
+ * this spells out what to click and which binary receives it.
+ */
+export function microphoneGrantInstruction(options: {
+  /** Path the installer treats as canonical. */
+  installedAppPath?: string | null;
+  /** Other Recordings.app bundles found on disk (e.g. legacy install sites). */
+  otherAppPaths?: string[];
+  /** Whether the app has ever prompted, i.e. whether a TCC row exists. */
+  everRequested?: boolean;
+}): MicrophoneGrantInstruction {
+  const candidates = [options.installedAppPath, ...(options.otherAppPaths ?? [])]
+    .filter((path): path is string => Boolean(path))
+    .filter((path, index, all) => all.indexOf(path) === index)
+    .filter((path) => existsSync(path));
+
+  const bundlePath = candidates[0] ?? null;
+  const steps: string[] = [];
+
+  if (!bundlePath) {
+    steps.push(
+      "No Recordings.app bundle was found on disk, so there is nothing to grant Microphone to yet. " +
+        "Install the app first ('recordings app install')."
+    );
+    return {
+      bundle_path: null,
+      bundle_identifier: RECORDINGS_BUNDLE_IDENTIFIER,
+      candidate_bundle_paths: candidates,
+      steps,
+    };
+  }
+
+  if (candidates.length > 1) {
+    steps.push(
+      `AMBIGUOUS: ${candidates.length} Recordings.app bundles exist (${candidates.join(", ")}). ` +
+        "A TCC grant is bound to the bundle's code signature, so granting one does not grant the " +
+        "other, and the toggle in Settings does not say which is which. Remove the bundles you are " +
+        "not running before granting, or the grant may attach to the wrong one."
+    );
+  }
+
+  steps.push(
+    `At the keyboard on the machine itself (not over SSH), launch ${bundlePath} and start a ` +
+      "recording once. macOS shows the consent sheet titled " +
+      `"“Recordings” would like to access the microphone" — click Allow.`
+  );
+  steps.push(
+    "If no sheet appears, open System Settings → Privacy & Security → Microphone " +
+      "and switch ON the row named “Recordings”. " +
+      `That row is bundle ${RECORDINGS_BUNDLE_IDENTIFIER} at ${bundlePath}; the binary that ` +
+      `receives the grant is ${join(bundlePath, "Contents", "MacOS", "Recordings")}.`
+  );
+  if (options.everRequested === false) {
+    steps.push(
+      "Note: the app has never requested microphone access on this machine (no TCC entry exists), " +
+        "so the Microphone list will NOT contain a “Recordings” row until the app asks once. " +
+        "Do the launch-and-record step first; the Settings toggle only exists afterwards."
+    );
+  }
+  steps.push(
+    "Confirm afterwards with 'recordings app status --json' — microphone_permission must read " +
+      "allowed, and a fresh line in ~/.hasna/recordings/Recordings.log must read " +
+      "'RecordingEngine init; microphone=Microphone allowed'."
+  );
+  steps.push(
+    "The grant is bound to the bundle's code signature: re-signing or rebuilding the app with a " +
+      "different identity voids it and this instruction has to be repeated."
+  );
+
+  return {
+    bundle_path: bundlePath,
+    bundle_identifier: RECORDINGS_BUNDLE_IDENTIFIER,
+    candidate_bundle_paths: candidates,
+    steps,
+  };
 }
 
 /**
