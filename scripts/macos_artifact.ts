@@ -93,7 +93,15 @@ export function localOnlyApprovedTargets(
   if (!policyStats.isFile()) {
     throw new Error("local-only approved target policy is missing");
   }
-  const rawContents = readFileSync(policyPath, "utf8");
+  // An unreadable (mode 000) policy passes the lstat above and then threw a raw EACCES from
+  // here, while the shell reader emitted bash's own "Permission denied" and no reader
+  // message. Same fail-closed outcome, two unrecognizable errors; both now say this.
+  let rawContents: string;
+  try {
+    rawContents = readFileSync(policyPath, "utf8");
+  } catch {
+    throw new Error("local-only approved target policy is not readable");
+  }
   // Reject a NUL anywhere, in the same order and with the same wording as the shell
   // reader's pre-scan. This reader had no NUL check at all and only ever refused one that
   // happened to land inside a would-be hostname: "# comment\0" was dropped as a comment,

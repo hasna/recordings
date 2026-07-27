@@ -62,16 +62,20 @@ function withPolicySymlink<T>(
 function shellReaderVerdictAtPath(
   path: string,
   requested: string,
+  options: { preamble?: string; env?: Record<string, string> } = {},
 ): { ok: boolean; matched: boolean; list: string; stderr: string } {
   const script = `
 set -euo pipefail
+${options.preamble ?? ""}
 . ${JSON.stringify(join(repositoryRoot, readerRelativePath))}
 LIST=""
 MATCHED=0
 read_local_only_targets ${JSON.stringify(path)} LIST MATCHED ${JSON.stringify(requested)}
 printf 'LIST=%s\\nMATCHED=%s\\n' "$LIST" "$MATCHED"
 `;
-  const result = Bun.spawnSync(["bash", "-c", script]);
+  const result = Bun.spawnSync(["bash", "-c", script], {
+    env: options.env ? { ...process.env, ...options.env } : undefined,
+  });
   const stdout = result.stdout.toString();
   return {
     ok: result.exitCode === 0,
@@ -92,19 +96,30 @@ function shellReaderVerdict(
 /// readers rejected *for the same reason* rather than merely that both rejected. "Both
 /// fail" is a weaker property than this contract claims: two readers can fail the same
 /// input for unrelated reasons and still disagree on the next input.
-function typeScriptReaderVerdict(path: string): { ok: boolean; message: string } {
+function typeScriptReaderVerdict(
+  path: string,
+): { ok: boolean; message: string; targets: string[] } {
   try {
-    localOnlyApprovedTargets(path);
-    return { ok: true, message: "" };
+    return { ok: true, message: "", targets: localOnlyApprovedTargets(path) };
   } catch (error) {
-    return { ok: false, message: (error as Error).message };
+    return { ok: false, message: (error as Error).message, targets: [] };
   }
 }
 
 /// Both readers print the same sentences with different capitalisation, so compare them
 /// case-insensitively and without trailing punctuation.
+///
+/// Deliberately NOT String.trim(): trim() strips U+000B, U+000C, U+00A0 and U+FEFF, which
+/// are precisely the characters this contract is about. Both readers echo the offending
+/// target name back in the message, so trim() here would silently normalise away a
+/// difference confined to that name's trailing bytes — the comparison would report
+/// agreement it had not checked. ASCII space and tab only, same rule as the readers.
 const normalizeReaderMessage = (message: string): string =>
-  message.trim().toLowerCase().replace(/\.$/, "");
+  message
+    .replace(/\n$/, "")
+    .replace(/^[\t ]+|[\t ]+$/g, "")
+    .toLowerCase()
+    .replace(/\.$/, "");
 
 describe("local-only approved target policy", () => {
   test("both shell entry points use the one sourced reader, not their own parser", () => {
@@ -155,7 +170,7 @@ describe("local-only approved target policy", () => {
       ?.files.map((entry) => entry.path) ?? [];
     expect(files).toContain(policyRelativePath);
     expect(files).toContain(readerRelativePath);
-  });
+  }, 120_000);
 
   test("declares both approved local-only targets", () => {
     const targets = localOnlyApprovedTargets();
@@ -203,9 +218,15 @@ describe("local-only approved target policy", () => {
     ];
     for (const contents of accepted) {
       const shell = shellReaderVerdict(contents, "station03");
-      expect(shell.ok).toBeTrue();
-      expect(shell.matched).toBeTrue();
-      expect(withPolicyFile(contents, (path) => localOnlyApprovedTargets(path))).toContain("station03");
+      expect(shell.ok, JSON.stringify(contents)).toBeTrue();
+      expect(shell.matched, JSON.stringify(contents)).toBeTrue();
+      const typeScript = withPolicyFile(contents, (path) => typeScriptReaderVerdict(path));
+      expect(typeScript.ok, JSON.stringify(contents)).toBeTrue();
+      // Compare the RESOLVED ALLOWLISTS, not just that both accepted and both mention
+      // station03. Two readers can accept the same file and still disagree about what is
+      // in it — a dropped or extra target is the whole risk here — and asserting only
+      // `toContain("station03")` cannot see that.
+      expect(shell.list, JSON.stringify(contents)).toBe(typeScript.targets.join(", "));
     }
 
     const rejected = [
@@ -266,7 +287,26 @@ describe("local-only approved target policy", () => {
       "\u0000\nstation03\n",
     ];
 
-    for (const contents of [...rejected, ...divergentByteShapes]) {
+    // Policies that break TWO rules at once. These are where the readers disagreed on the
+    // REASON while agreeing on the verdict: the shell used to finish validating each line
+    // before reading the next, so it reported whichever rule broke first by LINE, while
+    // TypeScript reports whichever breaks first by RULE (names, then duplicates, then
+    // fleet). "fleet\nfleet\n" was "must not list the release fleet target" here and "has
+    // duplicate targets" there. No gate ever opened on these -- both readers always refused
+    // -- but a contract that compares reasons has to actually hold, and over 1500 generated
+    // multi-violation policies this class produced 160 reason divergences before the shell
+    // reader was restructured into the same four phases as the TypeScript one.
+    const multipleViolations = [
+      "fleet\nfleet\n",
+      "fleet\nBAD\n",
+      "BAD\nfleet\n",
+      "station03\nstation03\nBAD\n",
+      "station03\nfleet\nstation03\n",
+      "station03\nstation03\nfleet\n",
+      "fleet\ns\n",
+    ];
+
+    for (const contents of [...rejected, ...divergentByteShapes, ...multipleViolations]) {
       const shell = shellReaderVerdict(contents, "station03");
       expect(shell.ok).toBeFalse();
       expect(shell.matched).toBeFalse();
@@ -280,7 +320,7 @@ describe("local-only approved target policy", () => {
         normalizeReaderMessage(shell.stderr),
       );
     }
-  });
+  }, 120_000);
 
   test("the two readers trim exactly ASCII space and tab, and agree on every whitespace codepoint", () => {
     // An enumerated table rather than a handful of cases, because the hand-picked corpus
@@ -322,6 +362,56 @@ describe("local-only approved target policy", () => {
         expect(shell.ok, where).toBe(acceptable);
       }
     }
+  }, 120_000);
+
+  test("the shell reader stays byte-exact under a hostile locale", () => {
+    // This is the guard for `local LC_ALL=C LANG=C` in the reader, and it is not vacuous —
+    // but it only bites if you first defeat the thing that hides the problem on Linux.
+    //
+    // `[a-z0-9-]` and `[!a-z]` are bracket RANGES, and range endpoints are resolved by
+    // COLLATION. Under a UTF-8 locale collation interleaves case (a A b B c C …), so
+    // `[a-z]` matches uppercase and "STATION07" parses as a valid target — while the
+    // TypeScript reader rejects it unconditionally. Build gate open, install validator
+    // closed: this PR's entire failure mode.
+    //
+    // bash >= 4.3 masks that with the `globasciiranges` shopt, ON by default, which forces
+    // ASCII range semantics whatever the locale. macOS ships /bin/bash 3.2.57, which has no
+    // such option, and src/native/Recordings/build.sh is `#!/bin/bash` and exports no
+    // locale of its own — so on the Mac that actually builds artifacts, the reader's
+    // function-local pin is the only thing between the caller's LANG and the allowlist.
+    // `shopt -u globasciiranges` reproduces those pre-4.3 semantics on the bash we have.
+    //
+    // Without this preamble the test passes with the pin deleted, which is exactly how an
+    // earlier revision of this branch talked itself into calling the pin unguarded.
+    const hostile = {
+      preamble: "shopt -u globasciiranges",
+      env: { LC_ALL: "en_US.UTF-8", LANG: "en_US.UTF-8" },
+    };
+    const uppercase = "STATION07\n";
+
+    const shell = withPolicyFile(uppercase, (path) =>
+      shellReaderVerdictAtPath(path, "STATION07", hostile),
+    );
+    expect(shell.ok).toBeFalse();
+    expect(shell.matched).toBeFalse();
+    expect(shell.stderr).toContain("invalid target name");
+
+    // The TypeScript reader has no locale to pin, so it is the fixed reference: whatever
+    // the shell does under a hostile locale, it must match this.
+    const typeScript = withPolicyFile(uppercase, (path) => typeScriptReaderVerdict(path));
+    expect(typeScript.ok).toBeFalse();
+    expect(normalizeReaderMessage(typeScript.message)).toBe(
+      normalizeReaderMessage(shell.stderr),
+    );
+
+    // A legitimate policy must still parse identically under the same hostile locale, so
+    // the assertion above is about byte-exactness and not about refusing everything.
+    const legitimate = withPolicyFile("station03\nstation06\n", (path) =>
+      shellReaderVerdictAtPath(path, "station03", hostile),
+    );
+    expect(legitimate.ok).toBeTrue();
+    expect(legitimate.matched).toBeTrue();
+    expect(legitimate.list).toBe("station03, station06");
   });
 
   test("both readers refuse a symlinked policy instead of following it", () => {
@@ -435,6 +525,26 @@ describe("local-only approved target policy", () => {
       expect(asDirectory.ok).toBeFalse();
       expect(asDirectory.stderr).toContain("policy is missing");
       expect(typeScriptReaderVerdict(directory).message).toContain("policy is missing");
+
+      // Mode 000: readable by lstat, unreadable by read. The shell reader used to fall
+      // through to bash's own "Permission denied" with no reader message, and the
+      // TypeScript reader raised a raw EACCES out of readFileSync — same fail-closed
+      // outcome, two unrecognizable errors. Both now name the condition, identically.
+      const unreadable = join(directory, "unreadable.txt");
+      writeFileSync(unreadable, "station03\n");
+      chmodSync(unreadable, 0o000);
+      try {
+        const shellUnreadable = shellReaderVerdictAtPath(unreadable, "station03");
+        expect(shellUnreadable.ok).toBeFalse();
+        expect(shellUnreadable.stderr).toContain("policy is not readable");
+        const typeScriptUnreadable = typeScriptReaderVerdict(unreadable);
+        expect(typeScriptUnreadable.ok).toBeFalse();
+        expect(normalizeReaderMessage(typeScriptUnreadable.message)).toBe(
+          normalizeReaderMessage(shellUnreadable.stderr),
+        );
+      } finally {
+        chmodSync(unreadable, 0o600);
+      }
 
       const dangling = join(directory, "dangling.txt");
       symlinkSync(join(directory, "does-not-exist.txt"), dangling);
@@ -566,7 +676,7 @@ describe("local-only approved target policy", () => {
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toContain("approved --approved-target");
     }
-  });
+  }, 120_000);
 
   test("the installer gate fails closed on an unusable policy or a missing reader", () => {
     const missingPolicy = runInstallerTargetGate("station03", { policyContents: null });
@@ -588,12 +698,42 @@ describe("local-only approved target policy", () => {
     const missingReader = runInstallerTargetGate("station03", { removeReader: true });
     expect(missingReader.exitCode).toBe(2);
     expect(missingReader.stderr).toContain("target reader is missing");
-  });
+  }, 120_000);
 
   test("resolves the policy path independently of the working directory", () => {
     expect(LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH.endsWith(policyRelativePath)).toBeTrue();
     expect(localOnlyApprovedTargets(LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH).length).toBeGreaterThan(0);
-  });
+
+    // This test never changed the working directory, which is the one thing its name
+    // promises. `bun test` always runs from the repository root, so a
+    // `join(process.cwd(), …)` implementation would have satisfied both assertions above
+    // and the test would have reported a property it had not observed — the same defect
+    // class as the symlink test that asserted only the missing-file case.
+    //
+    // Resolve it in a child process whose cwd is somewhere else entirely, and additionally
+    // one whose cwd does not exist on the path at all, so a cwd-relative implementation
+    // cannot accidentally still find the file.
+    const elsewhere = mkdtempSync(join(tmpdir(), "recordings-policy-cwd-"));
+    try {
+      for (const cwd of [elsewhere, "/"]) {
+        const probe = Bun.spawnSync(
+          [
+            process.execPath,
+            "-e",
+            `const m = await import(${JSON.stringify(join(repositoryRoot, "scripts/macos_artifact.ts"))});` +
+              `process.stdout.write(m.localOnlyApprovedTargets().join(","));`,
+          ],
+          { cwd },
+        );
+        expect(probe.exitCode, cwd).toBe(0);
+        expect(probe.stdout.toString(), cwd).toBe(
+          localOnlyApprovedTargets(LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH).join(","),
+        );
+      }
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   // The builder's own gate, actually executed, against a fixture whose working tree and
   // whose archived source disagree about the policy. Everything here is pre-compilation:
@@ -720,6 +860,44 @@ describe("local-only approved target policy", () => {
       }
       // If this ever reports changes, require_clean_source aborts the build before the
       // gate and every assertion below becomes vacuous, so prove the tree looks clean.
+
+      // Two preconditions, and BOTH are needed. A clean status alone is not enough: an
+      // unmodified tree is also clean, and then both roots hold the same bytes, and the
+      // caller's assertions all still pass while proving nothing at all. So assert the
+      // divergence itself — working tree here, HEAD there — and only then that git agrees
+      // the tree is clean, which is what stops require_clean_source aborting before the
+      // gate. Getting this wrong is not hypothetical: writing `policy.archived` instead of
+      // `policy.workingTree` above leaves the behavioural test passing on a reverted gate.
+      expect(readFileSync(policyPath, "utf8")).toBe(policy.workingTree);
+      const archivedPolicy = Bun.spawnSync(["git", "show", `HEAD:${policyRelativePath}`], {
+        cwd: packageRoot,
+        env: { PATH: process.env["PATH"] ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+      expect(archivedPolicy.exitCode).toBe(0);
+      expect(archivedPolicy.stdout.toString()).toBe(policy.archived);
+
+      // At least one of the two halves must actually differ between the roots, or there is
+      // nothing for the gate's choice of root to be observable through. Which half depends
+      // on the caller: the policy test diverges the policy and leaves the reader alone, the
+      // reader test does the reverse and passes identical policy halves. Asserting
+      // "the policy differs" unconditionally would fail the reader test for the wrong
+      // reason; asserting neither would let a future edit quietly remove the divergence.
+      expect(
+        policy.workingTree !== policy.archived || options.tamperWorkingTreeReader === true,
+      ).toBeTrue();
+
+      // Same precondition for the reader half, which is the more dangerous one.
+      if (options.tamperWorkingTreeReader === true) {
+        const readerPath = join(packageRoot, readerRelativePath);
+        expect(readFileSync(readerPath, "utf8")).toBe(tamperedWorkingTreeReader);
+        const archivedReader = Bun.spawnSync(["git", "show", `HEAD:${readerRelativePath}`], {
+          cwd: packageRoot,
+          env: { PATH: process.env["PATH"] ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null" },
+        });
+        expect(archivedReader.exitCode).toBe(0);
+        expect(archivedReader.stdout.toString()).not.toBe(tamperedWorkingTreeReader);
+      }
+
       const status = Bun.spawnSync(["git", "status", "--porcelain=v1", "--untracked-files=all"], {
         cwd: packageRoot,
         env: { PATH: process.env["PATH"] ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null" },
@@ -771,7 +949,7 @@ describe("local-only approved target policy", () => {
     expect(archived.stderr).toContain(
       "require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256",
     );
-  });
+  }, 120_000);
 
   test("the builder's gate reads the archived reader, not the working tree", () => {
     // Both roots hold the SAME policy, so the only thing that differs between the two
@@ -798,5 +976,5 @@ describe("local-only approved target policy", () => {
     expect(archived.stderr).toContain(
       "require an authenticated RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256",
     );
-  });
+  }, 120_000);
 });
