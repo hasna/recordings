@@ -501,11 +501,16 @@ through `src/native/Recordings/build.sh` (`set -euo pipefail`), so a partial bum
 not just fail an assertion -- the native app cannot be built at all, and the whole
 `native-app-companion-contract` suite aborts on its first test.
 
-Nothing enforces this automatically: the repo has no CI workflows. `version:check` runs
-on `prepack`, `prepublishOnly` runs `bun test`, and `bun test` covers the sites through
-`src/__tests__/native-bundle-version.test.ts` and
-`src/__tests__/version-site-guard.test.ts` -- but a branch is only as verified as the
-last local run.
+Three things enforce it. `.github/workflows/ci.yml` runs the whole TypeScript suite on
+every push, which is what makes the two guards below actually block a branch rather than
+wait for someone to run them locally. `prepack` runs `build:native-fs-guard` first (the
+fail-closed macOS gate), then `version:check`, so a partial bump stops before the build
+rather than deep inside it. And `prepublishOnly` runs `bun test`, which covers the sites
+through `src/__tests__/native-bundle-version.test.ts` and
+`src/__tests__/version-site-guard.test.ts`.
+
+The Swift side is not covered: no reachable machine currently runs the Swift suite, so a
+version claim about the app bundle is only as verified as the last macOS build.
 
 ## Data Directory
 

@@ -56,7 +56,7 @@
     "verify:release": "bun run scripts/release-guard.ts",
     "version:set": "bun run scripts/set-version.ts",
     "version:check": "bun run scripts/set-version.ts --check",
-    "prepack": "bun run version:check && bun run build:native-fs-guard && bun run build && bun run verify:release",
+    "prepack": "bun run build:native-fs-guard && bun run version:check && bun run build && bun run verify:release",
     "prepublishOnly": "bun run typecheck && bun run test",
     "typecheck:shortcut-contract": "tsc --noEmit -p tsconfig.test.json"
   },

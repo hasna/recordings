@@ -35,7 +35,17 @@ describe("release version sites", () => {
 
     expect(mismatched).toEqual([]);
     expect(expected).toBe(packageJson.version);
-    expect(readings).toHaveLength(versionSites.length);
+    // Listed literally rather than as `versionSites.length`, which compares the array to its own
+    // source and so can never fail: dropping a site leaves the writer silently not writing it,
+    // every remaining site still agrees, and the stale plist key is exactly the defect this file
+    // exists to prevent. A mutation that deletes the CFBundleVersion entry survived the length
+    // form and is killed by this one.
+    expect(readings.map((reading) => [reading.site.file, reading.site.label])).toEqual([
+      ["package.json", "package.json version"],
+      ["src/version.ts", "src/version.ts VERSION"],
+      ["src/native/Recordings/RecordingsLib/Info.plist", "Info.plist CFBundleShortVersionString"],
+      ["src/native/Recordings/RecordingsLib/Info.plist", "Info.plist CFBundleVersion"],
+    ]);
   });
 
   test("a single stale site is reported rather than silently accepted", () => {
@@ -58,14 +68,40 @@ describe("release version sites", () => {
     const { expected, mismatched } = checkVersionSites(root);
     expect(expected).toBe("9.8.7");
     expect(mismatched).toEqual([]);
-    // The plist carries two sites in one file; both must land, not just the first.
-    expect(readFileSync(join(root, "src/native/Recordings/RecordingsLib/Info.plist"), "utf8"))
-      .not.toContain("0.0.1");
+    // The plist carries two sites in one file; both must land, not just the first. Asserted
+    // positively, per key, by a literal pattern independent of `versionSites`: the earlier
+    // `not.toContain("0.0.1")` form was satisfied by a key that was never written at all, so it
+    // survived the dropped-site mutation it was there to catch.
+    const plist = readFileSync(
+      join(root, "src/native/Recordings/RecordingsLib/Info.plist"),
+      "utf8",
+    );
+    for (const key of ["CFBundleShortVersionString", "CFBundleVersion"]) {
+      const match = plist.match(new RegExp(`<key>${key}</key>\\s*<string>([^<]+)</string>`));
+      expect(match?.[1]).toBe("9.8.7");
+    }
   });
 
   test("rejects versions the release path already refuses", () => {
     expect(() => assertReleaseVersion("v1.2.3")).toThrow(/invalid release version/);
     expect(() => assertReleaseVersion("1.2")).toThrow(/invalid release version/);
+    // Binds the trailing anchor. `v1.2.3` only binds the leading one and `1.2` only binds arity,
+    // so deleting `$` from the pattern left both green while junk-suffixed versions were accepted.
+    expect(() => assertReleaseVersion("1.2.3.4")).toThrow(/invalid release version/);
     expect(assertReleaseVersion("1.2.3-rc.1")).toBe("1.2.3-rc.1");
+  });
+
+  // `version:check` in prepack was previously unasserted by anything: the only prepack needle in
+  // the repo is native-release-build-hardening-contract's `toStartWith`, which this PR's original
+  // ordering broke outright. build:native-fs-guard has to stay first -- it is the fail-closed
+  // macOS gate, and nothing may run ahead of it -- so the version check goes immediately after it
+  // and still short-circuits before the expensive `bun run build`.
+  test("prepack checks the version sites after the platform gate and before the build", () => {
+    const steps = packageJson.scripts.prepack.split(" && ");
+
+    expect(steps[0]).toBe("bun run build:native-fs-guard");
+    expect(steps.indexOf("bun run version:check")).toBeGreaterThan(-1);
+    expect(steps.indexOf("bun run build")).toBeGreaterThan(-1);
+    expect(steps.indexOf("bun run version:check")).toBeLessThan(steps.indexOf("bun run build"));
   });
 });
