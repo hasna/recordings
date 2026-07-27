@@ -6,8 +6,10 @@ import { tmpdir } from "os";
 import {
   describeActiveStore,
   probeRecordingPersistence,
+  safeBaseUrl,
   AUTO_FLIP_MODE_SOURCE,
   PERSISTENCE_PROBE_TAG,
+  PERSISTENCE_PROBE_MARKER_PREFIX,
 } from "../lib/persistence-probe.js";
 import type { Store } from "../store.js";
 import type { CreateRecordingInput, Recording, RecordingsConfig } from "../types/index.js";
@@ -166,15 +168,19 @@ interface FakeStoreOptions {
   mutateText?: boolean;
   createThrows?: string;
   deleteReturns?: boolean;
+  /** Report a successful delete while leaving the row readable. */
+  deleteLies?: boolean;
 }
 
 function makeFakeStore(options: FakeStoreOptions = {}): {
   store: Store;
   rows: Map<string, Recording>;
   deleted: string[];
+  created: CreateRecordingInput[];
 } {
   const rows = new Map<string, Recording>();
   const deleted: string[] = [];
+  const created: CreateRecordingInput[] = [];
   let counter = 0;
 
   const store = {
@@ -182,6 +188,7 @@ function makeFakeStore(options: FakeStoreOptions = {}): {
     baseUrl: options.baseUrl ?? null,
     async createRecording(input: CreateRecordingInput) {
       if (options.createThrows) throw new Error(options.createThrows);
+      created.push(input);
       counter += 1;
       const recording = {
         id: `probe-${counter}`,
@@ -197,11 +204,12 @@ function makeFakeStore(options: FakeStoreOptions = {}): {
     async deleteRecording(id: string) {
       if (options.deleteReturns === false) return false;
       deleted.push(id);
+      if (options.deleteLies) return true; // row deliberately left in place
       return rows.delete(id);
     },
   } as unknown as Store;
 
-  return { store, rows, deleted };
+  return { store, rows, deleted, created };
 }
 
 describe("probeRecordingPersistence", () => {
@@ -211,9 +219,10 @@ describe("probeRecordingPersistence", () => {
       baseUrl: "https://recordings.example.test/v1",
     });
 
-    const result = await probeRecordingPersistence({ store });
+    const result = await probeRecordingPersistence({ store, allowRemoteWrite: true });
 
     expect(result.ok).toBe(true);
+    expect(result.attempted).toBe(true);
     expect(result.read_back).toBe(true);
     expect(result.cleaned_up).toBe(true);
     expect(result.transport).toBe("cloud-http");
@@ -224,26 +233,17 @@ describe("probeRecordingPersistence", () => {
   });
 
   test("tags the marker so any leftover row is identifiable", async () => {
-    const captured: CreateRecordingInput[] = [];
-    const store = {
-      mode: "local",
-      baseUrl: null,
-      async createRecording(input: CreateRecordingInput) {
-        captured.push(input);
-        return { id: "probe-1", raw_text: input.raw_text } as unknown as Recording;
-      },
-      async getRecording() {
-        return { id: "probe-1", raw_text: captured[0]!.raw_text } as unknown as Recording;
-      },
-      async deleteRecording() {
-        return true;
-      },
-    } as unknown as Store;
+    // Reuses makeFakeStore rather than hand-rolling a second stub: the ad-hoc one
+    // ignored deletes, so it disagreed with the real Store contract and made a
+    // correct implementation look broken.
+    const { store, created } = makeFakeStore({ mode: "local", baseUrl: null });
 
     const result = await probeRecordingPersistence({ store });
 
     expect(result.ok).toBe(true);
-    expect(captured[0]?.tags).toContain(PERSISTENCE_PROBE_TAG);
+    expect(created[0]?.tags).toContain(PERSISTENCE_PROBE_TAG);
+    expect(created[0]?.tags).toContain("diagnostic");
+    expect(created[0]?.raw_text).toContain(PERSISTENCE_PROBE_MARKER_PREFIX);
   });
 
   // The trap: the API returns 201 with a recording body, so the caller logs
@@ -273,19 +273,38 @@ describe("probeRecordingPersistence", () => {
     const result = await probeRecordingPersistence({ store });
 
     expect(result.ok).toBe(false);
+    expect(result.attempted).toBe(true);
     expect(result.recording_id).toBeNull();
     expect(result.message).toContain("401");
+    // A timeout is not proof nothing committed, so hand over the recovery query.
+    expect(result.message).toContain(PERSISTENCE_PROBE_MARKER_PREFIX);
   });
 
-  test("names the leftover row and the delete command when cleanup fails", async () => {
+  // A row left in a store people audit is a failure, not a footnote: reporting
+  // ok:true here made the command exit 0 with a probe recording still in place.
+  test("FAILS, and names the delete command, when cleanup cannot be confirmed", async () => {
     const { store } = makeFakeStore({ deleteReturns: false });
 
     const result = await probeRecordingPersistence({ store });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.cleaned_up).toBe(false);
-    expect(result.message).toContain("was left in place");
+    expect(result.message).toContain("could NOT confirm its removal");
     expect(result.message).toContain("recordings delete probe-1");
+  });
+
+  // ApiStore.deleteRecording returns `res?.deleted !== false`, so a 204, an empty
+  // body or a non-conforming server all report success with the row still there.
+  // The write is only trusted after a read-back; the delete must be too.
+  test("FAILS when the store reports a successful delete but the row survives", async () => {
+    const { store, rows } = makeFakeStore({ deleteLies: true });
+
+    const result = await probeRecordingPersistence({ store });
+
+    expect(result.ok).toBe(false);
+    expect(result.cleaned_up).toBe(false);
+    expect(result.message).toContain("still readable");
+    expect(rows.size).toBe(1);
   });
 
   test("still attempts cleanup after a failed read-back", async () => {
@@ -295,5 +314,128 @@ describe("probeRecordingPersistence", () => {
 
     expect(result.ok).toBe(false);
     expect(deleted).toHaveLength(1);
+  });
+});
+
+describe("credential safety in reports", () => {
+  // Refutes the branch's own "no credential value can reach the report" claim as
+  // it originally stood: toV1BaseUrl clears query and fragment but keeps
+  // userinfo, so a password in the API URL reached stdout and --json intact.
+  const URL_WITH_PASSWORD = `https://svc:${FAKE_API_KEY}@recordings.example.test`;
+
+  test("a password embedded in the API URL never reaches the report", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+
+    const description = describeActiveStore(makeConfig(dbPath), {
+      HASNA_RECORDINGS_API_URL: URL_WITH_PASSWORD,
+      HASNA_RECORDINGS_API_KEY: FAKE_API_KEY,
+    });
+
+    expect(description.transport).toBe("cloud-http");
+    expect(JSON.stringify(description)).not.toContain(FAKE_API_KEY);
+    expect(description.base_url).toContain("recordings.example.test");
+    expect(description.base_url).toContain("redacted");
+  });
+
+  test("the divergence warning does not leak the URL password either", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+    seedLocalDb(dbPath, 5);
+
+    const description = describeActiveStore(makeConfig(dbPath), {
+      HASNA_RECORDINGS_API_URL: URL_WITH_PASSWORD,
+      HASNA_RECORDINGS_API_KEY: FAKE_API_KEY,
+    });
+
+    expect(description.divergent).toBe(true);
+    expect(description.warning).not.toContain(FAKE_API_KEY);
+  });
+
+  test("the persistence probe message does not leak the URL password", async () => {
+    const { store } = makeFakeStore({
+      mode: "cloud-http",
+      baseUrl: `${URL_WITH_PASSWORD}/v1`,
+    });
+
+    const result = await probeRecordingPersistence({ store, allowRemoteWrite: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).not.toContain(FAKE_API_KEY);
+    expect(JSON.stringify(result)).not.toContain(FAKE_API_KEY);
+  });
+
+  test("an unresolvable mode value is redacted rather than echoed", () => {
+    const dbPath = join(makeTempDir(), "recordings.db");
+
+    const description = describeActiveStore(makeConfig(dbPath), {
+      HASNA_RECORDINGS_STORAGE_MODE: "sk-not-a-mode-but-key-shaped-abcdef123456",
+    });
+
+    expect(description.mode_source).toBe("unresolved");
+    expect(description.warning).toContain("[redacted]");
+  });
+
+  test("safeBaseUrl leaves a clean URL untouched", () => {
+    expect(safeBaseUrl("https://recordings.example.test/v1")).toBe(
+      "https://recordings.example.test/v1"
+    );
+    expect(safeBaseUrl(null)).toBeNull();
+    expect(safeBaseUrl("not a url at all")).toBe("[unparseable URL redacted]");
+  });
+});
+
+describe("writing to a shared store requires consent", () => {
+  // The probe writes a real row. Against a self-hosted API that row is briefly
+  // visible to every reader, and the server's idempotency ledger keeps a
+  // permanent orphan per create, so this must not happen by default.
+  test("SKIPS a cloud-http store unless allowRemoteWrite is set", async () => {
+    const { store, rows } = makeFakeStore({
+      mode: "cloud-http",
+      baseUrl: "https://recordings.example.test/v1",
+    });
+
+    const result = await probeRecordingPersistence({ store });
+
+    expect(result.attempted).toBe(false);
+    expect(rows.size).toBe(0);
+    expect(result.message).toContain("SKIPPED");
+    expect(result.message).toContain("--probe-store-write");
+    // A skip is not a failure: it must not turn `check --probe` red.
+    expect(result.ok).toBe(true);
+  });
+
+  test("writes to a local store without any extra consent", async () => {
+    const { store, deleted } = makeFakeStore({ mode: "local", baseUrl: null });
+
+    const result = await probeRecordingPersistence({ store });
+
+    expect(result.attempted).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(deleted).toHaveLength(1);
+  });
+
+  // The module refuses to open a store read-write while inspecting it, then the
+  // probe created and migrated one. Reporting it is the minimum honesty.
+  test("reports when the probe itself created the local store", async () => {
+    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+
+    const result = await probeRecordingPersistence({
+      store,
+      localStoreExistedBefore: false,
+    });
+
+    expect(result.created_local_store).toBe(true);
+    expect(result.message).toContain("CREATED and migrated the local SQLite store");
+  });
+
+  test("does not claim to have created a store that already existed", async () => {
+    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+
+    const result = await probeRecordingPersistence({
+      store,
+      localStoreExistedBefore: true,
+    });
+
+    expect(result.created_local_store).toBe(false);
+    expect(result.message).not.toContain("CREATED");
   });
 });

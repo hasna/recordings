@@ -7,9 +7,12 @@ import {
   probeMicrophoneCapture,
   captureProbeSubject,
   microphoneGrantInstruction,
+  classifyPermissionState,
   readWavPeak,
   DEFAULT_PROBE_SECONDS,
+  SILENCE_PEAK_THRESHOLD,
   RECORDINGS_BUNDLE_IDENTIFIER,
+  TCC_UNREADABLE_STATE,
 } from "../lib/capture-probe.js";
 import type { RecordingsConfig } from "../types/index.js";
 
@@ -20,7 +23,6 @@ afterEach(() => {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
-  delete process.env.RECORDINGS_TEST_RECORD_EXECUTABLE;
 });
 
 function makeTempDir(): string {
@@ -30,23 +32,40 @@ function makeTempDir(): string {
 }
 
 /** Build a minimal 16-bit mono PCM WAV from the given samples. */
-function buildWav(samples: number[], options: { extraChunk?: boolean } = {}): Buffer {
+interface BuildWavOptions {
+  extraChunk?: boolean;
+  /** Declared bit depth, so the 16-bit guard can be exercised. */
+  bitsPerSample?: number;
+  /** wFormatTag; 1 is uncompressed PCM, 3 is IEEE float. */
+  formatTag?: number;
+  /** Emit `data` before `fmt ` — legal RIFF, and it used to defeat the scan. */
+  dataFirst?: boolean;
+  /** Leave the fmt chunk out entirely. */
+  omitFmt?: boolean;
+  /** Declare a fmt chunk shorter than the 16 bytes the spec requires. */
+  fmtChunkSize?: number;
+}
+
+function buildWav(samples: number[], options: BuildWavOptions = {}): Buffer {
   const data = Buffer.alloc(samples.length * 2);
   samples.forEach((sample, index) => data.writeInt16LE(sample, index * 2));
 
-  const fmt = Buffer.alloc(24);
+  const declaredFmtSize = options.fmtChunkSize ?? 16;
+  const fmt = Buffer.alloc(8 + declaredFmtSize);
   fmt.write("fmt ", 0, "ascii");
-  fmt.writeUInt32LE(16, 4);
-  fmt.writeUInt16LE(1, 8); // PCM
-  fmt.writeUInt16LE(1, 10); // mono
-  fmt.writeUInt32LE(16000, 12);
-  fmt.writeUInt32LE(32000, 16);
-  fmt.writeUInt16LE(2, 20);
-  fmt.writeUInt16LE(16, 22); // bits per sample
+  fmt.writeUInt32LE(declaredFmtSize, 4);
+  if (declaredFmtSize >= 16) {
+    fmt.writeUInt16LE(options.formatTag ?? 1, 8); // wFormatTag
+    fmt.writeUInt16LE(1, 10); // mono
+    fmt.writeUInt32LE(16000, 12);
+    fmt.writeUInt32LE(32000, 16);
+    fmt.writeUInt16LE(2, 20);
+    fmt.writeUInt16LE(options.bitsPerSample ?? 16, 22); // bits per sample
+  }
 
   // sox emits a LIST/INFO chunk ahead of `data` for some outputs. A reader that
   // assumes a fixed 44-byte header silently reads metadata as audio.
-  const chunks: Buffer[] = [fmt];
+  const chunks: Buffer[] = options.omitFmt ? [] : [fmt];
   if (options.extraChunk) {
     const listBody = Buffer.from("INFOhello!", "ascii"); // odd length -> needs pad
     const list = Buffer.alloc(8 + listBody.length + (listBody.length % 2));
@@ -60,7 +79,8 @@ function buildWav(samples: number[], options: { extraChunk?: boolean } = {}): Bu
   dataChunk.write("data", 0, "ascii");
   dataChunk.writeUInt32LE(data.length, 4);
   data.copy(dataChunk, 8);
-  chunks.push(dataChunk);
+  if (options.dataFirst) chunks.unshift(dataChunk);
+  else chunks.push(dataChunk);
 
   const body = Buffer.concat(chunks);
   const header = Buffer.alloc(12);
@@ -123,6 +143,52 @@ describe("readWavPeak", () => {
     expect(peak.peak).toBeCloseTo(0.25, 5);
   });
 
+  // These four are the guards that survived mutation testing unnoticed: deleting
+  // the bit-depth check, or letting the loop stop at `data`, left the suite green
+  // while the function silently reinterpreted other formats as 16-bit PCM.
+  test("rejects a 32-bit sample format instead of reinterpreting it as 16-bit", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "float32.wav");
+    writeFileSync(file, buildWav([0, 4096], { bitsPerSample: 32 }));
+
+    expect(() => readWavPeak(file)).toThrow(/expected 16-bit PCM, got 32-bit/);
+  });
+
+  test("rejects a non-PCM format tag even at 16 bits", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "ieee-float.wav");
+    writeFileSync(file, buildWav([0, 4096], { formatTag: 3 }));
+
+    expect(() => readWavPeak(file)).toThrow(/uncompressed PCM/);
+  });
+
+  // RIFF does not mandate chunk order. Breaking out of the scan at `data` left
+  // bitsPerSample at its 16 default, so a 32-bit file reported a plausible,
+  // wrong peak instead of raising.
+  test("still reads fmt when the data chunk comes first", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "data-first.wav");
+    writeFileSync(file, buildWav([0, 4096], { bitsPerSample: 32, dataFirst: true }));
+
+    expect(() => readWavPeak(file)).toThrow(/expected 16-bit PCM, got 32-bit/);
+  });
+
+  test("refuses a WAV with no fmt chunk rather than assuming 16-bit", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "no-fmt.wav");
+    writeFileSync(file, buildWav([0, 4096], { omitFmt: true }));
+
+    expect(() => readWavPeak(file)).toThrow(/no fmt chunk/);
+  });
+
+  test("rejects a truncated fmt chunk instead of reading the next header as bit depth", () => {
+    const dir = makeTempDir();
+    const file = join(dir, "short-fmt.wav");
+    writeFileSync(file, buildWav([0, 4096], { fmtChunkSize: 8 }));
+
+    expect(() => readWavPeak(file)).toThrow(/truncated fmt chunk/);
+  });
+
   test("rejects a non-RIFF file rather than reporting a peak", () => {
     const dir = makeTempDir();
     const file = join(dir, "not-a-wav.bin");
@@ -139,28 +205,28 @@ describe("probeMicrophoneCapture", () => {
   // or file size calls that a success.
   test("FAILS on a zero-filled capture even though the recorder exits 0", () => {
     const dir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(
+    const executable = makeRecorderStub(
       dir,
       buildWav(new Array(16000).fill(0))
     );
 
-    const result = probeMicrophoneCapture(makeConfig());
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
 
     expect(result.ok).toBe(false);
     expect(result.silent).toBe(true);
     expect(result.peak).toBe(0);
     expect(result.samples).toBe(16000);
-    expect(result.message).toContain("digital silence");
+    expect(result.message).toContain("no usable signal");
   });
 
   test("succeeds and reports the peak when real signal is captured", () => {
     const dir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(
+    const executable = makeRecorderStub(
       dir,
       buildWav([0, 4096, -8192, 128])
     );
 
-    const result = probeMicrophoneCapture(makeConfig());
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
 
     expect(result.ok).toBe(true);
     expect(result.silent).toBe(false);
@@ -171,9 +237,9 @@ describe("probeMicrophoneCapture", () => {
 
   test("fails when the recorder writes no file despite exiting 0", () => {
     const dir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(dir, null);
+    const executable = makeRecorderStub(dir, null);
 
-    const result = probeMicrophoneCapture(makeConfig());
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain("wrote no audio file");
@@ -181,9 +247,9 @@ describe("probeMicrophoneCapture", () => {
 
   test("fails cleanly when the recorder executable does not exist", () => {
     const dir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = join(dir, "definitely-missing");
+    const executable = join(dir, "definitely-missing");
 
-    const result = probeMicrophoneCapture(makeConfig());
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
 
     expect(result.ok).toBe(false);
     expect(result.message).toMatch(/could not run/);
@@ -191,28 +257,31 @@ describe("probeMicrophoneCapture", () => {
 
   test("names the responsible process, not Recordings.app, when a capture is silent", () => {
     const dir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(
+    const executable = makeRecorderStub(
       dir,
       buildWav(new Array(64).fill(0))
     );
 
-    const result = probeMicrophoneCapture(makeConfig());
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
 
     expect(result.ok).toBe(false);
     // A CLI probe exercises the terminal's (or sshd's) grant. Telling the reader
     // to fix Recordings.app on the strength of this sends them to a pane that
-    // will not change the outcome.
-    expect(result.message).toContain(captureProbeSubject().subject);
+    // will not change the outcome. Asserted against a literal, not against
+    // captureProbeSubject() — comparing production output to production output
+    // passes no matter what either one says.
+    expect(result.message).toContain("attributed to");
+    expect(result.message).not.toContain("Grant Microphone to Recordings.app");
   });
 
   test("leaves no probe artifacts behind in the temp dir", () => {
     const dir = makeTempDir();
-    process.env.RECORDINGS_TEST_RECORD_EXECUTABLE = makeRecorderStub(
+    const executable = makeRecorderStub(
       dir,
       buildWav([0, 4096])
     );
 
-    const result = probeMicrophoneCapture(makeConfig());
+    const result = probeMicrophoneCapture(makeConfig(), { executable });
     expect(result.ok).toBe(true);
 
     const leftovers = readdirSync(tmpdir()).filter((entry) =>
@@ -223,28 +292,92 @@ describe("probeMicrophoneCapture", () => {
 });
 
 describe("captureProbeSubject", () => {
-  test("marks an SSH session as unable to be prompted", () => {
-    const subject = captureProbeSubject({ SSH_CONNECTION: "10.0.0.1 22 10.0.0.2 22" });
+  // platform is injected so the darwin logic — the module's central claim — is
+  // asserted on Linux CI too. Gating these behind `if (platform === "darwin")`
+  // meant inverting the entire darwin branch left the suite fully green.
+  const darwin = { platform: "darwin" as const };
 
-    if (process.platform === "darwin") {
-      expect(subject.headless).toBe(true);
-      expect(subject.subject).toContain("sshd");
-      // The point of the flag: over SSH a silent capture is INCONCLUSIVE about
-      // the app, because macOS cannot show a consent sheet to a GUI-less session.
-      expect(subject.note).toContain("NOTHING");
-    } else {
-      expect(subject.headless).toBe(false);
-    }
+  test("names sshd, not the app, and marks an SSH session unpromptable", () => {
+    const subject = captureProbeSubject(
+      { SSH_CONNECTION: "10.0.0.1 22 10.0.0.2 22" },
+      { ...darwin, hasTty: true }
+    );
+
+    expect(subject.headless).toBe(true);
+    expect(subject.subject_known).toBe(true);
+    expect(subject.subject).toContain("sshd");
+    expect(subject.subject).toContain("not Recordings.app");
+    expect(subject.note).toContain("NOTHING");
+  });
+
+  // The regression that made the old detector wrong in the environment this org
+  // actually uses: tmux snapshots env at pane creation, so a remote pane has
+  // neither SSH_CONNECTION nor TERM_PROGRAM.
+  test("attributes a tmux pane to the tmux server and calls it inconclusive", () => {
+    const subject = captureProbeSubject({ TMUX: "/tmp/tmux-501/default,123,0" }, darwin);
+
+    expect(subject.subject).toContain("tmux server");
+    expect(subject.subject).toContain("not Recordings.app");
+    expect(subject.note).toContain("inconclusive");
+    // Must NOT claim a terminal application it cannot see.
+    expect(subject.subject).not.toContain("terminal application");
+  });
+
+  test("refuses to guess when there is no SSH var, no TERM_PROGRAM and no tty", () => {
+    const subject = captureProbeSubject({}, { ...darwin, hasTty: false });
+
+    expect(subject.subject_known).toBe(false);
+    expect(subject.headless).toBe(true);
+    expect(subject.note).toContain("could not be identified");
+    expect(subject.note).toContain("Inconclusive");
   });
 
   test("attributes a local terminal run to the terminal, never to the app", () => {
-    const subject = captureProbeSubject({ TERM_PROGRAM: "ghostty" });
+    const subject = captureProbeSubject({ TERM_PROGRAM: "ghostty" }, { ...darwin, hasTty: true });
 
     expect(subject.headless).toBe(false);
-    if (process.platform === "darwin") {
-      expect(subject.subject).toContain("ghostty");
-      expect(subject.subject).toContain("not Recordings.app");
-    }
+    expect(subject.subject_known).toBe(true);
+    expect(subject.subject).toContain("ghostty");
+    expect(subject.subject).toContain("not Recordings.app");
+    expect(subject.note).toContain("does not");
+  });
+
+  test("says TCC does not gate the microphone off darwin", () => {
+    const subject = captureProbeSubject({}, { platform: "linux", hasTty: true });
+
+    expect(subject.subject).toBe("this process");
+    expect(subject.subject_known).toBe(true);
+    expect(subject.note).toContain("not gated by TCC");
+  });
+});
+
+describe("classifyPermissionState", () => {
+  // The F1 regression: a refused database read was reported as "never asked",
+  // so the CLI asserted "no TCC entry exists" on a machine that had a row.
+  test("an unreadable TCC database is unknown, NOT never_requested", () => {
+    expect(classifyPermissionState(TCC_UNREADABLE_STATE)).toBe("unknown");
+  });
+
+  test("only a literal not_determined means the app never asked", () => {
+    expect(classifyPermissionState("not_determined")).toBe("never_requested");
+  });
+
+  test("a definite decision means the app has asked", () => {
+    expect(classifyPermissionState("allowed_identity_unverified")).toBe("requested");
+    expect(classifyPermissionState("denied_identity_unverified")).toBe("requested");
+    expect(classifyPermissionState("limited_identity_unverified")).toBe("requested");
+  });
+
+  // TCC auth_value 1 is "unknown" but the ROW EXISTS, so the app has asked and
+  // the Settings list will contain a Recordings entry.
+  test("TCC auth_value 1 counts as requested because a row exists", () => {
+    expect(classifyPermissionState("unknown_identity_unverified")).toBe("requested");
+    expect(classifyPermissionState("unknown(7)_identity_unverified")).toBe("requested");
+  });
+
+  test("an ambiguous multi-install report is unknown, not an answer about the app", () => {
+    expect(classifyPermissionState("ambiguous_multiple_installations")).toBe("unknown");
+    expect(classifyPermissionState("unsupported")).toBe("unknown");
   });
 });
 
@@ -275,11 +408,40 @@ describe("microphoneGrantInstruction", () => {
 
     const instruction = microphoneGrantInstruction({
       installedAppPath: bundle,
-      everRequested: false,
+      requestState: "never_requested",
     });
 
     // Sending someone to a toggle that is not in the list is how this loops.
     expect(instruction.steps.join(" ")).toContain("will NOT contain");
+  });
+
+  // F1: a refused TCC read must never be narrated as "the app never asked".
+  test("does not claim the row is absent when the permission state is unknown", () => {
+    const bundle = makeBundle(makeTempDir());
+
+    const instruction = microphoneGrantInstruction({
+      installedAppPath: bundle,
+      requestState: "unknown",
+    });
+
+    const text = instruction.steps.join(" ");
+    expect(text).not.toContain("will NOT contain");
+    expect(text).not.toContain("has never requested");
+    expect(text).toContain("could NOT be determined");
+    expect(text).toContain("Full Disk Access");
+  });
+
+  test("stays silent about the row when the app has already asked", () => {
+    const bundle = makeBundle(makeTempDir());
+
+    const instruction = microphoneGrantInstruction({
+      installedAppPath: bundle,
+      requestState: "requested",
+    });
+
+    const text = instruction.steps.join(" ");
+    expect(text).not.toContain("will NOT contain");
+    expect(text).not.toContain("could NOT be determined");
   });
 
   test("warns when several bundles could receive the grant", () => {

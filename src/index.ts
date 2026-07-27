@@ -81,13 +81,18 @@ export {
   captureProbePrecondition,
   captureProbeSubject,
   microphoneGrantInstruction,
-  permissionStateProvesRequest,
+  classifyPermissionState,
   readWavPeak,
   DEFAULT_PROBE_SECONDS,
+  MAX_PROBE_SECONDS,
+  SILENCE_PEAK_THRESHOLD,
+  DEFAULT_RECORD_EXECUTABLE,
   RECORDINGS_BUNDLE_IDENTIFIER,
+  TCC_UNREADABLE_STATE,
   type CaptureProbeResult,
   type CaptureProbeSubject,
   type MicrophoneGrantInstruction,
+  type PermissionRequestState,
   type WavPeak,
 } from "./lib/capture-probe.js";
 
@@ -96,8 +101,10 @@ export {
 export {
   describeActiveStore,
   probeRecordingPersistence,
+  safeBaseUrl,
   AUTO_FLIP_MODE_SOURCE,
   PERSISTENCE_PROBE_TAG,
+  PERSISTENCE_PROBE_MARKER_PREFIX,
   type ActiveStoreDescription,
   type PersistenceProbeResult,
 } from "./lib/persistence-probe.js";
