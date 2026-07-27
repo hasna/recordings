@@ -2260,15 +2260,18 @@ public final class RecordingEngine: ObservableObject {
                 } else {
                     self.log("no audio captured")
                     self.pipelineDeliveryGate.abandonPipeline(pipelineGeneration)
-                    self.finish(resolved.failureStatus ?? RecordingAttemptAlert.noAudioCaptured.message)
                     // The one failure the user has no other way to notice: nothing was typed,
                     // nothing appeared, and the status line lives behind a click on a menu-bar
-                    // glyph that never changed. `finish` owns statusMessage/flowPhase here
-                    // (its message can be more specific), so only the glyph is added.
-                    self.setBlockedReason(
-                        RecordingAttemptAlert.noAudioCaptured.message,
-                        for: .pressConsumed
-                    )
+                    // glyph that never changed. So disclose it on the glyph too.
+                    //
+                    // One message, used for both. `MenuBarPresentation` renders the blocked
+                    // state as `statusText = blockedReason`, so passing the generic constant here
+                    // while `finish` held a specific `failureStatus` would replace the specific
+                    // diagnosis with "No audio captured" in every surface that reads the
+                    // presentation — losing the more useful of the two.
+                    let failure = resolved.failureStatus ?? RecordingAttemptAlert.noAudioCaptured.message
+                    self.finish(failure)
+                    self.setBlockedReason(failure, for: .pressConsumed)
                 }
             }
 

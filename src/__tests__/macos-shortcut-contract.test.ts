@@ -362,9 +362,30 @@ describe("blocked state is visible in the always-on surface", () => {
   );
 
   test("the presentation takes the blocked reason instead of discarding statusMessage", () => {
-    expect(presentationSource).toContain("blockedReason: String? = nil");
+    expect(presentationSource).toContain("blockedReason: String?");
     expect(presentationSource).toContain("} else if let blockedReason, !blockedReason.isEmpty {");
     expect(presentationSource).toContain("public let isBlocked: Bool");
+  });
+
+  /**
+   * `blockedReason` was declared `String? = nil`, and the default was not theoretical:
+   * `App/RuntimeSmoke.swift` omitted the argument and compiled, so that surface rendered every
+   * blocked state as plain idle. `nil` is this argument's invisible value — the same property
+   * that denies `isWarmingUpCapture` a default two lines above — so it does not get one either.
+   */
+  test("no menu-bar surface can omit the blocked reason", () => {
+    expect(presentationSource).not.toContain("blockedReason: String? = nil");
+    for (const file of [
+      "src/native/Recordings/App/MenuBarStatusView.swift",
+      "src/native/Recordings/App/RuntimeSmoke.swift",
+    ]) {
+      const source = readFileSync(file, "utf8");
+      const sites = source.match(/MenuBarPresentation\(\n(?:.*\n)*?\s*\)/g) ?? [];
+      expect(sites.length, `no call sites found in ${file}`).toBeGreaterThan(0);
+      for (const site of sites) {
+        expect(site, `${file}: call site omits blockedReason`).toContain("blockedReason:");
+      }
+    }
   });
 
   test("blocked changes BOTH the icon and the accessibility label", () => {

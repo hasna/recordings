@@ -120,6 +120,33 @@ describe("native capture warm-up contract", () => {
     // `confirmCaptureIsLive`. Order is load-bearing, not incidental.
     expect(abandon.indexOf("recordingGeneration &+= 1")).toBeLessThan(stopped);
 
+    // M2: ordering is not enough — the stop must also be REACHABLE. `guard isWarmingUpCapture`
+    // plus `confirmCaptureIsLive` make `isRecording` always false in this body, so wrapping the
+    // stop in `if isRecording { }` preserves every string and every index above while leaving
+    // the microphone open and the macOS in-use indicator lit. Nothing may guard it.
+    const stopLine = abandon.slice(abandon.lastIndexOf("\n", stopped) + 1, abandon.indexOf("\n", stopped));
+    expect(stopLine.trim(), "recorder?.stop() must stand alone, not trail a condition").toBe(
+      "recorder?.stop()",
+    );
+    const beforeStop = abandon.slice(captured, stopped);
+    for (const conditional of ["if ", "guard ", "switch "]) {
+      expect(
+        beforeStop,
+        `recorder?.stop() must not be conditional (found "${conditional}" between capture and stop)`,
+      ).not.toContain(conditional);
+    }
+
+    // M3: the disclosure calls `updateStatus()`, which early-returns while `captureIsActive`.
+    // Disclosing before the flags are cleared leaves the Record pane showing a live recording
+    // that already ended.
+    const disclosed = abandon.indexOf("discloseEmptyAttempt(");
+    expect(disclosed, "abandon must disclose the outcome").toBeGreaterThan(-1);
+    expect(
+      abandon.indexOf("isWarmingUpCapture = false"),
+      "the warm-up flag must be cleared before the disclosure, or updateStatus() no-ops",
+    ).toBeLessThan(disclosed);
+    expect(abandon.indexOf("isRecording = false")).toBeLessThan(disclosed);
+
     // A recorder that throws must not leave the warming flag set either.
     const catchBlock = region(engine, 'log("native recorder failed error=', "\n        }\n");
     expect(catchBlock, "the failed-start path must clear the warming flag").toContain(
@@ -189,9 +216,20 @@ describe("native capture warm-up contract", () => {
     expect(disclose).toContain("setBlockedReason(alert.message, for: .pressConsumed)");
     expect(disclose).toContain("updateStatus()");
     // The pre-existing completed-but-empty recording was equally invisible and gets the same
-    // disclosure.
-    expect(engine).toContain("RecordingAttemptAlert.noAudioCaptured.message,");
-    expect(engine).toContain("for: .pressConsumed");
+    // disclosure — and it must be the SAME message. `MenuBarPresentation` renders the blocked
+    // state as `statusText = blockedReason`, so disclosing the generic constant while `finish`
+    // holds a specific `failureStatus` silently replaces the specific diagnosis with
+    // "No audio captured" in every surface that reads the presentation.
+    const noAudio = region(engine, 'log("no audio captured")', "\n                }\n");
+    expect(noAudio).toContain(
+      "let failure = resolved.failureStatus ?? RecordingAttemptAlert.noAudioCaptured.message",
+    );
+    expect(noAudio).toContain("self.finish(failure)");
+    expect(noAudio).toContain("self.setBlockedReason(failure, for: .pressConsumed)");
+    expect(
+      noAudio,
+      "the disclosure must reuse finish()'s message, not substitute the generic one",
+    ).not.toContain("setBlockedReason(\n");
     // No timer: a badge that expires on a surface the user had no reason to watch is not a
     // disclosure. This one survives until the next recording.
     expect(alert, "the message vocabulary must not own a lifetime").not.toContain(
@@ -230,6 +268,58 @@ describe("native capture warm-up contract", () => {
     expect(view).not.toMatch(/store\.engine\.isRecording \? "stop\.fill"/);
     expect(view).toContain('store.engine.captureIsActive ? "stop.fill"');
     expect(view).toContain("if store.engine.captureIsActive {");
+  });
+
+  /**
+   * M4 was the worst mutation this suite missed: a single `.filter { $0.key != .pressConsumed }`
+   * in the compositor writes the disclosure into `blockedReasons` and never publishes it.
+   * `blockedReason` stays nil, the glyph never changes, and the entire visibility feature becomes
+   * a silent no-op — with every other assertion still green.
+   */
+  test("the compositor publishes every source it was given", () => {
+    const engine = read("RecordingsLib/RecordingEngine.swift");
+    const compositor = methodBody(
+      engine,
+      "private func setBlockedReason(_ reason: String?, for source: BlockedReasonSource) {",
+    );
+    expect(compositor, "a filtered source is a source that never reaches the glyph").not.toContain(
+      ".filter",
+    );
+    // The composed value must be built from the whole dictionary and then published.
+    expect(compositor).toMatch(/blockedReasons\s*\n\s*\.sorted/);
+    expect(compositor).toContain("blockedReason = composed.isEmpty ? nil : composed");
+    // Both slots this branch writes must be reachable through it.
+    for (const source of [".pressConsumed", ".delivery"]) {
+      expect(engine, `no writer for ${source}`).toContain(`for: ${source}`);
+    }
+  });
+
+  /**
+   * M1: the two transient clears exist so a stale "press Cmd-V" cannot outlive its clipboard.
+   * Hoisted above the start gate they fire on a press the gate REFUSES, destroying a still-true
+   * instruction while no recording begins — the exact failure the comment beside them describes.
+   * The existing contract test only checked that the clears are present.
+   */
+  test("the transient reasons are cleared only once the start gate has passed", () => {
+    const engine = read("RecordingsLib/RecordingEngine.swift");
+    const startRecording = region(
+      engine,
+      "public func startRecording(trigger: RecordingTrigger = .manual) {",
+      "let myPID = ProcessInfo.processInfo.processIdentifier",
+    );
+    // Reached only when the gate passed, so it is the boundary the clears must sit behind.
+    const gatePassed = startRecording.indexOf('log("startRecording trigger=');
+    expect(gatePassed).toBeGreaterThan(-1);
+    // And the gate's own refusal path must precede that.
+    expect(startRecording.indexOf("guard Self.canBeginRecording(")).toBeLessThan(gatePassed);
+    for (const clear of [
+      "setBlockedReason(nil, for: .pressConsumed)",
+      "setBlockedReason(nil, for: .delivery)",
+    ]) {
+      const at = startRecording.indexOf(clear);
+      expect(at, `missing clear: ${clear}`).toBeGreaterThan(-1);
+      expect(at, `${clear} must not run on a press the gate refuses`).toBeGreaterThan(gatePassed);
+    }
   });
 
   test("the realtime session is not negotiated for a recorder that never started", () => {

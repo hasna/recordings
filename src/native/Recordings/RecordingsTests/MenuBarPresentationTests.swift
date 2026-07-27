@@ -11,7 +11,8 @@ struct MenuBarPresentationTests {
             isRecording: false,
             isWarmingUpCapture: false,
             canStartRecording: true,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            blockedReason: nil
         )
         #expect(presentation.iconName == "mic.fill")
         #expect(presentation.accessibilityLabel == "Recordings")
@@ -25,7 +26,8 @@ struct MenuBarPresentationTests {
             isRecording: true,
             isWarmingUpCapture: false,
             canStartRecording: false,
-            statusMessage: "Recording — release to stop"
+            statusMessage: "Recording — release to stop",
+            blockedReason: nil
         )
         #expect(presentation.iconName == "waveform")
         #expect(presentation.accessibilityLabel == "Recordings, recording")
@@ -40,7 +42,8 @@ struct MenuBarPresentationTests {
                 isRecording: false,
                 isWarmingUpCapture: false,
                 canStartRecording: false,
-                statusMessage: status
+                statusMessage: status,
+                blockedReason: nil
             )
             #expect(presentation.iconName == "ellipsis.circle", "expected busy icon for \(status)")
             #expect(!presentation.primaryActionEnabled, "Start must be disabled during \(status)")
@@ -61,7 +64,8 @@ struct MenuBarPresentationTests {
             isRecording: false,
             isWarmingUpCapture: false,
             canStartRecording: true,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            blockedReason: nil
         )
         let blocked = MenuBarPresentation(
             isRecording: false,
@@ -132,7 +136,8 @@ struct MenuBarPresentationTests {
             isRecording: false,
             isWarmingUpCapture: false,
             canStartRecording: false,
-            statusMessage: "Deciding..."
+            statusMessage: "Deciding...",
+            blockedReason: nil
         )
         #expect(!deciding.primaryActionEnabled)
         #expect(deciding.statusText == "Deciding")
@@ -147,7 +152,8 @@ struct MenuBarPresentationTests {
             isRecording: false,
             isWarmingUpCapture: true,
             canStartRecording: false,
-            statusMessage: "Recording — release to stop"
+            statusMessage: "Recording — release to stop",
+            blockedReason: nil
         )
         #expect(presentation.iconName == "waveform")
         #expect(presentation.accessibilityLabel == "Recordings, recording")

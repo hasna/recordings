@@ -25,7 +25,8 @@ final class RuntimeSmokeProbe: ObservableObject {
             // no warm-up window.
             isWarmingUpCapture: false,
             canStartRecording: phase == .idle,
-            statusMessage: phase == .transcribing ? "Transcribing" : "Ready"
+            statusMessage: phase == .transcribing ? "Transcribing" : "Ready",
+            blockedReason: nil
         )
     }
 
