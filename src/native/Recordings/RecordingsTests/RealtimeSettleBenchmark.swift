@@ -19,7 +19,9 @@ import Testing
 ///   RECORDINGS_BENCH_FINISH_BUDGET_MS finish budget passed to the client (default 10000,
 ///                                     deliberately far above production budgets so the
 ///                                     observed wait is the true settle latency)
-///   RECORDINGS_BENCH_HOME             home the API key is read from (default ~/.hasna/recordings)
+///   RECORDINGS_BENCH_HOME             home directory the API key is resolved under; the
+///                                     key store reads <home>/.hasna/recordings/config.json
+///                                     (default: the user home)
 ///
 /// Results are emitted as BENCH_RESULT lines on stdout, one per run.
 struct RealtimeSettleBenchmark {
@@ -36,8 +38,9 @@ struct RealtimeSettleBenchmark {
         try #require(!wavPaths.isEmpty, "RECORDINGS_BENCH_WAVS is required")
         let runsPerWav = Int(environment["RECORDINGS_BENCH_RUNS"] ?? "") ?? 5
         let finishBudget = UInt64(environment["RECORDINGS_BENCH_FINISH_BUDGET_MS"] ?? "") ?? 10_000
-        let keyHome = environment["RECORDINGS_BENCH_HOME"]
-            ?? "\(NSHomeDirectory())/.hasna/recordings"
+        // OpenAIAPIKeyStore appends .hasna/recordings/config.json to the home it is
+        // given, so this must be the user home itself — not the recordings directory.
+        let keyHome = environment["RECORDINGS_BENCH_HOME"] ?? NSHomeDirectory()
 
         let apiKey = OpenAIAPIKeyStore.load(homePath: keyHome)
         try #require(!apiKey.isEmpty, "no API key available from \(keyHome)")

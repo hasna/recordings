@@ -372,8 +372,11 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     }
 
     /// Commit buffered input, wait briefly for a final completed event, then close.
+    /// The settlement budget is the caller's decision (`RecordingEngine` scales it with
+    /// captured audio length); there is deliberately no default so a new call site cannot
+    /// silently reintroduce the fixed 700 ms budget this parameter replaced.
     public func finish(
-        timeoutMilliseconds: UInt64 = 700,
+        timeoutMilliseconds: UInt64,
         pipelineID: String? = nil,
         pipelineStartedUptimeMilliseconds: UInt64? = nil
     ) async -> RealtimeFinishResult {
@@ -630,7 +633,8 @@ public final class RealtimeTranscriptionClient: ObservableObject, @unchecked Sen
     /// old 500 ms value, 3 of 5 two-minute streaming sessions against the live
     /// endpoint were poisoned by one slow frame and demoted to the batch path.
     /// True connection stalls are still detected structurally: the bounded
-    /// outbound queue (256 KB ≈ 4 s of audio) overflows and fails the transport
+    /// outbound queue (262,144 bytes of raw 24 kHz/16-bit PCM ≈ 5.5 s of audio,
+    /// 262,144 ÷ 48,000 bytes/s) overflows and fails the transport
     /// if sends stop draining, and the settle budget bounds release latency
     /// regardless of this deadline.
     nonisolated static let outboundSendTimeoutMilliseconds: UInt64 = 2_500
@@ -856,7 +860,7 @@ extension RealtimeTranscriptionClient {
         _ operation: @escaping @MainActor @Sendable () async throws -> Void
     ) async -> Bool {
         await enqueueOutboundOperationTestHelper(
-            timeoutMilliseconds: 500,
+            timeoutMilliseconds: Self.outboundSendTimeoutMilliseconds,
             operation: operation,
             nowMilliseconds: Self.monotonicMilliseconds,
             sleepMilliseconds: { milliseconds in
