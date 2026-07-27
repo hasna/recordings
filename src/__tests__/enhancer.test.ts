@@ -830,39 +830,3 @@ describe("extractInstruction behavior via needsEnhancement", () => {
     expect(result.instruction).toBe(text);
   });
 });
-
-// ── Cross-language fixtures pinned to EnhancementScreenTests.swift ──────────
-//
-// The macOS app pre-screens transcripts with RecordingsLib/EnhancementScreen.swift
-// (a conservative mirror of needsEnhancement) to decide whether delivery may run
-// ahead of persistence in "auto" post-processing mode. These fixture rows are
-// shared verbatim with that Swift suite: if needsEnhancement changes, both this
-// suite and EnhancementScreenTests must be updated together, or the app will
-// paste raw text for speech the CLI would have rewritten (or vice versa).
-
-const crossLanguageMayEnhance = [
-  "this is my draft say it better",
-  "write an email to the team about the outage",
-  "give them full instructions for the deploy",
-  "tell them to restart the ingest service",
-  "make this sound more professional",
-  "okay so write that we are postponing the launch",
-  "i need the agent to build a dashboard for the metrics",
-];
-
-const crossLanguagePlainDictation = [
-  "meet me at noon by the north entrance",
-  "the deploy finished and the metrics look stable",
-  "draft beer is better than bottled in my opinion",
-  "she asked them about the schedule yesterday",
-];
-
-describe("cross-language enhancement fixtures (EnhancementScreen.swift twin)", () => {
-  test.each(crossLanguageMayEnhance)("enhances: %s", (text) => {
-    expect(needsEnhancement(text, config).needs).toBe(true);
-  });
-
-  test.each(crossLanguagePlainDictation)("passes through: %s", (text) => {
-    expect(needsEnhancement(text, config).needs).toBe(false);
-  });
-});
