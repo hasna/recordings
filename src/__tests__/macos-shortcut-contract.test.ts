@@ -7,6 +7,7 @@ import {
   sliceBetween,
   sliceBetweenUnique,
   swiftSourcesUnder,
+  withoutComments,
 } from "./helpers/source-assertions.js";
 
 import {
@@ -377,6 +378,27 @@ describe("blocked-trigger reporting contract", () => {
     expect(section).toContain("case .openAccessibilitySettings:");
     expect(section).toContain("case .chooseAnotherShortcut, .messageOnly:");
     expectOrder(section, "case .openAccessibilitySettings:", "openAccessibilitySettings()");
+
+    // Asserting the case LABELS exist says nothing about what those cases RENDER, and that gap is
+    // exactly the defect named at the top of this docstring. Offering the Accessibility button
+    // under `.chooseAnotherShortcut, .messageOnly` as well — a hotkey clash sent to a pane that
+    // does nothing for it — passed every assertion in this file at exit 0: `"Open Accessibility
+    // Settings"` occurred here only inside the comment above, and `EmptyView` occurred nowhere,
+    // while this same file uses `not.toContain` ten times. So pin the bodies, not the labels.
+    const remedyCalls = section.split("engine.openAccessibilitySettings()").length - 1;
+    expect(
+      remedyCalls,
+      "the trigger section must offer the Accessibility remedy exactly once, under its own case",
+    ).toBe(1);
+    // Bounded by the next SECTION rather than by an indentation literal, so a change in nesting
+    // depth cannot silently reslice this onto the wrong text; comments are stripped so prose about
+    // Accessibility elsewhere cannot satisfy or break it.
+    const noRemedyCase = withoutComments(
+      sliceBetween(section, "case .chooseAnotherShortcut, .messageOnly:", 'Section("Last Delivery")'),
+    );
+    expect(noRemedyCase).toContain("EmptyView()");
+    expect(noRemedyCase).not.toContain("Button(");
+    expect(noRemedyCase).not.toContain("Accessibility");
 
     // And the remedy mapping is the engine's, exhaustive, so a new source must decide rather than
     // inherit a button that does not fit it.

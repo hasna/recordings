@@ -660,12 +660,20 @@ describe("probe marker rendering", () => {
     // or ignored outright (a fresh `chalk.green("✓")` in the `console.log`) — an exhaustively tested
     // helper the renderer discards is the same vacuous check in a new place.
     //
-    // `sliceBetween`, not two bare `indexOf` calls: `if (probeFailed)` occurs TWICE in this file, so
-    // slicing to its first occurrence produced an EMPTY region and everything below it was vacuous.
+    // `sliceBetween`, not two bare `indexOf` calls: the exit-code decision occurs TWICE in this
+    // file, so slicing to its first occurrence produced an EMPTY region and everything below it was
+    // vacuous.
+    //
+    // The marker deliberately stops before the condition's closing paren. It was `if (probeFailed)`,
+    // and while this branch was open `main` gained `|| triggerFailed` (`f81cdc7`, "make check report
+    // the trigger and fail when nothing can fire"). The merge was CLEAN and this assertion still
+    // failed on the merged tree — a missing end marker, not a conflict — because the closed-paren
+    // spelling no longer existed. A guard bound to a boolean's full spelling breaks every time
+    // another failure source is added to it, which is the one change this line should expect.
     const persistenceBlock = sliceBetween(
       cli,
       "const persistenceMarker = renderPersistenceMarker(",
-      "if (probeFailed)",
+      "if (probeFailed",
       { minimumLength: 120 },
     );
     expect(persistenceBlock).toMatch(

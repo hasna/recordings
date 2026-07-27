@@ -189,32 +189,115 @@ describe("native paste delivery verification contract", () => {
       "focusedValue",
     ];
 
+    /// Where a Swift string literal starts at `index`, and what would close it.
+    ///
+    /// The KIND matters, and tracking it in one boolean was a hole: a lone `"` inside a `"""` block
+    /// — legal, and ordinary in a message that quotes something — flipped the flag to "back in
+    /// code", after which a `)` inside that literal closed the scanned region early. Raw literals
+    /// carry their own pound count (`#"…"#`), whose terminator is the quote followed by that many
+    /// `#` and whose escape is `\#` rather than a bare `\`.
+    function literalAt(
+      source: string,
+      index: number,
+    ): { quote: string; pounds: number; length: number } | null {
+      let pounds = 0;
+      while (source[index + pounds] === "#") pounds += 1;
+      const quoteAt = index + pounds;
+      if (source.startsWith('"""', quoteAt)) return { quote: '"""', pounds, length: pounds + 3 };
+      if (source[quoteAt] === '"') return { quote: '"', pounds, length: pounds + 1 };
+      return null;
+    }
+
     /// Region from `open` at `start` to its matching close. Logging expressions in this codebase
     /// span several lines — `logLine` is a `+`-chain of six string segments — so a per-line scan
     /// misses exactly the case that matters: a segment carrying the text on a continuation line.
+    ///
+    /// Delimiters count as STRUCTURE only in code. Inside a string literal or a comment they are
+    /// text, and counting them there truncated the scan — measured, not hypothesised: an unmatched
+    /// `)` in a `// read-back attempt 1)` comment inside the log call cut the scanned region to 45
+    /// characters, and `/* attempt 1) */` cut it to 35. In both cases the `\(field.value)` that
+    /// followed fell outside every scanned region, so the focused field's text — password fields
+    /// included — reached `Recordings.log` with the leak scan reporting nothing.
+    ///
+    /// The two failure directions are not symmetric, which is why this errs toward reading too far:
+    /// wrongly believing we are still inside a literal over-reads and at worst reports a leak that
+    /// is not there, while wrongly believing we are back in code ends the region early and HIDES
+    /// one. An unmatched delimiter therefore yields the remainder of the file, never a short region.
     function balancedRegion(source: string, start: number, open: string, close: string): string {
       const from = source.indexOf(open, start);
       if (from === -1) return "";
+      /// Innermost last. A `code` frame is an interpolation: `\(…)` is Swift, so its own quotes,
+      /// comments and parentheses are scanned as code and its closing `)` ends the interpolation
+      /// rather than the region.
+      type Frame =
+        | { kind: "code"; parens: number }
+        | { kind: "literal"; quote: string; pounds: number }
+        | { kind: "line" }
+        | { kind: "block"; depth: number };
+      const frames: Frame[] = [];
       let depth = 0;
-      let inString = false;
       for (let index = from; index < source.length; index += 1) {
-        const character = source[index];
-        // Delimiters inside a string literal are TEXT, not structure. Counting them let an
-        // unmatched `)` in a format string — `log("paste read-back attempt) baseline=\(x)")` —
-        // close the region early, so the interpolation that followed was never inspected and the
-        // leak went unseen. Swift interpolations are themselves balanced inside the quotes, so
-        // skipping the whole literal is safe; the characters still appear in the returned slice.
-        if (character === "\\") {
+        const frame = frames[frames.length - 1];
+        if (frame?.kind === "line") {
+          if (source[index] === "\n") frames.pop();
+          continue;
+        }
+        if (frame?.kind === "block") {
+          // `/* */` nests in Swift, so this is a depth, not a flag.
+          if (source.startsWith("/*", index)) {
+            frame.depth += 1;
+            index += 1;
+          } else if (source.startsWith("*/", index)) {
+            frame.depth -= 1;
+            index += 1;
+            if (frame.depth === 0) frames.pop();
+          }
+          continue;
+        }
+        if (frame?.kind === "literal") {
+          const pounds = "#".repeat(frame.pounds);
+          if (source[index] === "\\" && source.startsWith(pounds, index + 1)) {
+            if (source[index + 1 + frame.pounds] === "(") {
+              frames.push({ kind: "code", parens: 1 });
+              index += 1 + frame.pounds;
+            } else {
+              index += frame.pounds + 1;
+            }
+            continue;
+          }
+          const terminator = frame.quote + pounds;
+          if (source.startsWith(terminator, index)) {
+            frames.pop();
+            index += terminator.length - 1;
+          }
+          continue;
+        }
+        if (source.startsWith("//", index)) {
+          frames.push({ kind: "line" });
           index += 1;
           continue;
         }
-        if (character === '"') {
-          inString = !inString;
+        if (source.startsWith("/*", index)) {
+          frames.push({ kind: "block", depth: 1 });
+          index += 1;
           continue;
         }
-        if (inString) continue;
-        if (character === open) depth += 1;
-        else if (character === close) {
+        const literal = literalAt(source, index);
+        if (literal) {
+          frames.push({ kind: "literal", quote: literal.quote, pounds: literal.pounds });
+          index += literal.length - 1;
+          continue;
+        }
+        if (frame?.kind === "code") {
+          if (source[index] === "(") frame.parens += 1;
+          else if (source[index] === ")") {
+            frame.parens -= 1;
+            if (frame.parens === 0) frames.pop();
+          }
+          continue;
+        }
+        if (source[index] === open) depth += 1;
+        else if (source[index] === close) {
           depth -= 1;
           if (depth === 0) return source.slice(from, index + 1);
         }
@@ -238,8 +321,26 @@ describe("native paste delivery verification contract", () => {
       return regions.filter((region) => region.length > 0);
     }
 
+    /// Every `\(…)` in the region, matched by BALANCE rather than by `[^)]*`.
+    ///
+    /// `[^)]*` stopped at the first `)`, so `\(String(describing: attempts) + field.value)` captured
+    /// only `String(describing: attempts` — `field.value` fell entirely outside the capture and the
+    /// tainted-identifier check never saw the one identifier it exists to look for. That is the same
+    /// truncation class as the region bug above, one line away from it.
     function interpolationsIn(region: string): string[] {
-      return [...region.matchAll(/\\\(([^)]*)\)/g)].map((match) => match[1] ?? "");
+      const interpolations: string[] = [];
+      for (let index = 0; index < region.length; index += 1) {
+        if (region[index] !== "\\") continue;
+        let pounds = 0;
+        while (region[index + 1 + pounds] === "#") pounds += 1;
+        if (region[index + 1 + pounds] !== "(") continue;
+        const balanced = balancedRegion(region, index + 1 + pounds, "(", ")");
+        if (balanced.length < 2) continue;
+        // Interpolations nested inside this one are also reported on their own; over-reporting only
+        // adds taint checks, whereas skipping them would be the direction that hides a leak.
+        interpolations.push(balanced.slice(1, -1));
+      }
+      return interpolations;
     }
 
     /**
