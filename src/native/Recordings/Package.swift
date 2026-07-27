@@ -46,7 +46,12 @@ let package = Package(
         .executableTarget(
             name: "RecordingsUpdateBroker",
             dependencies: ["RecordingsUpdateProtocol", "RecordingsVerifierLauncher"],
-            path: "Updater/Broker"
+            path: "Updater/Broker",
+            // PeerIdentity resolves the XPC peer's audit token into a PID and EUID with
+            // audit_token_to_pid/_euid, which live in libbsm. Without this the broker
+            // compiles and then fails at link, which `swift build --target` does not
+            // surface because it stops short of linking the executable product.
+            linkerSettings: [.linkedLibrary("bsm")]
         ),
         .target(
             name: "RecordingsVerifierLauncher",
