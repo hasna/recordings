@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { evaluateSwiftCondition, withoutAnyComments } from "./helpers/source-assertions.js";
+import {
+  evaluateSwiftCondition,
+  matchingDelimiterIndex,
+  switchArmsByOutcome,
+  withoutAnyComments,
+} from "./helpers/source-assertions.js";
 
 /**
  * These helpers rewrite Swift source before other suites assert on it, so a defect here is not a
@@ -117,5 +122,83 @@ describe("evaluateSwiftCondition", () => {
     for (const inherited of ["toString", "constructor", "__proto__", "valueOf", "hasOwnProperty"]) {
       expect(() => evaluateSwiftCondition(inherited, { shouldRestore: true })).toThrow();
     }
+  });
+});
+
+describe("matchingDelimiterIndex", () => {
+  // Every case here exists because the previous implementation skipped literals with
+  // `indexOf('"', index + 1)`, which pairs an opening quote with an ESCAPED one. That was not a
+  // theoretical flaw: two phantom-literal tokens placed either side of a real
+  // `guard … else { return }` made the `else` block's brace read as a decision table's own, so an
+  // adjacency check saw the early exit as adjacent and passed while the defect was live.
+  //
+  // The branch also had zero coverage — flipping `if (character === '"')` to `if (false)` left the
+  // whole suite green, because no input in the repo needed it. It only ever fires once someone adds
+  // a literal, which is exactly the attack.
+  const close = (source: string): number =>
+    matchingDelimiterIndex(source, source.indexOf("{"), "{", "}");
+
+  test("matches the real brace, not one inside a string literal", () => {
+    expect(close('{ log("a }") }')).toBe('{ log("a }") }'.length - 1);
+  });
+
+  test("is not fooled by an escaped quote inside a literal", () => {
+    const source = '{ log("a\\"}") }';
+    expect(close(source)).toBe(source.length - 1);
+  });
+
+  test("handles multiline and raw literals containing braces and odd quotes", () => {
+    for (const source of ['{ let s = """\n  a"b }\n  """\n }', '{ let s = #"}"# }']) {
+      expect(close(source)).toBe(source.length - 1);
+    }
+  });
+
+  test("throws rather than reporting end-of-input as the closing position", () => {
+    expect(() => close("{ unclosed")).toThrow(/unbalanced/);
+  });
+});
+
+describe("switchArmsByOutcome", () => {
+  // Pinning an arm by its exact TEXT is wrong in both directions: it false-positives on a pure
+  // reorder of the case list, and it misses one outcome being split out of a group into its own arm
+  // with a different expression. A mapping is invariant under the first and catches the second.
+  const body = `
+            case .clipboardWriteFailed:
+                stillOwnsChangeCount
+            case .secureInputActive:
+                false
+            case .targetUnavailable, .clipboardOwnershipLost, .eventPostFailed, .pasted,
+                 .deliveryNotObserved, .deliveredUnverified:
+                stillOwnsPayload
+`;
+
+  test("maps every outcome in a multi-line, multi-outcome case list to its expression", () => {
+    const arms = switchArmsByOutcome(body);
+    expect(arms.get("clipboardWriteFailed")).toBe("stillOwnsChangeCount");
+    expect(arms.get("secureInputActive")).toBe("false");
+    expect(arms.get("deliveredUnverified")).toBe("stillOwnsPayload");
+    expect(arms.get("targetUnavailable")).toBe("stillOwnsPayload");
+    expect(arms.size).toBe(8);
+  });
+
+  test("is invariant under reordering a case list", () => {
+    const reordered = body.replace(
+      ".deliveryNotObserved, .deliveredUnverified:",
+      ".deliveredUnverified, .deliveryNotObserved:",
+    );
+    expect(switchArmsByOutcome(reordered)).toEqual(switchArmsByOutcome(body));
+  });
+
+  test("sees an outcome split out of a group with a different expression", () => {
+    const split = body.replace(
+      "case .targetUnavailable, .clipboardOwnershipLost",
+      "case .targetUnavailable:\n                false\n            case .clipboardOwnershipLost",
+    );
+    expect(switchArmsByOutcome(split).get("targetUnavailable")).toBe("false");
+  });
+
+  test("records a default arm under its own key, so its presence is assertable", () => {
+    expect(switchArmsByOutcome(`${body}            default:\n                true\n`).has("default")).toBe(true);
+    expect(switchArmsByOutcome(body).has("default")).toBe(false);
   });
 });

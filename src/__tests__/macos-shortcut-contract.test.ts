@@ -8,6 +8,7 @@ import {
   expectOrder,
   sliceBetween,
   sliceBetweenUnique,
+  switchArmsByOutcome,
   swiftSourcesUnder,
   withoutAnyComments,
   withoutComments,
@@ -800,14 +801,33 @@ describe("secure-input delivery contract", () => {
     const settlement = withoutAnyComments(
       sliceBetween(engineSource, "let shouldRestore = switch outcome {", "previousClipboard.restore("),
     );
-    expect(settlement).toContain("case .secureInputActive:\n                false");
-    // The other outcomes still honour the opt-in — asserted on the ARM, not on any mention of the
-    // identifier anywhere in the region. `toContain("stillOwnsPayload")` alone was satisfied by a
-    // plain `_ = stillOwnsPayload` statement while the arm itself had been replaced by `true`,
-    // deleting the opt-in. Stripping comments closed the prose route; this closes the class.
-    expect(settlement).toContain(
-      ".deliveryNotObserved, .deliveredUnverified:\n                stillOwnsPayload",
+    // The whole table as a MAPPING from outcome to expression — not as arm text. Text got both
+    // directions wrong: it false-positived on a pure reorder of the case list, and it missed
+    // splitting one outcome out of the group into its own arm with a different expression (giving
+    // `.targetUnavailable` a `false` arm left the six-outcome needle intact and survived at EXIT=0,
+    // so a target-unavailable failure never restored though the owner opted in and we still held the
+    // payload). A mapping is invariant under both, and a `_ = stillOwnsPayload` statement elsewhere
+    // in the region cannot satisfy it either.
+    const decision = switchArmsByOutcome(
+      sliceBetween(settlement, "switch outcome {", "\n            }"),
     );
+    expect(decision.get("secureInputActive")).toBe("false");
+    expect(decision.get("clipboardWriteFailed")).toBe("stillOwnsChangeCount");
+    for (const outcome of [
+      "targetUnavailable",
+      "clipboardOwnershipLost",
+      "eventPostFailed",
+      "pasted",
+      "deliveryNotObserved",
+      "deliveredUnverified",
+    ]) {
+      expect(decision.get(outcome), `${outcome} must honour the restoreClipboard opt-in`).toBe(
+        "stillOwnsPayload",
+      );
+    }
+    // Exhaustive, and no `default:` to swallow a new outcome into the restoring group.
+    expect(decision.has("default")).toBe(false);
+    expect(decision.size).toBe(8);
 
     // Both branches of the message must promise the clipboard, because both keep it.
     expect(engineSource).toContain("transcript kept on the clipboard ");
