@@ -34,10 +34,15 @@ jobs:
   typescript:
     name: TypeScript (Linux — native/Swift NOT covered here)
     runs-on: ubuntu-24.04
-    # Set from measurement, not from optimism. Run 30302342895 on this runner: 974 tests across 51
-    # files in 23.30s, plus macos-app-lifecycle alone at 358.85s, so the whole 54-file suite is
-    # ~6.5 minutes and the job about 8. Thirty leaves roughly 3.7x headroom, which is enough to
-    # absorb a slow runner without letting a genuinely hung suite sit for three quarters of an hour.
+    # Set from measurement, not from optimism. Run 30303366777 on this runner ran the whole suite —
+    # 1193 tests across 55 files — in 359.69s, for a total job time of 6m21s. Thirty minutes is
+    # ~4.7x headroom: enough to absorb a slow runner, short enough that a genuinely hung suite is not
+    # left sitting for three quarters of an hour.
+    #
+    # Nearly all of that 359s is macos-app-lifecycle, which took 358.85s on its own in run
+    # 30302342895. Combining it with the other 54 files cost essentially nothing, which also settles
+    # the question that mattered: bun runs test files sequentially in one process, so the shared-/tmp
+    # interference that breaks these suites on a busy workstation does not occur within a single run.
     timeout-minutes: 30
     env:
       # Raised above bun's 5000ms default because a subprocess-spawning test that trips the default
