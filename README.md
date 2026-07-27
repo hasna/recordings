@@ -138,6 +138,27 @@ recordings app install \
   --approved-target-identity-sha256 AUTHENTICATED_TAILSCALE_NODE_ID_SHA256 \
   --acknowledge-local-signing-and-permissions \
   --launch
+
+# Reinstalling or repairing an already-installed local-only app additionally needs
+# --allow-adhoc-identity-migration. Local-only builds are ad-hoc signed, so every rebuild
+# produces a new CDHash; replacing the installed app is therefore a real identity migration
+# and the installer refuses it with exit 1 until you approve it once, explicitly. Approving
+# it voids the Microphone and Accessibility grants held by the replaced app -- macOS keys
+# those to code identity and the installer cannot restore them -- so expect to grant both
+# again afterwards. Run `scripts/install_macos_app.sh --help` for the full argument list.
+recordings app install \
+  --artifact /path/to/Recordings-0.2.13-macos-station06-local-only.zip \
+  --manifest /path/to/Recordings-0.2.13-macos-station06-local-only.manifest.json \
+  --manifest-sha256 AUTHENTICATED_MANIFEST_SHA256 \
+  --expected-source-sha APPROVED_40_CHARACTER_COMMIT_SHA \
+  --expected-version 0.2.13 \
+  --artifact-policy local-only \
+  --approved-target station06 \
+  --approved-target-identity-kind tailscale_node_id_sha256 \
+  --approved-target-identity-sha256 AUTHENTICATED_TAILSCALE_NODE_ID_SHA256 \
+  --acknowledge-local-signing-and-permissions \
+  --allow-adhoc-identity-migration \
+  --launch
 swift test                    # run the native test suite
 ```
 

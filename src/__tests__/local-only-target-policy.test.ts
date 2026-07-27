@@ -496,6 +496,16 @@ describe("local-only approved target policy", () => {
           { mode: 0o644 },
         );
       }
+      // The installer sources the identity-migration guard and fails closed on
+      // "Packaged identity-migration guard is missing." before it reaches the target gate,
+      // so a fixture without this file makes every assertion in this harness compare
+      // against the wrong failure. Both installer-gate tests here went red on exactly that
+      // message when the guard landed, which is the whole reason the gate is fail-closed.
+      writeFileSync(
+        join(scripts, "enforce_identity_migration.sh"),
+        readRepositoryFile("scripts/enforce_identity_migration.sh"),
+        { mode: 0o644 },
+      );
       const policy = join(scripts, "policy", "local-only-approved-targets.txt");
       if (options.policyContents !== null) {
         writeFileSync(

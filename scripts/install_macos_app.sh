@@ -146,6 +146,63 @@ require_absolute_canonical_owned_home() {
   }
 }
 
+# Every accepted argument, because until now there was no usage output at all and an
+# unrecognized argument printed only "Unknown argument". That mattered most for
+# --allow-adhoc-identity-migration: the identity-migration gate refuses a local-only
+# reinstall by default, and an operator repairing a station had no way to discover the
+# approval flag except by reading the refusal on stderr or the script itself.
+print_usage() {
+  cat <<'USAGE'
+Usage: install_macos_app.sh --artifact <zip> --manifest <json> [options]
+
+Installs a Recordings macOS app artifact transactionally. Normally invoked through
+`recordings app install`, which forwards these arguments.
+
+Artifact and version:
+  --artifact <path>                    Finalized artifact archive to install
+  --manifest <path>                    Artifact manifest describing it
+  --manifest-sha256 <sha256>           Authenticated digest of the manifest
+  --expected-source-sha <sha>          Approved 40-character source commit
+  --expected-version <version>         Version the artifact must declare
+  --expected-team-id <team-id>         Required Apple Developer team identifier
+
+Target selection:
+  --expected-hostname <name>           Require this live short hostname before mutating
+  --artifact-policy <release|local-only>
+                                       Trust policy to evaluate the artifact under
+  --approved-target <name>             Approved target for a local-only artifact
+  --approved-target-identity-kind <kind>
+                                       hardware_uuid_sha256 or tailscale_node_id_sha256
+  --approved-target-identity-sha256 <sha256>
+                                       Authenticated digest of the target identity
+
+Identity migration. Replacing an installed app with one signed by a different identity
+voids the Microphone and Accessibility grants the installed app holds; macOS keys those
+grants to code identity, and they cannot be restored by the installer. Both approvals are
+one-shot and deliberately distinct: approving a release signer rotation is not approving
+an ad-hoc replacement of a certificate-rooted install.
+  --allow-signing-identity-migration   Approve one reviewed release signer change
+  --expected-old-identity-sha256 <sha256>
+                                       Exact installed identity approved for migration
+  --expected-new-identity-sha256 <sha256>
+                                       Exact candidate identity approved for migration
+  --allow-adhoc-identity-migration     Approve replacing an installed app with an ad-hoc
+                                       signed local-only build. Required for essentially
+                                       every local-only reinstall, including a repair
+                                       install of the same version, because each ad-hoc
+                                       rebuild produces a new CDHash and is therefore a
+                                       real identity migration. Accepts that Microphone
+                                       and Accessibility must be granted again afterwards.
+  --acknowledge-local-signing-and-permissions
+                                       Acknowledge local-only ad-hoc signing up front
+
+Launch and help:
+  --launch                             Launch the app after installing
+  --launch-timeout <seconds>           Seconds to wait for the launch to settle
+  --help, -h                           Print this message and exit 0
+USAGE
+}
+
 ARTIFACT_PATH=""
 MANIFEST_PATH=""
 EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
@@ -162,6 +219,7 @@ APPROVED_TARGET_IDENTITY_KIND=""
 APPROVED_TARGET_IDENTITY_SHA256="none"
 ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS=0
 ALLOW_IDENTITY_MIGRATION=0
+ALLOW_ADHOC_IDENTITY_MIGRATION=0
 LAUNCH_APP=0
 LAUNCH_TIMEOUT_SECONDS="${RECORDINGS_LAUNCH_TIMEOUT_SECONDS:-10}"
 
@@ -232,6 +290,12 @@ while [ "$#" -gt 0 ]; do
       ALLOW_IDENTITY_MIGRATION=1
       shift
       ;;
+    # Distinct from --allow-signing-identity-migration: approving a release signer
+    # rotation is not approving an ad-hoc replacement of a certificate-rooted install.
+    --allow-adhoc-identity-migration)
+      ALLOW_ADHOC_IDENTITY_MIGRATION=1
+      shift
+      ;;
     --launch)
       LAUNCH_APP=1
       shift
@@ -240,8 +304,13 @@ while [ "$#" -gt 0 ]; do
       LAUNCH_TIMEOUT_SECONDS="${2:-}"
       shift 2
       ;;
+    --help | -h)
+      print_usage
+      exit 0
+      ;;
     *)
       echo "Unknown argument: $1" >&2
+      echo "Run with --help for the accepted arguments." >&2
       exit 2
       ;;
   esac
@@ -310,6 +379,19 @@ PACKAGE_ROOT="$(cd "$("$DIRNAME_EXECUTABLE" "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_TOOL="${PACKAGE_ROOT}/scripts/macos_artifact.ts"
 RUNTIME_SMOKE="${PACKAGE_ROOT}/scripts/smoke_macos_app.sh"
 TAILSCALE_RESOLVER="${PACKAGE_ROOT}/scripts/resolve_tailscale_cli.sh"
+# Sourced here, before either policy branch, so a missing or unusable guard denies every
+# install rather than only the ones that happen to reach it.
+IDENTITY_MIGRATION_GUARD="${PACKAGE_ROOT}/scripts/enforce_identity_migration.sh"
+[ -f "$IDENTITY_MIGRATION_GUARD" ] && [ ! -L "$IDENTITY_MIGRATION_GUARD" ] || {
+  echo "Packaged identity-migration guard is missing." >&2
+  exit 2
+}
+# shellcheck source=/dev/null
+. "$IDENTITY_MIGRATION_GUARD"
+declare -F recordings_enforce_identity_migration >/dev/null || {
+  echo "Packaged identity-migration guard does not define its enforcement function." >&2
+  exit 2
+}
 if [ "$ARTIFACT_POLICY" = "release" ]; then
   if [ -z "$EXPECTED_TEAM_ID" ]; then
     echo "Release install requires --expected-team-id or RECORDINGS_EXPECTED_TEAM_IDENTIFIER." >&2
@@ -329,6 +411,10 @@ if [ "$ARTIFACT_POLICY" = "release" ]; then
   fi
   if [ "$ACKNOWLEDGE_LOCAL_SIGNING_AND_PERMISSIONS" -eq 1 ]; then
     echo "Local-only acknowledgment cannot be supplied for a release artifact." >&2
+    exit 2
+  fi
+  if [ "$ALLOW_ADHOC_IDENTITY_MIGRATION" -eq 1 ]; then
+    echo "Ad-hoc identity-migration approval is not valid for a release artifact; use --allow-signing-identity-migration with the exact old/new identity digests." >&2
     exit 2
   fi
 else
@@ -400,7 +486,7 @@ else
     exit 1
   fi
   if [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ] || [ -n "$EXPECTED_OLD_IDENTITY_SHA256" ] || [ -n "$EXPECTED_NEW_IDENTITY_SHA256" ]; then
-    echo "Release identity-migration flags are not valid for local-only artifacts." >&2
+    echo "Release identity-migration flags are not valid for local-only artifacts; an ad-hoc replacement is approved with --allow-adhoc-identity-migration." >&2
     exit 2
   fi
   EXPECTED_TEAM_ID="ADHOC"
@@ -1669,21 +1755,18 @@ for existing_app in ${MANAGEABLE_APPS[@]+"${MANAGEABLE_APPS[@]}"}; do
     identity_migration=1
   fi
 done
-if [ "$ARTIFACT_POLICY" = "release" ] && [ "$identity_migration" -eq 1 ] && [ "$ALLOW_IDENTITY_MIGRATION" -ne 1 ]; then
-  echo "Candidate and existing app designated requirements are not mutually compatible; review the signer change and rerun once with --allow-signing-identity-migration." >&2
-  exit 1
-fi
-if [ "$ARTIFACT_POLICY" = "release" ] && [ "$identity_migration" -eq 1 ] && {
-     [ "$previous_identity_sha256" != "$EXPECTED_OLD_IDENTITY_SHA256" ] ||
-     [ "$candidate_identity_sha256" != "$EXPECTED_NEW_IDENTITY_SHA256" ];
-   }; then
-  echo "Signing identity migration does not match the exact operator-approved old/new identities." >&2
-  exit 1
-fi
-if [ "$ARTIFACT_POLICY" = "release" ] && [ "$identity_migration" -eq 0 ] && [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ]; then
-  echo "Identity migration approval was supplied but no identity migration is required." >&2
-  exit 1
-fi
+# Enforced for every artifact policy. A local-only artifact is ad-hoc signed, so this is
+# the point at which an install would void the installed app's Microphone and
+# Accessibility grants; the printed warning further down is not a gate.
+recordings_enforce_identity_migration \
+  "$ARTIFACT_POLICY" \
+  "$identity_migration" \
+  "$ALLOW_IDENTITY_MIGRATION" \
+  "$ALLOW_ADHOC_IDENTITY_MIGRATION" \
+  "$previous_identity_sha256" \
+  "$candidate_identity_sha256" \
+  "$EXPECTED_OLD_IDENTITY_SHA256" \
+  "$EXPECTED_NEW_IDENTITY_SHA256" || exit 1
 
 TRANSACTION_DIR="$("$MKTEMP_EXECUTABLE" -d "${APP_PARENT}/.Recordings-transaction.XXXXXX")"
 TRANSACTION_NONCE="$("$BUN_EXECUTABLE" -e 'import { randomUUID } from "node:crypto"; process.stdout.write(randomUUID())')"
@@ -1976,7 +2059,12 @@ fi
 
 if [ "$ARTIFACT_POLICY" = "local_only" ]; then
   echo "Installed local-only Recordings.app for ${APPROVED_TARGET}; this artifact is ad-hoc signed and non-notarized."
-  echo "Microphone or Accessibility may require manual reauthorization after this code-identity change."
+  if [ "$identity_migration" -eq 1 ]; then
+    # Not a maybe: the designated requirement did change, under an explicit approval.
+    echo "Code identity changed under --allow-adhoc-identity-migration; the Microphone and Accessibility grants held by the replaced app no longer apply and must be reauthorized."
+  else
+    echo "Microphone or Accessibility may require manual reauthorization if this code identity differs from the last authorized one."
+  fi
 elif [ "$identity_migration" -eq 1 ]; then
   echo "Installed a new signing identity; macOS will require one-time permission approval for this migration."
 else
