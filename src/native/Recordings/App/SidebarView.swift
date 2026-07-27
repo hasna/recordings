@@ -37,7 +37,7 @@ struct SidebarView: View {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { store.pane = .record }
             } label: {
                 rowLabel(icon: "mic.fill", label: "Record", count: nil,
-                         selected: store.pane == .record, accentDot: store.engine.isRecording)
+                         selected: store.pane == .record, accentDot: store.engine.captureIsActive)
             }
             .buttonStyle(.plain)
         }

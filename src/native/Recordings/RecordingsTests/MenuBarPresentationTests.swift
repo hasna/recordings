@@ -47,6 +47,66 @@ struct MenuBarPresentationTests {
         }
     }
 
+    @Test("the warm-up window presents as recording, never as busy or idle")
+    func warmUpPresentsAsRecording() {
+        // Between `recorder.start()` returning and the first PCM chunk the user is holding the
+        // key. `isRecording` is false there (no audio exists yet), so without this branch the
+        // glyph would drop to the busy ellipsis for ~100 ms mid-hold.
+        let presentation = MenuBarPresentation(
+            isRecording: false,
+            canStartRecording: false,
+            statusMessage: "Recording — release to stop",
+            isWarmingUpCapture: true
+        )
+        #expect(presentation.iconName == "waveform")
+        #expect(presentation.accessibilityLabel == "Recordings, recording")
+        #expect(presentation.statusText == "Recording")
+        #expect(presentation.primaryActionEnabled, "Stop must be live during warm-up")
+    }
+
+    @Test("an attempt that captured nothing changes the glyph itself")
+    func attemptAlertChangesTheGlyph() {
+        // Recordings is LSUIElement: a status line behind a click is not feedback. Each alert
+        // must be distinguishable from mic.fill / waveform / ellipsis.circle at a glance.
+        for alert in [RecordingAttemptAlert.releasedBeforeAudio, .noAudioCaptured] {
+            let presentation = MenuBarPresentation(
+                isRecording: false,
+                canStartRecording: true,
+                statusMessage: "Ready",
+                attemptAlert: alert
+            )
+            #expect(presentation.iconName == "mic.slash.fill", "expected the alert glyph for \(alert)")
+            #expect(presentation.iconName != "mic.fill")
+            #expect(presentation.iconName != "waveform")
+            #expect(presentation.iconName != "ellipsis.circle")
+            #expect(presentation.statusText == alert.message)
+            #expect(presentation.accessibilityLabel == "Recordings, \(alert.message.lowercased())")
+            #expect(presentation.primaryActionEnabled, "an alert is terminal — Start stays available")
+        }
+    }
+
+    @Test("a new recording outranks a still-visible alert")
+    func recordingOutranksAnAlert() {
+        let presentation = MenuBarPresentation(
+            isRecording: true,
+            canStartRecording: false,
+            statusMessage: "Recording — release to stop",
+            attemptAlert: .releasedBeforeAudio
+        )
+        #expect(presentation.iconName == "waveform")
+    }
+
+    @Test("an alert never offers a Start the engine would reject")
+    func alertKeepsTheStartGateTruthful() {
+        let presentation = MenuBarPresentation(
+            isRecording: false,
+            canStartRecording: false,
+            statusMessage: "Transcribing...",
+            attemptAlert: .noAudioCaptured
+        )
+        #expect(!presentation.primaryActionEnabled)
+    }
+
     @Test("presentation follows canStartRecording exactly, not isTranscribing alone")
     func presentationTracksTheStartGate() {
         // A pending intent decision keeps canStartRecording false even though

@@ -14,7 +14,9 @@ struct MenuBarStatusLabel: View {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
             canStartRecording: store.engine.canStartRecording,
-            statusMessage: store.engine.statusMessage
+            statusMessage: store.engine.statusMessage,
+            isWarmingUpCapture: store.engine.isWarmingUpCapture,
+            attemptAlert: store.engine.attemptAlert
         )
     }
 }
@@ -43,7 +45,7 @@ struct MenuBarStatusView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(store.engine.isRecording ? .red : .accentColor)
+            .tint(store.engine.captureIsActive ? .red : .accentColor)
             .disabled(!presentation.primaryActionEnabled)
 
             Divider()
@@ -73,27 +75,31 @@ struct MenuBarStatusView: View {
     }
 
     private var statusColor: Color {
-        store.engine.isRecording ? .red : .accentColor
+        store.engine.captureIsActive ? .red : .accentColor
     }
 
     private var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
             canStartRecording: store.engine.canStartRecording,
-            statusMessage: store.engine.statusMessage
+            statusMessage: store.engine.statusMessage,
+            isWarmingUpCapture: store.engine.isWarmingUpCapture,
+            attemptAlert: store.engine.attemptAlert
         )
     }
 
+    // Every affordance below reads `captureIsActive`, not `isRecording`: during the warm-up
+    // window the button must already be Stop, or a click there would silently start nothing.
     private var recordButtonTitle: String {
-        store.engine.isRecording ? "Stop and Transcribe" : "Start Recording"
+        store.engine.captureIsActive ? "Stop and Transcribe" : "Start Recording"
     }
 
     private var recordButtonIcon: String {
-        store.engine.isRecording ? "stop.fill" : "mic.fill"
+        store.engine.captureIsActive ? "stop.fill" : "mic.fill"
     }
 
     private func toggleRecording() {
-        if store.engine.isRecording {
+        if store.engine.captureIsActive {
             store.engine.stopAndTranscribe()
         } else {
             store.engine.startRecording()

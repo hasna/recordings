@@ -3,27 +3,54 @@ import Foundation
 import Testing
 @testable import RecordingsLib
 
-/// A recorder that starts instantly and records when it was asked to. Lets the production
-/// `startRecording` path run without microphone hardware or TCC grants.
+/// A recorder that starts instantly and records when it was asked to, and that can deliver its
+/// first PCM callback on demand. Lets the production `startRecording` path run without
+/// microphone hardware or TCC grants, including the warm-up window between `start()` returning
+/// and the first sample arriving.
 private final class FakePCMRecorder: PCMRecordingSource, @unchecked Sendable {
     private let lock = NSLock()
     private var startedFlag = false
+    private var stoppedFlag = false
+    private var onPCM: (@Sendable (Data) -> Void)?
 
     var started: Bool {
         lock.withLock { startedFlag }
+    }
+
+    var stopped: Bool {
+        lock.withLock { stoppedFlag }
+    }
+
+    func attach(onPCM: @escaping @Sendable (Data) -> Void) {
+        lock.withLock { self.onPCM = onPCM }
+    }
+
+    /// Delivers the recorder's first callback the way a real `AVAudioEngine` tap does, roughly
+    /// 100 ms after `start()` has already returned.
+    ///
+    /// `bytes: 0` is a deliberate test seam: it drives the engine's first-chunk promotion —
+    /// which is what the ordering tests below are about — while leaving the stream pipe empty,
+    /// so the pipeline still ends in the deterministic no-audio state instead of writing a WAV
+    /// and shelling out to the CLI. `PCMStreamPipe` skips empty chunks, and the production
+    /// recorder never emits one.
+    func emitFirstChunk(bytes: Int = 0) {
+        let callback = lock.withLock { onPCM }
+        callback?(Data(repeating: 0, count: bytes))
     }
 
     func start() throws {
         lock.withLock { startedFlag = true }
     }
 
-    func stop() {}
+    func stop() {
+        lock.withLock { stoppedFlag = true }
+    }
 }
 
 @MainActor
 private func makeStartableEngine(
     recorder: FakePCMRecorder,
-    selectionCapture: @escaping @Sendable (pid_t) -> AccessibilitySelectionToken?
+    selectionCapture: @escaping @Sendable (pid_t) -> AccessibilitySelectionToken? = { _ in nil }
 ) -> RecordingEngine {
     let engine = RecordingEngine()
     engine.openAIAPIKeyProvider = { "" }
@@ -33,10 +60,14 @@ private func makeStartableEngine(
     engine.frontmostAppSnapshot = {
         FrontmostAppSnapshot(pid: 99_999, bundleIdentifier: "com.example.editor", launchDate: Date())
     }
-    engine.recorderFactory = { _ in recorder }
+    engine.recorderFactory = { onPCM in
+        recorder.attach(onPCM: onPCM)
+        return recorder
+    }
     engine.selectionCapture = selectionCapture
     engine.focusedWindowTitleLookup = { _ in nil }
     engine.pasteInterceptorForTesting = { _, _, _ in }
+    engine.commandCLI = { _, _, _ in "ERROR: command CLI must not run in this test" }
     return engine
 }
 
@@ -53,10 +84,18 @@ private func waitUntil(
     return condition()
 }
 
+/// Drives the capture to live the way the recorder does, and waits for the MainActor hop that
+/// promotes it.
+@MainActor
+private func confirmCapture(_ engine: RecordingEngine, _ recorder: FakePCMRecorder) async -> Bool {
+    recorder.emitFirstChunk()
+    return await waitUntil { engine.isRecording }
+}
+
 @MainActor
 struct RecordingStartTimingTests {
     @Test("the recorder starts on keydown even while the AX selection capture is blocked")
-    func recorderStartDoesNotWaitOnSelectionCapture() {
+    func recorderStartDoesNotWaitOnSelectionCapture() async {
         let captureGate = DispatchSemaphore(value: 0)
         let recorder = FakePCMRecorder()
         let engine = makeStartableEngine(recorder: recorder) { _ in
@@ -72,8 +111,12 @@ struct RecordingStartTimingTests {
         // ordering the recorder is live before the capture has produced anything.
         engine.startRecording(trigger: .manual)
         #expect(recorder.started, "recorder must start while AX capture is still pending")
-        #expect(engine.isRecording)
+        #expect(engine.isWarmingUpCapture, "start() returning is warm-up, not captured audio")
+        #expect(engine.captureIsActive)
         #expect(engine.flowPhase == .listening)
+
+        #expect(await confirmCapture(engine, recorder))
+        #expect(!engine.isWarmingUpCapture)
 
         captureGate.signal()
         engine.cancelRecording()
@@ -90,7 +133,7 @@ struct RecordingStartTimingTests {
         }
 
         engine.startRecording(trigger: .manual)
-        #expect(engine.isRecording)
+        #expect(await confirmCapture(engine, recorder))
         engine.stopAndTranscribe()
         #expect(engine.isTranscribing)
 
@@ -111,7 +154,7 @@ struct RecordingStartTimingTests {
     }
 
     @Test("a released key before the capture resolves still cancels cleanly")
-    func cancelDuringPendingCapture() {
+    func cancelDuringPendingCapture() async {
         let captureGate = DispatchSemaphore(value: 0)
         let recorder = FakePCMRecorder()
         let engine = makeStartableEngine(recorder: recorder) { _ in
@@ -119,11 +162,136 @@ struct RecordingStartTimingTests {
             return nil
         }
         engine.startRecording(trigger: .manual)
-        #expect(engine.isRecording)
+        #expect(await confirmCapture(engine, recorder))
         engine.cancelRecording()
         #expect(!engine.isRecording)
         #expect(engine.flowPhase == .idle)
         captureGate.signal()
         #expect(engine.canStartRecording)
+    }
+}
+
+/// The defect this suite exists for: `recorder.start()` returns roughly 100 ms before the
+/// microphone delivers a sample, so a trigger released inside that window captured nothing at
+/// all. The engine already had the right branch for it — "released before recording started;
+/// cancelling pending start" — and it was simply unreachable, because `isRecording` flipped on
+/// `start()` returning. A 539 ms hold on the owner's machine missed the branch by 20 ms and ran
+/// the whole transcription pipeline over an empty buffer, silently.
+@MainActor
+struct RecordingCaptureWarmUpTests {
+    @Test("a trigger released between recorder start and the first PCM chunk cancels instead of transcribing")
+    func releaseDuringWarmUpCancelsInsteadOfTranscribing() {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .fnKey)
+        #expect(recorder.started)
+        #expect(engine.isWarmingUpCapture)
+        #expect(!engine.isRecording, "no audio has arrived, so nothing is being recorded yet")
+
+        engine.handleTriggerRelease(.fnKey)
+
+        #expect(!engine.isTranscribing, "an empty buffer must never enter the transcription pipeline")
+        #expect(!engine.captureIsActive)
+        #expect(recorder.stopped, "the microphone must be released, not left open")
+        #expect(engine.attemptAlert == .releasedBeforeAudio)
+        #expect(engine.flowPhase == .failed(RecordingAttemptAlert.releasedBeforeAudio.message))
+        #expect(engine.statusMessage == RecordingAttemptAlert.releasedBeforeAudio.message)
+        #expect(engine.canStartRecording, "the engine must be immediately ready to try again")
+    }
+
+    @Test("the configurable shortcut takes the same path as fn")
+    func releaseDuringWarmUpCancelsForTheKeyboardShortcut() {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .keyboardShortcut)
+        #expect(engine.isWarmingUpCapture)
+        engine.handleTriggerRelease(.keyboardShortcut)
+
+        #expect(!engine.isTranscribing)
+        #expect(engine.attemptAlert == .releasedBeforeAudio)
+    }
+
+    @Test("a release after the first PCM chunk transcribes as before")
+    func releaseAfterFirstChunkTranscribes() async {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .fnKey)
+        #expect(await confirmCapture(engine, recorder))
+        #expect(!engine.isWarmingUpCapture)
+
+        engine.handleTriggerRelease(.fnKey)
+        #expect(engine.isTranscribing, "audio existed, so the pipeline must run")
+        #expect(engine.attemptAlert == nil)
+    }
+
+    @Test("a PCM chunk that lands after the attempt was abandoned cannot resurrect it")
+    func lateChunkCannotResurrectAnAbandonedAttempt() async {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .fnKey)
+        engine.handleTriggerRelease(.fnKey)
+        #expect(!engine.captureIsActive)
+
+        // The recorder's delivery queue can still hand over a buffer that was in flight when
+        // the tap was torn down.
+        recorder.emitFirstChunk()
+        try? await Task.sleep(for: .milliseconds(150))
+
+        #expect(!engine.isRecording)
+        #expect(!engine.captureIsActive)
+        #expect(engine.canStartRecording)
+    }
+
+    @Test("Stop clicked during warm-up abandons instead of transcribing silence")
+    func stopDuringWarmUpAbandons() {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .manual)
+        #expect(engine.isWarmingUpCapture)
+        engine.stopAndTranscribe()
+
+        #expect(!engine.isTranscribing)
+        #expect(engine.attemptAlert == .releasedBeforeAudio)
+    }
+
+    @Test("Discard during warm-up tears down without raising an alert the user does not need")
+    func discardDuringWarmUpIsSilent() {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .manual)
+        engine.cancelRecording()
+
+        #expect(!engine.captureIsActive)
+        #expect(recorder.stopped)
+        #expect(engine.attemptAlert == nil, "the user asked for the discard; do not alarm them")
+        #expect(engine.flowPhase == .idle)
+    }
+
+    @Test("warm-up blocks a second start, and a new start clears the previous alert")
+    func warmUpBlocksASecondStartAndANewStartClearsTheAlert() {
+        let recorder = FakePCMRecorder()
+        let engine = makeStartableEngine(recorder: recorder)
+
+        engine.startRecording(trigger: .manual)
+        #expect(engine.isWarmingUpCapture)
+        #expect(!engine.canStartRecording, "the surface must not offer Start during warm-up")
+        #expect(!RecordingEngine.canBeginRecording(
+            isRecording: false,
+            isTranscribing: false,
+            isWarmingUpCapture: true
+        ))
+
+        // `.manual` has no key to release; Stop is the only way out of a warming manual start.
+        engine.stopAndTranscribe()
+        #expect(engine.attemptAlert == .releasedBeforeAudio)
+
+        engine.startRecording(trigger: .manual)
+        #expect(engine.attemptAlert == nil, "a live recording must not sit under a stale alert")
     }
 }
