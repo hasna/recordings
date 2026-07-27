@@ -42,10 +42,14 @@ function read(relativePath: string): string {
  * general, and a region assertion over the wrong text reads exactly like a satisfied one.
  */
 function arrayLiteralAfter(source: string, marker: string): string {
-  const occurrences = source.split(marker).length - 1;
+  // Counted on the comment-stripped text, not the raw file, so the uniqueness claim is about code.
+  // Counting raw would fail loudly on a marker quoted in a comment — fail-closed, but it would
+  // report "not unique" about a file whose code has exactly one, and send the reader to the wrong
+  // place.
+  const scanned = withoutAnyComments(source);
+  const occurrences = scanned.split(marker).length - 1;
   expect(occurrences, `array marker is missing entirely or not unique (${occurrences}x): ${marker}`)
     .toBe(1);
-  const scanned = withoutAnyComments(source);
   const openIndex = scanned.indexOf(marker) + marker.length - 1;
   return scanned.slice(openIndex, matchingDelimiterIndex(scanned, openIndex, "[", "]") + 1);
 }
