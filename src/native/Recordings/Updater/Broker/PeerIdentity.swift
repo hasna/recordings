@@ -160,12 +160,19 @@ enum RootTrustStore {
 /// change or remove it in any macOS update.
 ///
 /// Two things keep that risk bounded, and both must stay:
-///   1. `authenticate` checks `responds(to:)` before casting, so a macOS that drops the
-///      property makes peer authentication throw rather than read a garbage struct.
+///   1. `authenticate` checks `responds(to:)` before casting, so a macOS that REMOVES the property
+///      makes peer authentication throw rather than read a garbage struct. That is the limit of what
+///      guard 1 proves: it establishes only that a selector of that name exists, and says nothing
+///      about its return type, so a macOS that CHANGED the return type would pass it.
 ///   2. `authenticate` cross-checks the token's PID and EUID against the *public*
-///      `processIdentifier` and `effectiveUserIdentifier`. Any future ABI drift that
-///      silently changed the returned layout would disagree with those and be rejected,
-///      so the failure mode is a refused peer, never a mis-identified one.
+///      `processIdentifier` and `effectiveUserIdentifier`. This is the guard that catches ABI drift,
+///      including the changed-return-type case guard 1 cannot see: a layout that no longer decodes to
+///      the same process disagrees with the public properties and is rejected, so the failure mode is
+///      a refused peer, never a mis-identified one.
+///
+/// The `@objc` attribute below is load-bearing. Without it the protocol carries no Objective-C
+/// witness and the `unsafeBitCast` still compiles, but the first authentication traps instead of
+/// dispatching to the real getter. Pinned by native-updater-broker-contract.test.ts.
 ///
 /// The supported long-term replacement is `-[NSXPCListener setConnectionCodeSigningRequirement:]`
 /// (macOS 13+), which moves requirement enforcement into XPC itself. Migrating is tracked
