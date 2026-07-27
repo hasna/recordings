@@ -666,7 +666,7 @@ struct RealtimeTranscriptionTests {
     @Test("Persistence revision advances only for confirmed saves")
     @MainActor
     func persistenceRevisionTracksConfirmedSaves() {
-        let engine = RecordingEngine()
+        let engine = RecordingEngine(home: makeTestHome("realtime-tests"))
 
         #expect(engine.persistedRecordingRevision == 0)
         engine.recordPersistenceCompletion(savedText: nil)

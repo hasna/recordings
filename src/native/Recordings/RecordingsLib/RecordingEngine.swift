@@ -830,10 +830,16 @@ public final class RecordingEngine: ObservableObject {
     private let fnMonitor = FnKeyMonitor()
     private var permissionRetryTimer: Timer?
 
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let home: String
     private var audioDir: String { "\(home)/.hasna/recordings/audio" }
 
-    public init() {
+    /// `home` is injected at construction because every persistence and logging path on the
+    /// engine derives from it — `audioDir`, the API-key store, the CLI's `--home`, and
+    /// `NativeAppLog.write`. Tests must pass a temp directory: the default resolves through
+    /// the password database (`getpwuid`), not `$HOME`, so overriding the environment cannot
+    /// redirect these writes away from the live user's `~/.hasna/recordings`.
+    public init(home: String = FileManager.default.homeDirectoryForCurrentUser.path) {
+        self.home = home
         try? FileManager.default.createDirectory(atPath: audioDir, withIntermediateDirectories: true)
         log("RecordingEngine init; microphone=\(microphonePermissionLabel); accessibility=\(accessibilityPermissionLabel)")
 
