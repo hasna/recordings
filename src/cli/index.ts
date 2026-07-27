@@ -29,6 +29,7 @@ import {
   probeMicrophoneCapture,
   captureProbeSubject,
   microphoneGrantInstruction,
+  permissionStateProvesRequest,
   DEFAULT_PROBE_SECONDS,
   type CaptureProbeResult,
 } from "../lib/capture-probe.js";
@@ -1220,7 +1221,7 @@ program
           ? microphoneGrantInstruction({
               installedAppPath: macStatus.installed_app_path,
               otherAppPaths: macStatus.legacy_install_paths,
-              everRequested: macStatus.microphone_permission !== "not_determined",
+              everRequested: permissionStateProvesRequest(macStatus.microphone_permission),
             })
           : null,
         credential_probe: credential,
@@ -1298,7 +1299,7 @@ program
         const instruction = microphoneGrantInstruction({
           installedAppPath: macStatus.installed_app_path,
           otherAppPaths: macStatus.legacy_install_paths,
-          everRequested: macStatus.microphone_permission !== "not_determined",
+          everRequested: permissionStateProvesRequest(macStatus.microphone_permission),
         });
         for (const [index, step] of instruction.steps.entries()) {
           console.log(chalk.dim(`  ${index + 1}. ${step}`));
