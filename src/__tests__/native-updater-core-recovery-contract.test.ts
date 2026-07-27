@@ -30,8 +30,16 @@ describe("native updater core recovery contracts", () => {
     expect(launcher).toContain("char *const environment[] = { NULL }");
     // Descriptors above the two artifact FDs must be closed before exec. `closefrom` used to
     // express that, but it does not exist on Darwin at all — it is in no SDK header — so it
-    // never compiled. Pin the replacement sweep, both passes, and guard the regression.
-    expect(launcher).toContain("close_descriptors_from(CHILD_OUTPUT_FD + 1, descriptor_ceiling)");
+    // never compiled. Pin the replacement sweep and guard the regression.
+    //
+    // There are TWO sweeps, and they must be COUNTED, not merely found: one runs before
+    // privileges are dropped and one after the sandbox is applied. Both calls are textually
+    // identical, so a single `toContain` still matches when either is deleted — the previous
+    // `closefrom(5)` assertion had exactly that hole, and a mutation deleting the
+    // pre-privilege-drop sweep passed it. Counting is what makes each one load-bearing.
+    const descriptorSweep = "close_descriptors_from(CHILD_OUTPUT_FD + 1, descriptor_ceiling);";
+    expect(launcher.split(descriptorSweep).length - 1).toBe(2);
+    expectOrder(launcher, descriptorSweep, "setgroups(1, groups)");
     expect(launcher).not.toContain("closefrom(");
     expect(launcher).not.toContain("close_range(");
     // The bound must be captured in the parent: the child lowers RLIMIT_NOFILE to 32 before it
