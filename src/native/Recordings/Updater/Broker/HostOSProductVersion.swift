@@ -1,4 +1,5 @@
 import Foundation
+import RecordingsUpdateProtocol
 
 enum HostOSProductVersionQueryError: Error {
     case unavailable

@@ -5,6 +5,7 @@ import {
   expectOrder,
   sliceBetween,
   sliceBetweenUnique,
+  withoutAnyComments,
 } from "./helpers/source-assertions";
 
 const root = process.cwd();
@@ -12,8 +13,11 @@ const source = (path: string) => readFileSync(join(root, path), "utf8");
 
 describe("native updater core recovery contracts", () => {
   test("launches only the fixed verifier with FD-only arguments and an empty environment", () => {
-    const launcher = source(
-      "src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c",
+    // Comment-stripped: the launcher now documents why closefrom() cannot be used and why the
+    // sandbox call depends on private API, and those notes name the very symbols asserted here.
+    // Unstripped, `not.toContain("closefrom(")` below would trip over the prose explaining it.
+    const launcher = withoutAnyComments(
+      source("src/native/Recordings/Updater/VerifierLauncher/RecordingsVerifierLauncher.c"),
     );
     expect(launcher).toContain("sandbox_init_with_parameters");
     expect(launcher).toContain('"OUTPUT_DIR", output_path');
@@ -24,7 +28,24 @@ describe("native updater core recovery contracts", () => {
     expect(launcher).toContain('(char *)"--output-dir-fd"');
     expect(launcher).toContain('(char *)"--expected-sha256"');
     expect(launcher).toContain("char *const environment[] = { NULL }");
-    expect(launcher).toContain("closefrom(5)");
+    // Descriptors above the two artifact FDs must be closed before exec. `closefrom` used to
+    // express that, but it does not exist on Darwin at all — it is in no SDK header — so it
+    // never compiled. Pin the replacement sweep and guard the regression.
+    //
+    // There are TWO sweeps, and they must be COUNTED, not merely found: one runs before
+    // privileges are dropped and one after the sandbox is applied. Both calls are textually
+    // identical, so a single `toContain` still matches when either is deleted — the previous
+    // `closefrom(5)` assertion had exactly that hole, and a mutation deleting the
+    // pre-privilege-drop sweep passed it. Counting is what makes each one load-bearing.
+    const descriptorSweep = "close_descriptors_from(CHILD_OUTPUT_FD + 1, descriptor_ceiling);";
+    expect(launcher.split(descriptorSweep).length - 1).toBe(2);
+    expectOrder(launcher, descriptorSweep, "setgroups(1, groups)");
+    expect(launcher).not.toContain("closefrom(");
+    expect(launcher).not.toContain("close_range(");
+    // The bound must be captured in the parent: the child lowers RLIMIT_NOFILE to 32 before it
+    // sweeps, and lowering a limit does not close descriptors that are already open, so a
+    // getrlimit() taken at the sweep would report 32 and skip everything inherited above it.
+    expectOrder(launcher, "inherited_descriptor_ceiling()", "fork()");
     expect(launcher).toContain("CLOCK_MONOTONIC");
     expect(launcher).toContain("kill_and_reap(child)");
     expect(launcher).not.toContain("--archive-path");
@@ -36,9 +57,17 @@ describe("native updater core recovery contracts", () => {
     // step was rescued from its own -1 by being the *second* operand of the previous comparison,
     // so deleting the exec, or appending a step, would silently reopen the hole. `expectOrder`
     // requires both operands to exist at every link and names whichever one went missing.
+    // Ordering operands must name the CALL, not the bare symbol: `sandbox_init_with_parameters`
+    // is private API and is now declared as an extern at the top of the file, so its first
+    // occurrence precedes every step of this chain and a bare-name operand would compare
+    // against the declaration rather than the call.
     expectOrder(launcher, 'open("/dev/null"', "setgroups(1, groups)");
-    expectOrder(launcher, "setgroups(1, groups)", "sandbox_init_with_parameters");
-    expectOrder(launcher, "sandbox_init_with_parameters", "execve(VERIFIER_PATH");
+    expectOrder(launcher, "setgroups(1, groups)", "sandbox_init_with_parameters(sandbox_profile");
+    expectOrder(
+      launcher,
+      "sandbox_init_with_parameters(sandbox_profile",
+      "execve(VERIFIER_PATH",
+    );
     for (const limit of ["RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NOFILE", "RLIMIT_NPROC"]) {
       expect(launcher).toContain(limit);
     }
@@ -367,12 +396,18 @@ describe("native updater core recovery contracts", () => {
   });
 
   test("rejects dangerous dynamic-peer entitlements and missing hardened runtime", () => {
-    const peer = source("src/native/Recordings/Updater/Broker/PeerIdentity.swift");
-    expect(peer).toContain("connection.auditToken");
+    // Comment-stripped so the private-API note in PeerIdentity.swift, which names several of
+    // these symbols in prose, cannot stand in for the code that must actually be present.
+    const peer = withoutAnyComments(
+      source("src/native/Recordings/Updater/Broker/PeerIdentity.swift"),
+    );
+    expect(peer).toContain(".auditToken");
     expect(peer).toContain("kSecGuestAttributeAudit");
     expect(peer).toContain('.map { "identifier \\(Self.requirementQuoted($0))" }');
     expect(peer).not.toContain('identifier "\\#(Self.requirementQuoted($0))"');
-    expect(peer).toContain("kSecCodeSignatureRuntime");
+    // `kSecCodeSignatureRuntime` is a CF_OPTIONS member, so Swift sees it only as
+    // `SecCodeSignatureFlags.runtime`; the bare kSec… spelling never compiled.
+    expect(peer).toContain("SecCodeSignatureFlags.runtime.rawValue");
     expect(peer).toContain("kSecCSRequirementInformation");
     expect(peer).toContain("kSecCodeInfoEntitlements as String");
     expect(peer).toContain("kSecCodeInfoEntitlementsDict");

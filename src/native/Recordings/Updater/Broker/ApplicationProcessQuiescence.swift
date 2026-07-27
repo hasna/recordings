@@ -3,6 +3,12 @@ import Foundation
 import RecordingsUpdateProtocol
 
 enum ApplicationProcessQuiescence {
+    /// `<sys/proc_info.h>` defines `PROC_PIDPATHINFO_MAXSIZE` as `(4 * MAXPATHLEN)`. Swift's
+    /// ClangImporter imports the libproc *functions* but not compound macro expressions, so
+    /// the value is restated here. `proc_pidpath` rejects a buffer larger than this, so it
+    /// must track the header rather than being rounded up to a convenient power of two.
+    private static let processPathBufferSize = 4 * Int(MAXPATHLEN)
+
     /// Reject activation while any executable loaded from the live bundle is still
     /// running. The one authenticated update client servicing this XPC request is
     /// exempt only when its kernel-reported executable path is the fixed client path.
@@ -20,7 +26,7 @@ enum ApplicationProcessQuiescence {
         let authenticatedClientPath = RecordingsUpdateConstants.applicationPath + "/"
             + RecordingsUpdateConstants.updateClientRelativePath
         for processIdentifier in processIdentifiers.prefix(Int(count)) where processIdentifier > 0 {
-            var pathBytes = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+            var pathBytes = [CChar](repeating: 0, count: Self.processPathBufferSize)
             let pathLength = pathBytes.withUnsafeMutableBufferPointer { buffer in
                 proc_pidpath(
                     processIdentifier,

@@ -303,24 +303,49 @@ describe("compiledTargets", () => {
 });
 
 describe("the committed native baseline", () => {
+  test("is empty, so the native job is a plain build gate", () => {
+    // The load-bearing assertion in this file. An entry in the baseline re-exempts every target it
+    // blocks plus everything depending on them, and that closure is easy to underestimate: the two
+    // C errors this baseline used to carry blocked eight targets — the whole updater subsystem, 31
+    // of the 84 Swift files in a target. Appending one line here is therefore a hole in the only
+    // regression protection the Swift/C half has, and it must not be possible to open it without a
+    // reviewer seeing a test change in the same diff.
+    //
+    // If an entry is ever genuinely unavoidable, delete this test in the change that adds it and
+    // name the blast radius in the PR body. That is the whole point: make it deliberate.
+    const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8"));
+    expect(entries, `the native baseline is no longer empty: ${entries.join(" | ")}`).toEqual([]);
+  });
+
+  test("does not re-record the six errors that #55 fixed", () => {
+    // Separate from the emptiness test above, and deliberately so. If a future change deletes that
+    // test to record some new error, this one still stands: these six specific signatures describe
+    // defects that are FIXED, and re-recording any of them would silently re-exempt the privileged
+    // updater — the XPC class allowlist and the privilege-separated verifier launcher — while the
+    // job stayed green. Re-adding one is only ever correct if the fix was reverted too.
+    const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8"));
+    expect(entries).not.toContain(CLOSEFROM);
+    expect(entries).not.toContain(SANDBOX_INIT);
+    for (const entry of entries) {
+      expect(
+        entry,
+        `re-exempts a fixed Updater/Protocol error: ${entry}`,
+      ).not.toMatch(/UpdateProtocol\.swift: cannot convert value of type/);
+    }
+  });
+
   test("every entry is a path/message signature with no line numbers", () => {
     // A signature carrying a line number churns whenever anything above it is edited, and a
     // signature that churns is one nobody maintains — it gets re-recorded rather than read.
+    //
+    // Vacuous while the baseline is empty, and kept anyway: it is the format contract any future
+    // entry has to satisfy, and it costs nothing to leave standing. The count assertion that used
+    // to sit here (`entries.length` > 0) was the inverse of the invariant this file now protects.
     const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8"));
-    expect(entries.length).toBeGreaterThan(0);
     for (const entry of entries) {
       expect(entry, `not a "<path>: <message>" signature: ${entry}`).toMatch(/^\S+: \S.*$/);
       expect(entry, `signature carries a line:column: ${entry}`).not.toMatch(/:\d+:\d+:/);
     }
-  });
-
-  test("records the two C errors measured in the first native CI run", () => {
-    // Pins the baseline to measured output rather than to a transcription of it. The Swift entries
-    // alongside them came from run 30305062756, which reached Updater/Protocol only because targets
-    // are now built individually -- the whole-package build never got that far.
-    const entries = parseKnownErrors(readFileSync(join(repoRoot, KNOWN_ERRORS_FILE), "utf8"));
-    expect(entries).toContain(CLOSEFROM);
-    expect(entries).toContain(SANDBOX_INIT);
   });
 
   test("every recorded error names a file inside src/native", () => {

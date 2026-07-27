@@ -144,7 +144,7 @@ final class UpdateBrokerSession: NSObject, RecordingsUpdateXPCProtocol {
                 envelope: envelope
             )
             do {
-                let result = try performStagedInstall(staged: staged, policy: policy)
+                let result = try performStagedInstall(staged: staged, peer: peer, policy: policy)
                 try cleanupIfTerminalOrUnjournaled(staged: staged, rootState: rootState)
                 return result
             } catch {
@@ -166,6 +166,10 @@ final class UpdateBrokerSession: NSObject, RecordingsUpdateXPCProtocol {
 
     private static func performStagedInstall(
         staged: StagedUpdate,
+        // The activation quiescence gate must exempt exactly the one authenticated client
+        // servicing this request, so the verified peer has to reach it rather than being
+        // re-derived here.
+        peer: AuthenticatedPeer,
         policy: BrokerPolicy
     ) throws -> NSDictionary {
         guard let envelopeData = staged.envelope.data,

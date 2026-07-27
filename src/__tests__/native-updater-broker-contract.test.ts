@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compareUnsignedUtf8 } from "../../scripts/macos_artifact";
-import { expectOrder } from "./helpers/source-assertions";
+import { expectOrder, withoutAnyComments } from "./helpers/source-assertions";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(join(root, path), "utf8");
@@ -47,9 +47,26 @@ describe("native privileged updater broker contract", () => {
   });
 
   test("admits only audit-token-authenticated signed XPC peers and no path options", () => {
-    const peer = source("src/native/Recordings/Updater/Broker/PeerIdentity.swift");
+    // Comment-stripped: every assertion below is about code. PeerIdentity.swift now carries a
+    // long note naming these same symbols, and prose must not be able to satisfy a contract.
+    const peer = withoutAnyComments(
+      source("src/native/Recordings/Updater/Broker/PeerIdentity.swift"),
+    );
     const protocol = source("src/native/Recordings/Updater/Protocol/UpdateProtocol.swift");
-    expect(peer).toContain("connection.auditToken");
+    // NSXPCConnection does not expose `auditToken` publicly, so it is read through a declared
+    // @objc protocol. Pin the read AND both fail-closed guards: without them a future edit
+    // could quietly fall back to the reusable PID, which is the whole risk the token avoids.
+    // The `@objc` attribute is load-bearing and must be pinned, not merely described. Without it the
+    // protocol has no Objective-C witness, so `unsafeBitCast` produces something whose property
+    // dispatch is not the ObjC getter: it compiles, passes every contract and every Swift test, and
+    // then traps (SIGTRAP, exit 133) the first time a peer authenticates. A trapping broker
+    // authenticates nobody, so the impact is availability rather than a weakened check — but it is
+    // invisible to every other gate in this repository.
+    expect(peer).toContain("@objc private protocol XPCConnectionAuditTokenProviding");
+    expect(peer).toContain(".auditToken");
+    expect(peer).toContain('responds(to: NSSelectorFromString("auditToken"))');
+    expect(peer).toContain("audit_token_to_pid(token) == connection.processIdentifier");
+    expect(peer).toContain("audit_token_to_euid(token) == connection.effectiveUserIdentifier");
     expect(peer).toContain("kSecGuestAttributeAudit");
     expect(peer).toContain("SecCodeCheckValidity");
     expect(protocol).toContain("File descriptors, not paths");

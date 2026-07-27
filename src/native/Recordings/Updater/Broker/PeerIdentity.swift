@@ -149,11 +149,56 @@ enum RootTrustStore {
     }
 }
 
+/// PRIVATE API, DELIBERATE — RISK ACCEPTED.
+///
+/// The peer's audit token is the only race-free identity for an XPC connection: it names the
+/// exact process that opened the connection, whereas a PID can be reused between the time
+/// the kernel reports it and the time we resolve its code signature. `NSXPCConnection`
+/// exposes `-auditToken` in the runtime but declares it in no public header (the public
+/// header offers only `processIdentifier`, `effectiveUserIdentifier` and
+/// `auditSessionIdentifier`), so this declaration is the only contract we have and Apple may
+/// change or remove it in any macOS update.
+///
+/// Two things keep that risk bounded, and both must stay:
+///   1. `authenticate` checks `responds(to:)` before casting, so a macOS that REMOVES the property
+///      makes peer authentication throw rather than read a garbage struct. That is the limit of what
+///      guard 1 proves: it establishes only that a selector of that name exists, and says nothing
+///      about its return type, so a macOS that CHANGED the return type would pass it.
+///   2. `authenticate` cross-checks the token's PID and EUID against the *public*
+///      `processIdentifier` and `effectiveUserIdentifier`. This is the guard that catches ABI drift,
+///      including the changed-return-type case guard 1 cannot see: a layout that no longer decodes to
+///      the same process disagrees with the public properties and is rejected, so the failure mode is
+///      a refused peer, never a mis-identified one.
+///
+/// The `@objc` attribute below is load-bearing. Without it the protocol carries no Objective-C
+/// witness and the `unsafeBitCast` still compiles, but the first authentication traps instead of
+/// dispatching to the real getter. Pinned by native-updater-broker-contract.test.ts.
+///
+/// The supported long-term replacement is `-[NSXPCListener setConnectionCodeSigningRequirement:]`
+/// (macOS 13+), which moves requirement enforcement into XPC itself. Migrating is tracked
+/// separately because this code also reads signing flags and entitlements back off the
+/// resolved `SecCode`, which that API does not provide.
+@objc private protocol XPCConnectionAuditTokenProviding {
+    var auditToken: audit_token_t { get }
+}
+
 struct PeerIdentityPolicy {
     let policy: BrokerPolicy
 
     func authenticate(_ connection: NSXPCConnection) throws -> AuthenticatedPeer {
-        var token = connection.auditToken
+        // See XPCConnectionAuditTokenProviding: fail closed if the private property is gone
+        // instead of reinterpreting whatever the cast would land on.
+        guard connection.responds(to: NSSelectorFromString("auditToken")) else {
+            throw BrokerSecurityError.peerAuditTokenUnavailable
+        }
+        var token = unsafeBitCast(connection, to: XPCConnectionAuditTokenProviding.self).auditToken
+        // The audit token is authoritative, but it must agree with the two public
+        // properties. Disagreement means the private ABI moved under us; refuse the peer.
+        guard audit_token_to_pid(token) == connection.processIdentifier,
+              audit_token_to_euid(token) == connection.effectiveUserIdentifier
+        else {
+            throw BrokerSecurityError.peerAuditTokenUnavailable
+        }
         let tokenData = withUnsafeBytes(of: &token) { Data($0) }
         let attributes = [kSecGuestAttributeAudit as String: tokenData] as CFDictionary
         var guest: SecCode?
@@ -191,8 +236,13 @@ struct PeerIdentityPolicy {
         }
 
         var signingInformation: CFDictionary?
+        // `SecCodeCopySigningInformation` is typed against `SecStaticCode`. In C a
+        // `SecCodeRef` is accepted directly (a dynamic code is a static code plus running
+        // state) but Swift imports the two as unrelated CF types, so the relationship has
+        // to be restated. This is a representation cast only — no ownership transfer.
+        let staticGuest = unsafeBitCast(guest, to: SecStaticCode.self)
         let informationStatus = SecCodeCopySigningInformation(
-            guest,
+            staticGuest,
             SecCSFlags(rawValue: kSecCSSigningInformation | kSecCSRequirementInformation),
             &signingInformation
         )
@@ -229,7 +279,10 @@ struct PeerIdentityPolicy {
         guard let flags = information[kSecCodeInfoFlags as String] as? NSNumber else {
             return false
         }
-        return flags.uint32Value & UInt32(kSecCodeSignatureRuntime) != 0
+        // `kSecCodeSignatureRuntime` is a member of the `CF_OPTIONS(uint32_t,
+        // SecCodeSignatureFlags)` set in CSCommon.h, so Swift exposes it as
+        // `SecCodeSignatureFlags.runtime` and not as a bare `kSec…` global.
+        return flags.uint32Value & SecCodeSignatureFlags.runtime.rawValue != 0
     }
 
     private static func hasNoDangerousDebugOrLoaderEntitlements(
@@ -259,6 +312,7 @@ enum BrokerSecurityError: Error, CustomStringConvertible {
     case invalidPolicy(String)
     case invalidTrustFile
     case peerCodeUnavailable(OSStatus)
+    case peerAuditTokenUnavailable
     case peerRejected(OSStatus)
     case peerMetadataRejected
 
@@ -267,6 +321,8 @@ enum BrokerSecurityError: Error, CustomStringConvertible {
         case let .invalidPolicy(reason): "Invalid root-owned broker policy: \(reason)"
         case .invalidTrustFile: "A root-owned broker trust file is missing or unsafe"
         case let .peerCodeUnavailable(status): "Could not resolve the XPC peer code identity (\(status))"
+        case .peerAuditTokenUnavailable:
+            "Could not read a trustworthy audit token for the XPC peer"
         case let .peerRejected(status): "The XPC peer code identity was rejected (\(status))"
         case .peerMetadataRejected: "The XPC peer signing metadata was rejected"
         }

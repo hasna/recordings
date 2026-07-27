@@ -16,6 +16,7 @@
 #include <sys/acl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -28,6 +29,39 @@
 #define CHILD_OUTPUT_FD 4
 #define OUTPUT_PATH_PREFIX "/Library/Application Support/Hasna/Recordings/Updates/transaction-"
 #define OUTPUT_PATH_SUFFIX "/verifier-output"
+
+/*
+ * Lower bound for the pre-exec descriptor sweep, so a pathologically small
+ * RLIMIT_NOFILE can never shrink the sweep below the descriptors we place by hand.
+ */
+#define DESCRIPTOR_SWEEP_FLOOR 64
+
+/*
+ * PRIVATE API, DELIBERATE — RISK ACCEPTED.
+ *
+ * `sandbox_init_with_parameters` is exported by libSystem (`_sandbox_init_with_parameters`
+ * is present in libSystem.tbd) but is declared in no SDK header, so this declaration is
+ * the only contract we have. Apple may change its signature or remove it in any macOS
+ * update, and nothing checks our prototype against theirs.
+ *
+ * Why we accept that rather than avoid it: the public `sandbox_init` cannot express this
+ * policy. It is API_DEPRECATED since macOS 10.8, and its own header states that `flags`
+ * "Must be SANDBOX_NAMED" — it can only select one of the five built-in kSBXProfile*
+ * profiles, so it can neither load our profile nor bind the OUTPUT_DIR parameter the
+ * profile is written against. The alternative of textually substituting the output path
+ * into the profile source would move a runtime-derived string into a security policy
+ * document, which is strictly worse than depending on the parameter API built for it.
+ *
+ * Do NOT mark this `weak_import`. Referenced strongly, a symbol Apple removes becomes a
+ * link error at build time, which fails closed. Weak-linked, it would become a NULL call
+ * or a silently unsandboxed verifier child at runtime.
+ */
+extern int sandbox_init_with_parameters(
+    const char *profile,
+    uint64_t flags,
+    const char *const parameters[],
+    char **errorbuf
+);
 
 int recordings_descriptor_has_no_extended_acl(int descriptor) {
     if (descriptor < 0) return 0;
@@ -244,6 +278,57 @@ static bool apply_limit(int resource, rlim_t soft, rlim_t hard) {
     return setrlimit(resource, &limit) == 0;
 }
 
+/*
+ * Highest descriptor number that could exist in this process, used to bound the pre-exec
+ * sweep below. MUST be evaluated in the parent, before the child lowers RLIMIT_NOFILE:
+ * verifier_child() drops RLIMIT_NOFILE to 32 before it sweeps, and lowering the limit does
+ * not close descriptors that are already open, so a getrlimit() call made after that point
+ * reports 32 and would skip every inherited descriptor at or above 32.
+ */
+static rlim_t inherited_descriptor_ceiling(void) {
+    rlim_t ceiling = 0;
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) == 0) {
+        if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur > ceiling) ceiling = limit.rlim_cur;
+        if (limit.rlim_max != RLIM_INFINITY && limit.rlim_max > ceiling) ceiling = limit.rlim_max;
+    }
+    /*
+     * An unlimited hard limit tells us nothing, so fall back to the kernel's per-process
+     * cap, which is the real ceiling on descriptor numbers.
+     */
+    int per_process_maximum = 0;
+    size_t size = sizeof(per_process_maximum);
+    if (sysctlbyname("kern.maxfilesperproc", &per_process_maximum, &size, NULL, 0) == 0 &&
+        per_process_maximum > 0) {
+        if (ceiling == 0 || ceiling > (rlim_t)per_process_maximum) {
+            ceiling = (rlim_t)per_process_maximum;
+        }
+    }
+    if (ceiling < DESCRIPTOR_SWEEP_FLOOR) ceiling = DESCRIPTOR_SWEEP_FLOOR;
+    return ceiling;
+}
+
+/*
+ * Darwin has neither `closefrom()` nor Linux's `close_range()` — both are absent from the
+ * macOS SDK entirely, not merely behind a header we failed to include — so the sweep is
+ * open-coded.
+ *
+ * A plain bounded loop of close() is used rather than enumerating /dev/fd, which would
+ * close exactly the open descriptors instead of probing a range. /dev/fd enumeration needs
+ * opendir()/readdir(), which allocate; this code runs after fork() in a multithreaded XPC
+ * broker, where malloc can deadlock if another thread held its lock at fork time. close()
+ * and getrlimit() are plain syscalls and are safe here, so correctness of the sandbox
+ * boundary is not traded for an allocation in the one place we must not allocate.
+ *
+ * The cost is bounded by `ceiling` failed close() calls once per verification, which is
+ * negligible against the caller's 90-second budget.
+ */
+static void close_descriptors_from(int lowest, rlim_t ceiling) {
+    for (rlim_t descriptor = (rlim_t)lowest; descriptor < ceiling; descriptor++) {
+        (void)close((int)descriptor);
+    }
+}
+
 static void kill_and_reap(pid_t child) {
     kill(child, SIGKILL);
     int wait_status = 0;
@@ -257,7 +342,8 @@ static void verifier_child(
     gid_t group_id,
     const char *expected_sha256,
     const char *sandbox_profile,
-    const char *output_path
+    const char *output_path,
+    rlim_t descriptor_ceiling
 ) {
     if (!apply_limit(RLIMIT_CPU, 60, 60) ||
         !apply_limit(RLIMIT_AS, 4ULL * 1024 * 1024 * 1024, 4ULL * 1024 * 1024 * 1024) ||
@@ -276,7 +362,7 @@ static void verifier_child(
         _exit(74);
     }
     if (null_descriptor > CHILD_OUTPUT_FD) close(null_descriptor);
-    closefrom(5);
+    close_descriptors_from(CHILD_OUTPUT_FD + 1, descriptor_ceiling);
 
     gid_t groups[] = { group_id };
     if (setgroups(1, groups) != 0 || setgid(group_id) != 0 || setuid(user_id) != 0 ||
@@ -289,12 +375,23 @@ static void verifier_child(
     };
     char *sandbox_error = NULL;
     if (sandbox_init_with_parameters(sandbox_profile, 0, sandbox_parameters, &sandbox_error) != 0) {
-        if (sandbox_error != NULL) sandbox_free_error(sandbox_error);
+        if (sandbox_error != NULL) {
+            // `sandbox_free_error` is the only documented way to release the buffer the
+            // sandbox API allocates, and it is deprecated with no replacement. We _exit
+            // immediately below, so this is belt-and-braces rather than load-bearing;
+            // the deprecation warning is scoped to this one call instead of the file.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            sandbox_free_error(sandbox_error);
+#pragma clang diagnostic pop
+        }
         _exit(72);
     }
     // Sandbox initialization is allowed to use implementation-internal descriptors.
     // Re-close everything above the two explicit artifact descriptors before exec.
-    closefrom(5);
+    // RLIMIT_NOFILE is 32 by this point, so the sandbox cannot have opened anything above
+    // it; sweeping to the inherited ceiling again is generous and harmless.
+    close_descriptors_from(CHILD_OUTPUT_FD + 1, descriptor_ceiling);
 
     char archive_argument[16];
     char output_argument[16];
@@ -356,6 +453,9 @@ int recordings_run_artifact_verifier(
         return errno != 0 ? errno : EMFILE;
     }
 
+    /* Captured before fork(), while getrlimit() still describes the real descriptor table. */
+    const rlim_t descriptor_ceiling = inherited_descriptor_ceiling();
+
     const pid_t child = fork();
     if (child < 0) {
         status = errno;
@@ -367,7 +467,8 @@ int recordings_run_artifact_verifier(
             verifier_group_id,
             expected_archive_sha256,
             sandbox_profile,
-            output_path
+            output_path,
+            descriptor_ceiling
         );
     } else {
         struct timespec started;
