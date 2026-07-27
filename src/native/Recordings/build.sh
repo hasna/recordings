@@ -997,8 +997,17 @@ elif [ "$MODE" = "local" ]; then
     # re-implements the same rules in TypeScript and re-checks the target later, so
     # agreement between the two implementations rests on their shared contract test,
     # not on shared code.
-    LOCAL_TARGET_POLICY="${PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
-    LOCAL_TARGET_READER="${PACKAGE_ROOT}/scripts/read_local_only_targets.sh"
+    #
+    # Both resolve from $SOURCE_PACKAGE_ROOT — the `git archive` of $SOURCE_SHA — and not
+    # from $PACKAGE_ROOT. They used to read $PACKAGE_ROOT, which is the mutable working
+    # tree, so this gate validated a different file from the one the artifact was built
+    # from: with the archived policy listing only station06, a working-tree policy listing
+    # "attacker" got "attacker" approved, and station06 refused. Every other build input
+    # is resolved from the snapshot for exactly this reason (see the required-snapshot-input
+    # loop above, which already demands both of these paths inside the archive), and a gate
+    # that checks a file the artifact does not contain is not a gate.
+    LOCAL_TARGET_POLICY="${SOURCE_PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
+    LOCAL_TARGET_READER="${SOURCE_PACKAGE_ROOT}/scripts/read_local_only_targets.sh"
     [ -f "$LOCAL_TARGET_READER" ] && [ ! -L "$LOCAL_TARGET_READER" ] || {
         echo "Packaged local-only approved target reader is missing." >&2
         exit 1

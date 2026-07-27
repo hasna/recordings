@@ -143,6 +143,20 @@ function createInstallerFixture() {
     join(repositoryRoot, "scripts", "resolve_tailscale_cli.sh"),
     join(root, "scripts", "resolve_tailscale_cli.sh"),
   );
+  // The installer sources its approved-target policy and reader out of its own package
+  // root, so a fixture package root without them cannot reach any gate past that point:
+  // every local-only install here exits 2 with "Packaged local-only approved target
+  // reader is missing." and the test then asserts against the wrong failure. The build
+  // fixture further down this file already copies both; this one was left behind.
+  mkdirSync(join(root, "scripts", "policy"), { recursive: true });
+  cpSync(
+    join(repositoryRoot, "scripts", "policy", "local-only-approved-targets.txt"),
+    join(root, "scripts", "policy", "local-only-approved-targets.txt"),
+  );
+  cpSync(
+    join(repositoryRoot, "scripts", "read_local_only_targets.sh"),
+    join(root, "scripts", "read_local_only_targets.sh"),
+  );
   writeExecutable(
     join(root, "scripts", "smoke_macos_app.sh"),
     "#!/usr/bin/env bash\n[ \"$#\" -eq 2 ] || exit 64\n[ \"$2\" = \"$RECORDINGS_BUN_EXECUTABLE\" ] || exit 65\n[ \"${FAIL_RUNTIME_SMOKE:-0}\" = 0 ] || exit 1\nprintf '%s\\n' \"$1\" >> \"$MARKER_DIRECTORY/runtime-smoke.log\"\n",
