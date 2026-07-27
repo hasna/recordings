@@ -316,6 +316,12 @@ describe("designated-requirement identity-migration guard", () => {
     expect(installer).not.toMatch(
       /ARTIFACT_POLICY" = "release" \] && \[ "\$identity_migration"/,
     );
+    // Record correction: #39's commit message says it "replaced a substring grep" with the
+    // argument-vector parser below. It did not -- `git diff --numstat` for that commit on this
+    // file is 139 insertions and ZERO deletions, and this is the grep, still live. The parser
+    // was added ALONGSIDE it. The effect is structural supersession, so the assertion is now
+    // redundant rather than wrong, and it is kept only as a cheap presence check. Anyone
+    // auditing this later should not go looking for a deletion that never happened.
     expect(installer).toContain("recordings_enforce_identity_migration \\");
     expect(installer).toContain(IDENTITY_GUARD_RELATIVE_PATH);
     // Sourced and proven present before either policy branch, so a stripped package
@@ -412,6 +418,75 @@ describe("designated-requirement identity-migration guard", () => {
     expect(assignments).toEqual(["identity_migration=0", "identity_migration=1"]);
   });
 
+  test("every use of the migration flag is one the design accounts for", () => {
+    // `/^identity_migration=/` above sees a plain assignment line and nothing else. Two
+    // measured EXIT=0 evasions write the flag without matching it, and both zero it after
+    // the comparison loop has raised it:
+    //
+    //   declare identity_migration=0        -- a declaration, not an assignment line
+    //   : $((identity_migration = 0))       -- arithmetic assignment
+    //
+    // Enumerating every mention and pinning the exact set is stronger than adding those two
+    // shapes to a pattern, because it does not depend on having thought of the shapes: any
+    // new line touching this flag fails here and has to be argued for. A shell script has no
+    // parser available to this suite, so an exact-set tripwire is the structural option.
+    const installer = readRepositoryFile("scripts/install_macos_app.sh");
+    const uses = installer
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /\bidentity_migration\b/.test(line));
+    expect(uses).toEqual([
+      "identity_migration=0",
+      "identity_migration=1",
+      '"$identity_migration" \\',
+      'if [ "$identity_migration" -eq 1 ]; then',
+      'elif [ "$identity_migration" -eq 1 ]; then',
+    ]);
+  });
+
+  test("the guard is called after the comparison that computes its input, not before it", () => {
+    // Moving the call's nine lines VERBATIM -- zero character changes -- to above the
+    // comparison loop defeats every assertion in this file at EXIT=0, and defeats all 116
+    // usable tests in the repo. Nothing here was ever about POSITION: `starts.length` stays
+    // 1, the argument vector is byte-identical, the terminator is still `|| exit 1`, and the
+    // two assignment lines never moved. The loop still raises the flag; nothing enforces it;
+    // the install proceeds and voids the grants. It is a plausible refactor ("gate earlier,
+    // fail fast"), and the only things that could catch it were a human noticing the
+    // orphaned comment left behind, or macos-app-lifecycle.test.ts -- which is 92 of 140 red
+    // on `main` on Linux and cannot serve as a gate.
+    const installer = readRepositoryFile("scripts/install_macos_app.sh");
+    const lines = installer.split("\n");
+    const initialize = lines.findIndex((line) => line.trim() === "identity_migration=0");
+    const raise = lines.findIndex((line) => line.trim() === "identity_migration=1");
+    const call = lines.findIndex((line) =>
+      line.trimStart().startsWith("recordings_enforce_identity_migration"),
+    );
+    for (const [label, index] of [
+      ["the flag's initialization", initialize],
+      ["the comparison that raises the flag", raise],
+      ["the guard invocation", call],
+    ] as const) {
+      expect(index, `${label} is missing entirely`).toBeGreaterThan(-1);
+    }
+    // The loop's `done` closes the search space. Before it, the flag is still being
+    // computed, so a guard reading it there reads a partial answer -- and an empty search
+    // space reads identical to a clean result.
+    const loopEnd = lines.findIndex((line, index) => index > raise && line.trim() === "done");
+    expect(loopEnd, "the comparison loop's `done` is missing").toBeGreaterThan(raise);
+    expect(initialize).toBeLessThan(raise);
+    expect(loopEnd).toBeLessThan(call);
+
+    // And nothing in the gap may stub the guard out. `eval` is called out by name because
+    // `eval 'recordings_enforce_identity_migration() { return 0; }'` evades the
+    // `starts.length` count above: that filter uses `startsWith`, and the line starts with
+    // `eval`, so the stub is never counted as an invocation.
+    const between = lines.slice(loopEnd + 1, call).join("\n");
+    expect(between).not.toMatch(/\beval\b/);
+    expect(installer).not.toMatch(/\beval\b[^\n]*recordings_enforce_identity_migration/);
+    // The installer sources the packaged guard; it must not define its own.
+    expect(installer).not.toMatch(/recordings_enforce_identity_migration\s*\(\s*\)\s*\{/);
+  });
+
   // A gate whose only escape hatch is undiscoverable is an outage, not a safeguard. This
   // guard turns what used to be a warn-and-proceed local-only reinstall into exit 1, and
   // every ad-hoc rebuild changes the CDHash, so the approval flag is on the routine repair
@@ -454,10 +529,63 @@ describe("designated-requirement identity-migration guard", () => {
       // Declaring it without forwarding it, or forwarding it without declaring it, both
       // leave the flag unusable through the documented path while a grep for the name
       // still succeeds -- so assert both halves.
+      //
+      // The FORWARDING half is all this test ever enforced, and it says so now rather than
+      // implying otherwise: `toContain('"<flag>"')` is wholly subsumed by the
+      // `installerArgs.push("<flag>")` assertion below it, because that line contains the
+      // same quoted literal. The declaration half is pinned behaviourally in the next test.
       const cli = readRepositoryFile("src/cli/index.ts");
-      expect(cli).toContain(`"${flag}"`);
       expect(cli).toContain(`installerArgs.push("${flag}")`);
       expect(cli).toContain("allowAdhocIdentityMigration");
+    });
+
+    test("the recordings CLI's own --help offers the flag, not just its source text", () => {
+      // This is the surface whose absence was the ORIGINAL finding, and it was the one
+      // surface of the four still unpinned. Deleting the four-line commander `.option()`
+      // block left this suite at EXIT=0: `toContain('"<flag>"')` was satisfied by the
+      // forwarding line's own literal, and `toContain("allowAdhocIdentityMigration")` by the
+      // options type and the `opts.` read, both of which survive the deletion. With the
+      // declaration gone commander rejects the flag as an unknown option, so
+      // `recordings app install` cannot pass it -- the exact pre-#39 state, suite green.
+      // Runbook k_ms3hpbyj_50m0tr documents that wrapper invocation as the repair path, so
+      // this is the surface that matters operationally.
+      //
+      // Asserted behaviourally rather than as text: commander's generated help is the
+      // artifact an operator actually reads, and it exists only if the option is declared.
+      // That is also reformat-proof, which `.option(\n  "<flag>",` is not.
+      const home = mkdtempSync(join(tmpdir(), "rec-adhoc-help-"));
+      try {
+        const result = Bun.spawnSync(
+          ["bun", "run", join(repositoryRoot, "src/cli/index.ts"), "app", "install", "--help"],
+          {
+            cwd: repositoryRoot,
+            // `--help` exits before any command action runs, so nothing here reaches the
+            // network. Sandboxed anyway because HOME alone does NOT sandbox this CLI: the
+            // API URL and key come from the process environment, and a review demo that
+            // assumed otherwise made an authenticated call to production.
+            env: {
+              ...process.env,
+              HOME: home,
+              HASNA_RECORDINGS_API_URL: "",
+              HASNA_RECORDINGS_API_KEY: "",
+            },
+          },
+        );
+        expect(result.exitCode).toBe(0);
+        const help = result.stdout.toString();
+        expect(help).toContain("Usage: recordings app install");
+        expect(help).toContain(flag);
+        // The consequence, in the operator-facing surface: the help has to say what
+        // approving costs, not merely that a flag exists.
+        expect(help).toContain("Microphone");
+        expect(help).toContain("Accessibility");
+        // Positive control on the absence claim. A help output that lost EVERY option would
+        // otherwise satisfy nothing above by simply being empty; the sibling flag's
+        // declaration is untouched by any mutation of this one.
+        expect(help).toContain("--allow-signing-identity-migration");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
 
     test("the README documents the flag on the local-only install path", () => {
