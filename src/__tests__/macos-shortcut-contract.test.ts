@@ -246,15 +246,12 @@ describe("blocked-trigger reporting contract", () => {
   });
 
   test("updateStatus consults the blocked reason before falling back to Ready", () => {
-    const updateStatus = engineSource.slice(
-      engineSource.indexOf("public func updateStatus()"),
-      engineSource.indexOf("// MARK: - Toggle"),
-    );
+    const updateStatus = sliceBetween(engineSource, "public func updateStatus()", "// MARK: - Toggle");
     expect(updateStatus).toContain("if let blockedReason");
-    // The blocked branch must come before the "Ready" write, or Ready wins again.
-    expect(updateStatus.indexOf("if let blockedReason")).toBeLessThan(
-      updateStatus.indexOf('statusMessage = "Ready"'),
-    );
+    // The blocked branch must come before the "Ready" write, or Ready wins again. `expectOrder`,
+    // because the bare form passes when the blocked branch is DELETED: absent, `indexOf` answers
+    // -1, and -1 is less than any index.
+    expectOrder(updateStatus, "if let blockedReason", 'statusMessage = "Ready"');
   });
 
   test("the fn monitor sets its own half of the reason and clears it on success", () => {
