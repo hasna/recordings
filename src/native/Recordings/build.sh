@@ -993,8 +993,10 @@ if [ "$MODE" = "release" ]; then
         fi
     fi
 elif [ "$MODE" = "local" ]; then
-    # Same policy file and same sourced reader the installer and artifact tool use,
-    # so the builder and the target can never disagree about the approved set.
+    # Same policy file and same sourced reader the installer uses. The artifact tool
+    # re-implements the same rules in TypeScript and re-checks the target later, so
+    # agreement between the two implementations rests on their shared contract test,
+    # not on shared code.
     LOCAL_TARGET_POLICY="${PACKAGE_ROOT}/scripts/policy/local-only-approved-targets.txt"
     LOCAL_TARGET_READER="${PACKAGE_ROOT}/scripts/read_local_only_targets.sh"
     [ -f "$LOCAL_TARGET_READER" ] && [ ! -L "$LOCAL_TARGET_READER" ] || {

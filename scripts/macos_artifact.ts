@@ -64,17 +64,29 @@ export const LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH = join(
   "local-only-approved-targets.txt",
 );
 
-/// The approved local-only targets are policy data, not code: the same file backs
-/// the TypeScript validators and both shell entry points so a target is declared
-/// once. Parsing stays deliberately strict — a malformed policy file fails closed
-/// rather than silently widening the allowlist.
+// The approved local-only targets are policy data, not code: one file is read by
+// this validator and, through scripts/read_local_only_targets.sh, by both shell entry
+// points, so a target is declared once. The shell reader is a separate implementation
+// of these rules; equivalence is enforced by an executing contract test, not by shared
+// code. Parsing stays deliberately strict — a malformed policy fails closed rather than
+// silently widening the allowlist.
+//
+// This is an operator-integrity control, NOT an authorization boundary. The file sits in
+// the same package root as the guards that read it, so anyone able to edit it can edit
+// those guards. Widening it still grants nothing on its own: the install additionally
+// requires a matching `hostname -s`, a matching authenticated Tailscale node digest, and
+// a matching authenticated manifest SHA-256.
 export function localOnlyApprovedTargets(
   policyPath: string = LOCAL_ONLY_APPROVED_TARGETS_POLICY_PATH,
 ): string[] {
   const contents = readFileSync(policyPath, "utf8").replace(/^﻿/, "");
   const targets = contents
     .split("\n")
-    .map((line) => line.replace(/\r$/, "").trim())
+    // Deliberately NOT String.trim(): trim() also strips U+FEFF and U+00A0, which
+    // bash's [[:space:]] under LC_ALL=C does not, so a trailing NBSP or BOM would be
+    // accepted here and rejected by the shell reader. ASCII-only trimming keeps the
+    // two readers byte-for-byte equivalent.
+    .map((line) => line.replace(/\r$/, "").replace(/^[\t ]+|[\t ]+$/g, ""))
     .filter((line) => line.length > 0 && !line.startsWith("#"));
   if (targets.length === 0) {
     throw new Error("local-only approved target policy lists no targets");

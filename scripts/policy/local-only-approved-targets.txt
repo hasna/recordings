@@ -5,10 +5,17 @@
 # entry points (`scripts/install_macos_app.sh`, `src/native/Recordings/build.sh`)
 # read this file, so a target is added in exactly one place.
 #
-# Listing a target here does not weaken any other local-only control. Every
-# local-only artifact is still ad-hoc signed and non-notarized, must be built on
-# a Mac other than the target, and stays bound to the target's authenticated
-# machine identity digest. Release artifacts ignore this file entirely and use
-# the fleet target policy.
+# This file is an OPERATOR-INTEGRITY control, NOT an authorization boundary. It
+# lives in the same package root as the scripts that read it, so anyone who can
+# edit it can equally edit those guards; it is not ownership- or mode-checked
+# beyond "regular file, not a symlink". Adding a name here therefore grants
+# nothing by itself.
+#
+# Every local-only artifact is still ad-hoc signed and non-notarized, must be
+# built on a Mac other than the target AND on a different authenticated Tailscale
+# node, and stays bound to the target's authenticated machine-identity digest; the
+# install additionally re-checks `hostname -s`, the live Tailscale node digest,
+# and an authenticated manifest SHA-256. Release artifacts ignore this file
+# entirely and use the fleet target policy.
 station03
 station06

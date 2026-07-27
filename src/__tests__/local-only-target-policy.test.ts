@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -131,7 +131,7 @@ describe("local-only approved target policy", () => {
     const accepted = [
       "station03\nstation06\n",
       "station03\r\nstation06\r\n",
-      "﻿station03\nstation06\n",
+      "\ufeffstation03\nstation06\n",
       "  station03  \n\tstation06\t\n",
       "# comment\n\n  # indented comment\nstation03\n",
       "station03",
@@ -155,6 +155,16 @@ describe("local-only approved target policy", () => {
       "s\n",
       "# only comments\n",
       "   \n\t\n",
+      // Non-ASCII whitespace and NUL. These five diverged before: JS trim() strips
+      // U+FEFF and U+00A0 (both ECMAScript WhiteSpace) while bash's [[:space:]] under
+      // LC_ALL=C does not, and bash `read` silently discards NUL — so
+      // "station03\0station99" parsed as the single target "station03station99",
+      // quietly dropping station03 from the allowlist. Both readers must now reject.
+      "station03\u00a0\n",
+      "\u00a0station03\n",
+      "station03\ufeff\n",
+      "station03\u0000station99\n",
+      "station03\u0000\n",
     ];
     for (const contents of rejected) {
       const shell = shellReaderVerdict(contents, "station03");
@@ -189,6 +199,139 @@ read_local_only_targets /nonexistent/policy.txt L M station03`,
     ]);
     expect(missing.exitCode).not.toBe(0);
     expect(missing.stderr.toString()).toContain("policy is missing");
+  });
+
+  // The installer's own gate, actually executed. The macOS-only tool set is stubbed
+  // and HOME is placed outside the world-writable /tmp that makes the existing
+  // lifecycle fixtures fail on Linux, so the run reaches the local-only target check.
+  // Everything here is pre-mutation: the gate is at install_macos_app.sh:341 and the
+  // first user-data mutation is the `mv` far below it.
+  const installerToolOverrides = [
+    "AWK", "BASENAME", "CHMOD", "CODESIGN", "CP", "DATE", "DD", "DF", "DIFF", "DIRNAME",
+    "DITTO", "DU", "GREP", "HEAD", "HOSTNAME", "ID", "IOREG", "LS", "LSOF", "MDFIND",
+    "MKDIR", "MKTEMP", "MV", "OPEN", "PS", "RM", "RMDIR", "SED", "SHASUM", "SLEEP",
+    "SPCTL", "STAT", "SW_VERS", "SYSPOLICY_CHECK", "TAIL", "TR", "XCRUN",
+  ];
+
+  function runInstallerTargetGate(
+    approvedTarget: string,
+    options: { policyContents?: string | null; removeReader?: boolean } = {},
+  ): { exitCode: number; stderr: string } {
+    const root = mkdtempSync(join(process.env["HOME"] ?? tmpdir(), ".rec-gate-"));
+    try {
+      const bin = join(root, "bin");
+      const home = join(root, "home");
+      const packageRoot = join(root, "pkg");
+      mkdirSync(bin, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(join(packageRoot, "scripts", "policy"), { recursive: true });
+
+      writeFileSync(join(bin, "stub"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      writeFileSync(join(bin, "uname"), "#!/bin/sh\necho Darwin\n", { mode: 0o755 });
+      // The only stat format the script uses before the target gate is BSD `-f '%u'`
+      // (owner uid), which GNU stat spells `-c '%u'`. Translating just that is what
+      // lets the home-ancestor check pass on Linux and the run reach the gate.
+      writeFileSync(
+        join(bin, "stat"),
+        '#!/bin/sh\n[ "$1" = "-f" ] && [ "$2" = "%u" ] && exec /usr/bin/stat -c "%u" "$3"\nexec /usr/bin/stat "$@"\n',
+        { mode: 0o755 },
+      );
+
+      const scripts = join(packageRoot, "scripts");
+      writeFileSync(
+        join(scripts, "install_macos_app.sh"),
+        readRepositoryFile("scripts/install_macos_app.sh"),
+        { mode: 0o755 },
+      );
+      if (!options.removeReader) {
+        writeFileSync(
+          join(scripts, "read_local_only_targets.sh"),
+          readRepositoryFile(readerRelativePath),
+          { mode: 0o644 },
+        );
+      }
+      const policy = join(scripts, "policy", "local-only-approved-targets.txt");
+      if (options.policyContents !== null) {
+        writeFileSync(
+          policy,
+          options.policyContents ?? readRepositoryFile(policyRelativePath),
+        );
+      }
+      const artifact = join(root, "artifact.zip");
+      const manifest = join(root, "manifest.json");
+      writeFileSync(artifact, "");
+      writeFileSync(manifest, "{}");
+
+      const environment: Record<string, string> = {
+        PATH: process.env["PATH"] ?? "",
+        HOME: home,
+        RECORDINGS_BUN_EXECUTABLE: process.execPath,
+        RECORDINGS_TEST_INSTALL_UNAME_EXECUTABLE: join(bin, "uname"),
+      };
+      for (const tool of installerToolOverrides) {
+        // The script derives PACKAGE_ROOT from `dirname`, so tools whose OUTPUT it
+        // consumes must be real; only the macOS-only ones get the no-op stub.
+        const shimmed = tool === "STAT" ? join(bin, "stat") : null;
+        const real = shimmed ?? Bun.which(tool.toLowerCase());
+        environment[`RECORDINGS_TEST_INSTALL_${tool}_EXECUTABLE`] = real ?? join(bin, "stub");
+      }
+
+      const result = Bun.spawnSync(
+        [
+          "bash", join(scripts, "install_macos_app.sh"),
+          "--artifact", artifact,
+          "--manifest", manifest,
+          "--manifest-sha256", "a".repeat(64),
+          "--expected-source-sha", "b".repeat(40),
+          "--expected-version", "0.2.14",
+          "--artifact-policy", "local-only",
+          "--approved-target", approvedTarget,
+          "--approved-target-identity-kind", "tailscale_node_id_sha256",
+          "--approved-target-identity-sha256", "c".repeat(64),
+          "--acknowledge-local-signing-and-permissions",
+        ],
+        { env: environment },
+      );
+      return { exitCode: result.exitCode, stderr: result.stderr.toString() };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("the installer gate accepts approved targets and rejects everything else", () => {
+    for (const approved of ["station03", "station06"]) {
+      const result = runInstallerTargetGate(approved);
+      // Past the target gate, so it must fail later and for a different reason.
+      expect(result.stderr).not.toContain("approved --approved-target");
+      expect(result.stderr).not.toContain("policy is missing");
+    }
+    for (const rejected of ["station05", "fleet", "../../etc/passwd", "*", "Station03", "attacker"]) {
+      const result = runInstallerTargetGate(rejected);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("approved --approved-target");
+    }
+  });
+
+  test("the installer gate fails closed on an unusable policy or a missing reader", () => {
+    const missingPolicy = runInstallerTargetGate("station03", { policyContents: null });
+    expect(missingPolicy.exitCode).toBe(2);
+    expect(missingPolicy.stderr).toContain("policy is missing");
+
+    const emptyPolicy = runInstallerTargetGate("station03", { policyContents: "# nothing\n" });
+    expect(emptyPolicy.exitCode).toBe(2);
+    expect(emptyPolicy.stderr).toContain("lists no targets");
+
+    const fleetPolicy = runInstallerTargetGate("station03", { policyContents: "fleet\n" });
+    expect(fleetPolicy.exitCode).toBe(2);
+    expect(fleetPolicy.stderr).toContain("must not list the release fleet target");
+
+    const nulPolicy = runInstallerTargetGate("station03", { policyContents: "station03\0station99\n" });
+    expect(nulPolicy.exitCode).toBe(2);
+    expect(nulPolicy.stderr).toContain("NUL byte");
+
+    const missingReader = runInstallerTargetGate("station03", { removeReader: true });
+    expect(missingReader.exitCode).toBe(2);
+    expect(missingReader.stderr).toContain("target reader is missing");
   });
 
   test("resolves the policy path independently of the working directory", () => {
