@@ -484,6 +484,29 @@ context, `transcriber_prompt` for cleanup instructions, and `post_processing_mod
 `off`, `auto`, or `always`. Tool results preserve `raw_text` and return `processed_text`
 only when post-processing actually produced enhanced output.
 
+## Releasing
+
+The release version lives in four places: `package.json`, `src/version.ts`, and both
+`CFBundleShortVersionString` and `CFBundleVersion` in
+`src/native/Recordings/RecordingsLib/Info.plist`. Bump them together, never by hand:
+
+```bash
+bun run version:set 0.3.0   # rewrites every site
+bun run version:check       # exits 1 if any site disagrees with package.json
+```
+
+`package.json` is the authority because `scripts/build_companion_cli.sh` compares the
+compiled CLI's `--version` against it and exits 1 on a mismatch. That abort propagates
+through `src/native/Recordings/build.sh` (`set -euo pipefail`), so a partial bump does
+not just fail an assertion -- the native app cannot be built at all, and the whole
+`native-app-companion-contract` suite aborts on its first test.
+
+Nothing enforces this automatically: the repo has no CI workflows. `version:check` runs
+on `prepack`, `prepublishOnly` runs `bun test`, and `bun test` covers the sites through
+`src/__tests__/native-bundle-version.test.ts` and
+`src/__tests__/version-site-guard.test.ts` -- but a branch is only as verified as the
+last local run.
+
 ## Data Directory
 
 Data is stored in `~/.hasna/recordings/`.
