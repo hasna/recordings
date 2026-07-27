@@ -128,11 +128,35 @@ describe("native capture warm-up contract", () => {
     expect(stopLine.trim(), "recorder?.stop() must stand alone, not trail a condition").toBe(
       "recorder?.stop()",
     );
+    // A7: `defer { recorder?.stop() }` on its own line satisfies the trim check above and
+    // contains none of the tokens below, so `defer` is named explicitly.
     const beforeStop = abandon.slice(captured, stopped);
-    for (const conditional of ["if ", "guard ", "switch "]) {
+    for (const conditional of ["if ", "guard ", "switch ", "defer"]) {
       expect(
         beforeStop,
         `recorder?.stop() must not be conditional (found "${conditional}" between capture and stop)`,
+      ).not.toContain(conditional);
+    }
+
+    // A6: scanning only from the capture line leaves the space ABOVE it unchecked, and an early
+    // return there is worse than a guarded stop — `guard isWarmingUpCapture else { return }`
+    // makes the flag true for the whole body, so `if isWarmingUpCapture { return }` inserted
+    // before the capture is an UNCONDITIONAL bail: no teardown, no disclosure, microphone left
+    // open, engine wedged. Every string, index and ordering assertion still passes. So scan the
+    // whole body up to the stop, starting just past the opening guard, which owns the only
+    // legitimate `return`.
+    const openingGuard = "guard isWarmingUpCapture else { return }";
+    const guardEnds = abandon.indexOf(openingGuard);
+    expect(guardEnds, `abandon must open with: ${openingGuard}`).toBeGreaterThan(-1);
+    const bodyBeforeStop = abandon.slice(guardEnds + openingGuard.length, stopped);
+    expect(
+      bodyBeforeStop,
+      "nothing may return between the opening guard and the microphone being released",
+    ).not.toMatch(/\breturn\b/);
+    for (const conditional of ["if ", "guard ", "switch ", "defer"]) {
+      expect(
+        bodyBeforeStop,
+        `no branch may precede the microphone release (found "${conditional}")`,
       ).not.toContain(conditional);
     }
 
@@ -288,6 +312,27 @@ describe("native capture warm-up contract", () => {
     // The composed value must be built from the whole dictionary and then published.
     expect(compositor).toMatch(/blockedReasons\s*\n\s*\.sorted/);
     expect(compositor).toContain("blockedReason = composed.isEmpty ? nil : composed");
+
+    // A8: banning `.filter` pins the syntax, not the class. Excluding a source at the WRITE
+    // reaches the identical effect with no filter anywhere — nothing is removed from the
+    // composition because nothing was ever put in:
+    //
+    //     if let reason, !reason.isEmpty, source != .pressConsumed {
+    //
+    // `blockedReason` stays nil, the glyph never changes, the whole disclosure is a no-op, and
+    // every assertion above survives. So pin the write as unconditional, and forbid `source`
+    // being compared at all: in this function it is a dictionary key, never a predicate.
+    expect(
+      compositor,
+      "the dictionary write must be unconditional — an excluded source never reaches the glyph",
+    ).toContain("if let reason, !reason.isEmpty {\n            blockedReasons[source] = reason");
+    expect(
+      compositor,
+      "`source` is a key here, never a predicate; comparing it silently drops a whole cause",
+    ).not.toMatch(/source\s*[!=]=/);
+    // Both the reads of `source` that may exist, and nothing else.
+    const sourceUses = compositor.match(/\bsource\b/g) ?? [];
+    expect(sourceUses.length, "unexpected extra use of `source` in the compositor").toBe(3);
     // Both slots this branch writes must be reachable through it.
     for (const source of [".pressConsumed", ".delivery"]) {
       expect(engine, `no writer for ${source}`).toContain(`for: ${source}`);
