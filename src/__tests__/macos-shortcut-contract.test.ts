@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  evaluateSwiftCondition,
   expectOrder,
   sliceBetween,
   sliceBetweenUnique,
@@ -725,7 +726,11 @@ describe("secure-input delivery contract", () => {
     const settlement = sliceBetween(
       engineSource,
       "let shouldRestore = switch outcome {",
-      "if shouldRestore {",
+      // NOT `"if shouldRestore {"`. That end marker pinned the exact spelling of a guard two
+      // lines below a test that is only about the decision TABLE, so parenthesising the condition
+      // — or putting a comment in it — failed here. The restore CALL is the stable structural
+      // boundary, and the two assertions below are unaffected by the `if` line falling inside.
+      "previousClipboard.restore(",
     );
     expect(settlement).toContain("case .secureInputActive:\n                false");
     // The other outcomes still honour the opt-in.
@@ -758,7 +763,24 @@ describe("secure-input delivery contract", () => {
     // or renaming `pasteboard`, is a refactor rather than a test failure.
     const restoreGuard = settlementClosure.match(/if ([^\n{]+?)\s*\{[^{}]*?previousClipboard\.restore\(/);
     expect(restoreGuard, "the restore is no longer guarded by a single `if`").not.toBeNull();
-    expect(restoreGuard?.[1]).toBe("shouldRestore");
+
+    // Folded in from PR #43, closed as superseded by this test: evaluate the captured guard for
+    // BOTH values of the decision instead of pinning its spelling. Each direction is a distinct
+    // real defect — inverted, a secure-input refusal restores over the transcript the status line
+    // has just told the owner to press Cmd-V for; hardcoded `true`, every refusal destroys it;
+    // hardcoded `false`, no successful dictation ever gets the owner's clipboard back.
+    //
+    // #43 located this call site by `condition.includes("shouldRestore")`, a substring test on the
+    // guard's own text. Measured post-rebase onto 40c37b1, that filter is defeated by a second
+    // restore inside this same closure guarded by `if stillOwnsChangeCount {` (true in
+    // REFUSAL_SCENARIO) at EXIT=0 across all 104 tests of the five engine-facing suites, and it
+    // false-positives on a legitimate `if shouldRestoreAfterRetry {`. The `restores.length` count
+    // above, scoped to this closure, is the discriminator that holds: it excludes
+    // `writeClipboardPreservingOnFailure` because that restore is in a different FUNCTION, not
+    // because its guard is spelled differently.
+    const restoreCondition = restoreGuard?.[1] ?? "";
+    expect(evaluateSwiftCondition(restoreCondition, { shouldRestore: true })).toBe(true);
+    expect(evaluateSwiftCondition(restoreCondition, { shouldRestore: false })).toBe(false);
 
     // And nothing else in settlement may destroy the clipboard. `pasteboard.clearContents()` wipes
     // the transcript the status line just told the owner to press Cmd-V for, without touching
