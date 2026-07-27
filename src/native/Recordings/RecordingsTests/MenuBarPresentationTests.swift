@@ -47,6 +47,74 @@ struct MenuBarPresentationTests {
         }
     }
 
+    /// The defect this pins: the idle branch discarded `statusMessage` and set `mic.fill` /
+    /// "Recordings", and the always-visible menu-bar item renders ONLY the icon and the
+    /// accessibility label. So a blocked app was byte-identical to Ready for sighted and
+    /// VoiceOver users alike, and "press Cmd-V" lived only in a popover nobody had opened.
+    @Test("a blocked idle app is distinguishable from Ready by BOTH icon and label")
+    func blockedIsVisible() {
+        let reason = "This field blocks typing (secure input) — transcript copied, press Cmd-V"
+        let ready = MenuBarPresentation(
+            isRecording: false,
+            canStartRecording: true,
+            statusMessage: "Ready"
+        )
+        let blocked = MenuBarPresentation(
+            isRecording: false,
+            canStartRecording: true,
+            statusMessage: "Ready",
+            blockedReason: reason
+        )
+
+        #expect(blocked.iconName != ready.iconName, "the icon is the only signal a sighted user gets")
+        #expect(
+            blocked.accessibilityLabel != ready.accessibilityLabel,
+            "the label is the only signal VoiceOver gets"
+        )
+        #expect(blocked.iconName == MenuBarPresentation.blockedIconName)
+        #expect(blocked.accessibilityLabel.contains(reason))
+        #expect(blocked.statusText == reason)
+        #expect(blocked.isBlocked)
+        #expect(!ready.isBlocked)
+        // A blocked trigger or a blocked paste does not make Start unavailable, and the
+        // presentation must keep matching `canStartRecording` exactly.
+        #expect(blocked.primaryActionEnabled)
+    }
+
+    @Test("an empty blocked reason is not a blocked state")
+    func emptyReasonIsNotBlocked() {
+        let presentation = MenuBarPresentation(
+            isRecording: false,
+            canStartRecording: true,
+            statusMessage: "Ready",
+            blockedReason: ""
+        )
+        #expect(presentation.iconName == MenuBarPresentation.idleIconName)
+        #expect(!presentation.isBlocked)
+    }
+
+    @Test("recording and busy states outrank a blocked reason")
+    func liveStatesWin() {
+        let recording = MenuBarPresentation(
+            isRecording: true,
+            canStartRecording: false,
+            statusMessage: "Recording",
+            blockedReason: "stale reason"
+        )
+        #expect(recording.iconName == "waveform")
+        #expect(!recording.isBlocked)
+
+        let busy = MenuBarPresentation(
+            isRecording: false,
+            canStartRecording: false,
+            statusMessage: "Transcribing...",
+            blockedReason: "stale reason"
+        )
+        #expect(busy.iconName == "ellipsis.circle")
+        #expect(!busy.primaryActionEnabled)
+        #expect(!busy.isBlocked)
+    }
+
     @Test("presentation follows canStartRecording exactly, not isTranscribing alone")
     func presentationTracksTheStartGate() {
         // A pending intent decision keeps canStartRecording false even though
