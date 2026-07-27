@@ -25,16 +25,16 @@ struct AtomicActivator {
         let applicationPath = RecordingsUpdateConstants.applicationPath
         let previousPath = stagedUpdate.directory + "/previous.app"
         let failedCandidatePath = stagedUpdate.directory + "/failed-candidate.app"
-        let previousDigest = try digestIfPresent(applicationPath)
-        let candidateMode = try applicationMode(candidatePath)
-        let previousMode = previousDigest == nil ? nil : try applicationMode(applicationPath)
-        let candidateExecutableModes = try applicationExecutableModes(candidatePath)
+        let previousDigest = try Self.digestIfPresent(applicationPath)
+        let candidateMode = try Self.applicationMode(candidatePath)
+        let previousMode = previousDigest == nil ? nil : try Self.applicationMode(applicationPath)
+        let candidateExecutableModes = try Self.applicationExecutableModes(candidatePath)
         let previousExecutableModes = previousDigest == nil
             ? nil
-            : try applicationExecutableModes(applicationPath)
-        guard try digestIfPresent(candidatePath) == payload.candidateTreeSHA256,
-              try digestIfPresent(previousPath) == nil,
-              try digestIfPresent(failedCandidatePath) == nil
+            : try Self.applicationExecutableModes(applicationPath)
+        guard try Self.digestIfPresent(candidatePath) == payload.candidateTreeSHA256,
+              try Self.digestIfPresent(previousPath) == nil,
+              try Self.digestIfPresent(failedCandidatePath) == nil
         else {
             throw AtomicActivationError.invalidPreparedState
         }
@@ -83,7 +83,7 @@ struct AtomicActivator {
               journal.cohortPackageSHA256 == payload.packageSHA256,
               journal.candidateTreeSHA256 == payload.candidateTreeSHA256,
               journal.minimumOSVersion == payload.minimumOSVersion,
-              journal.envelopePayloadSHA256 == envelopeDigest(payload)
+              journal.envelopePayloadSHA256 == (try envelopeDigest(payload))
         else {
             throw AtomicActivationError.recoveryRequired
         }
@@ -171,7 +171,7 @@ struct AtomicActivator {
             journal.phase = "launch-barrier-releasing"
             try durableJournal.write(journal)
             try namespace.releaseCommittedLaunchBarrier(journal: journal)
-            try Self.requireCommittedNamespaceState(journal)
+            try Self.requireCommittedNamespaceState(journal: journal)
             journal.phase = "launch-barrier-released"
             try durableJournal.write(journal)
             journal.phase = "activated"
