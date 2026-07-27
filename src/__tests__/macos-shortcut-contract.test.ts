@@ -218,7 +218,9 @@ describe("blocked-trigger reporting contract", () => {
   test("a trigger that fires and is dropped is logged rather than swallowed", () => {
     expect(engineSource).toContain("logIgnoredTrigger(.fnKey)");
     expect(engineSource).toContain("logIgnoredTrigger(.keyboardShortcut)");
-    expect(engineSource).toContain('log(\n            "trigger ignored trigger=\\(trigger)');
+    // Assert the log key only. Matching the surrounding indentation would make this fail on
+    // any reformatting, which is churn rather than a broken contract.
+    expect(engineSource).toContain('"trigger ignored trigger=');
   });
 });
 
@@ -228,40 +230,80 @@ describe("blocked-trigger reporting contract", () => {
  */
 describe("running bundle detection", () => {
   const psLine = (path: string) => `${path}/Contents/MacOS/Recordings`;
+  /** Stands in for the filesystem: only these bundles are real. */
+  const onDisk = (...real: string[]) => (path: string) => real.includes(path);
 
   test("reports the bundle root of a running instance", () => {
     expect(
-      runningAppBundlePaths(() =>
-        [
-          "/sbin/launchd",
-          psLine("/Users/hasna/.hasna/recordings/Recordings.app"),
-          "/usr/libexec/cfprefsd agent",
-        ].join("\n"),
+      runningAppBundlePaths(
+        () =>
+          [
+            "/sbin/launchd",
+            psLine("/Users/hasna/.hasna/recordings/Recordings.app"),
+            "/usr/libexec/cfprefsd",
+          ].join("\n"),
+        onDisk("/Users/hasna/.hasna/recordings/Recordings.app"),
       ),
     ).toEqual(["/Users/hasna/.hasna/recordings/Recordings.app"]);
   });
 
   test("reports every distinct bundle when more than one copy runs", () => {
     expect(
-      runningAppBundlePaths(() =>
-        [
-          psLine("/Applications/Recordings.app"),
-          psLine("/Users/hasna/Applications/Recordings.app"),
-          `${psLine("/Applications/Recordings.app")} --relaunch`,
-        ].join("\n"),
+      runningAppBundlePaths(
+        () =>
+          [
+            psLine("/Applications/Recordings.app"),
+            psLine("/Users/hasna/Applications/Recordings.app"),
+            psLine("/Applications/Recordings.app"),
+          ].join("\n"),
+        onDisk("/Applications/Recordings.app", "/Users/hasna/Applications/Recordings.app"),
       ),
     ).toEqual(["/Applications/Recordings.app", "/Users/hasna/Applications/Recordings.app"]);
   });
 
-  test("survives a home directory containing spaces", () => {
-    expect(runningAppBundlePaths(() => psLine("/Users/first last/Applications/Recordings.app"))).toEqual([
-      "/Users/first last/Applications/Recordings.app",
-    ]);
+  test("keeps a bundle path that contains spaces", () => {
+    const bundle = "/Users/first last/Applications/Recordings.app";
+    expect(runningAppBundlePaths(() => psLine(bundle), onDisk(bundle))).toEqual([bundle]);
   });
 
-  test("does not match the CLI, a log path, or an unavailable process list", () => {
-    expect(runningAppBundlePaths(() => "/Users/hasna/.bun/bin/recordings shortcut")).toEqual([]);
-    expect(runningAppBundlePaths(() => "tail -f /Users/hasna/.hasna/recordings/Recordings.log")).toEqual([]);
-    expect(runningAppBundlePaths(() => null)).toEqual([]);
+  test("resolves argument text by asking the filesystem instead of guessing", () => {
+    // "/bin/sh -c /Applications/Recordings.app" and "/Users/first last/Recordings.app" are
+    // the same shape, so text alone cannot say where the path starts. The longest candidate
+    // here does not exist, so the real bundle is the one that survives.
+    expect(
+      runningAppBundlePaths(
+        () => `/bin/sh -c ${psLine("/Applications/Recordings.app")}`,
+        onDisk("/Applications/Recordings.app"),
+      ),
+    ).toEqual(["/Applications/Recordings.app"]);
+  });
+
+  test("reports nothing when no candidate is a real bundle", () => {
+    expect(
+      runningAppBundlePaths(() => psLine("/bogus/Recordings.app"), onDisk()),
+    ).toEqual([]);
+  });
+
+  test("does not match the CLI, another process, or an unavailable process list", () => {
+    const anything = () => true;
+    expect(runningAppBundlePaths(() => "/Users/hasna/.bun/bin/recordings", anything)).toEqual([]);
+    expect(runningAppBundlePaths(() => "/usr/bin/tail", anything)).toEqual([]);
+    expect(runningAppBundlePaths(() => null, anything)).toEqual([]);
+    expect(runningAppBundlePaths(() => "", anything)).toEqual([]);
+  });
+
+  test("ignores paths that are not the executable inside the bundle", () => {
+    const anything = () => true;
+    expect(runningAppBundlePaths(() => "/Applications/Recordings.app", anything)).toEqual([]);
+    expect(
+      runningAppBundlePaths(
+        () => "/Applications/Recordings.app/Contents/Helpers/recordings-update-client",
+        anything,
+      ),
+    ).toEqual([]);
+    // A nested path below MacOS/ is not the executable either.
+    expect(
+      runningAppBundlePaths(() => "/Applications/Recordings.app/Contents/MacOS/sub/thing", anything),
+    ).toEqual([]);
   });
 });

@@ -20,6 +20,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { RECORDINGS_BUNDLE_IDENTIFIER } from "./macos-permissions.js";
 
 /**
@@ -271,9 +272,12 @@ export function formatShortcut(shortcut: Shortcut): string {
 export type ProcessLister = () => string | null;
 
 const defaultProcessLister: ProcessLister = () => {
-  // Read-only: list arguments only, and match on the bundle path rather than a loose
-  // pattern, so this can never be confused with any other process.
-  const result = spawnSync("/bin/ps", ["-Ao", "args="], { encoding: "utf8" });
+  // `comm=` prints the executable path and nothing else. `args=` would include arguments,
+  // and a wrapper such as `/bin/sh -c /path/Recordings.app/...` would then make the start
+  // of the path ambiguous — the pattern below cannot tell an argument boundary from a
+  // directory name once spaces are legal in the path. `-ww` stops ps truncating to the
+  // terminal width, which would silently cut long bundle paths short.
+  const result = spawnSync("/bin/ps", ["-Awwo", "comm="], { encoding: "utf8" });
   if (result.status !== 0) return null;
   return result.stdout;
 };
@@ -286,16 +290,33 @@ const defaultProcessLister: ProcessLister = () => {
  * grant have to go". Reporting a nominal install path instead is how a permission readout
  * ends up naming a bundle that is not the one being denied.
  */
-export function runningAppBundlePaths(lister: ProcessLister = defaultProcessLister): string[] {
+export function runningAppBundlePaths(
+  lister: ProcessLister = defaultProcessLister,
+  bundleExists: (path: string) => boolean = existsSync,
+): string[] {
   const listing = lister();
   if (!listing) return [];
-  // Anchored on the executable inside the bundle, and lazy from the first slash on the
-  // line, so a home directory containing spaces still yields the whole bundle path.
-  const bundlePattern = /(\/[^\n]*?Recordings\.app)\/Contents\/MacOS\//g;
+  const suffixPattern = /\/Contents\/MacOS\/[^/]+$/;
   const paths = new Set<string>();
-  for (const line of listing.split("\n")) {
-    for (const match of line.matchAll(bundlePattern)) {
-      paths.add(match[1]!);
+
+  for (const raw of listing.split("\n")) {
+    const line = raw.trim();
+    const suffix = suffixPattern.exec(line);
+    if (!suffix) continue;
+    const bundle = line.slice(0, suffix.index);
+    if (!bundle.endsWith(".app")) continue;
+
+    // Spaces are legal in a bundle path, so text alone cannot say where the path begins:
+    // "/bin/sh -c /Applications/Recordings.app" and "/Users/first last/Recordings.app" are
+    // the same shape. Resolve it by asking the filesystem instead of guessing — try the
+    // longest candidate first and take the one that is really a bundle on disk. A path that
+    // does not exist is not a running app, so a wrapper's arguments fall away by themselves.
+    for (let index = bundle.indexOf("/"); index !== -1; index = bundle.indexOf("/", index + 1)) {
+      const candidate = bundle.slice(index);
+      if (candidate.endsWith("Recordings.app") && bundleExists(candidate)) {
+        paths.add(candidate);
+        break;
+      }
     }
   }
   return [...paths].sort();
