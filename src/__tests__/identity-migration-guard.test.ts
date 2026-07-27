@@ -327,6 +327,145 @@ describe("designated-requirement identity-migration guard", () => {
     expect(readRepositoryFile("src/native/Recordings/build.sh")).toContain('CODESIGN_IDENTITY="-"');
   });
 
+  // The guard itself is a pure function of eight positional arguments and is covered
+  // above. What was covered by nothing is the CALL: an eight-slot unnamed positional
+  // contract pinned only by `toContain("recordings_enforce_identity_migration \\")`. That
+  // substring survives every semantic corruption of the call — hardcoding a policy,
+  // hardcoding an approval to "0", swapping the two approval arguments, swapping the two
+  // digest arguments, prefixing the call with a policy condition, or discarding its verdict
+  // with `|| true`. Each of those was measured as a survivor.
+  //
+  // So parse the invocation instead of grepping for it: join its backslash continuations
+  // into one logical line and assert the argument VECTOR, in order, plus the terminator.
+  // This is the same technique the Swift-interpolation renderer in trigger-diagnosis.test.ts
+  // uses — structure rather than substring.
+  //
+  // Stated plainly, because it is the difference between this and a proof: reading the
+  // call site is not the same as executing it. This does not demonstrate the guard runs
+  // during a real install; the one test that would is in macos-app-lifecycle.test.ts,
+  // which is 92 of 140 red on `main` on Linux and cannot serve as a gate here.
+  const identityGuardInvocation = (): { argv: string[]; terminator: string } => {
+    const installer = readRepositoryFile("scripts/install_macos_app.sh");
+    const lines = installer.split("\n");
+    const starts = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.trimStart().startsWith("recordings_enforce_identity_migration"));
+    // A second invocation, or one nested under a condition, is exactly the reintroduction
+    // this PR exists to prevent, so pin the count rather than taking the first match.
+    expect(starts.length).toBe(1);
+    const start = starts[0]!;
+    // Nothing may precede the call on its own logical line: `[ "$ARTIFACT_POLICY" = ... ] &&`
+    // in front of it re-conjoins the gate to one policy while every substring still matches.
+    expect(start.line).toBe(`recordings_enforce_identity_migration \\`);
+
+    let logical = "";
+    for (let index = start.index; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      const continues = line.endsWith("\\");
+      logical += (continues ? line.slice(0, -1) : line).trim() + " ";
+      if (!continues) break;
+    }
+    const [call, ...terminatorParts] = logical.trim().split("||");
+    const tokens = call!.trim().split(/\s+/);
+    expect(tokens[0]).toBe("recordings_enforce_identity_migration");
+    return {
+      argv: tokens.slice(1),
+      terminator: terminatorParts.length === 0 ? "" : `||${terminatorParts.join("||")}`.trim(),
+    };
+  };
+
+  test("the installer passes the guard its eight arguments in the documented order", () => {
+    const { argv } = identityGuardInvocation();
+    // The order is the guard's whole contract and it is unnamed positionals, so a swap is
+    // the single most likely real edit. The two approval slots and the two digest slots are
+    // adjacent same-shaped values -- swapping either pair inverts the release/ad-hoc
+    // separation the script header calls "distinct on purpose", and neither swap changes
+    // any substring in the file.
+    expect(argv).toEqual([
+      '"$ARTIFACT_POLICY"',
+      '"$identity_migration"',
+      '"$ALLOW_IDENTITY_MIGRATION"',
+      '"$ALLOW_ADHOC_IDENTITY_MIGRATION"',
+      '"$previous_identity_sha256"',
+      '"$candidate_identity_sha256"',
+      '"$EXPECTED_OLD_IDENTITY_SHA256"',
+      '"$EXPECTED_NEW_IDENTITY_SHA256"',
+    ]);
+  });
+
+  test("the installer aborts on the guard's refusal instead of discarding it", () => {
+    // `|| true` leaves the guard running, printing its refusal to stderr, and the install
+    // proceeding anyway -- the worst of the measured survivors, because the diagnostic
+    // still looks correct in the log.
+    expect(identityGuardInvocation().terminator).toBe("|| exit 1");
+  });
+
+  test("the computed migration flag is set, not hardcoded, by the requirement comparison", () => {
+    // `identity_migration=1` -> `=0` in the comparison loop feeds the guard a permanently
+    // clean input, so it always allows: an empty search space reading identical to a clean
+    // result. Pin both the initialization and the one place the comparison raises it.
+    const installer = readRepositoryFile("scripts/install_macos_app.sh");
+    const assignments = installer
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^identity_migration=/.test(line));
+    expect(assignments).toEqual(["identity_migration=0", "identity_migration=1"]);
+  });
+
+  // A gate whose only escape hatch is undiscoverable is an outage, not a safeguard. This
+  // guard turns what used to be a warn-and-proceed local-only reinstall into exit 1, and
+  // every ad-hoc rebuild changes the CDHash, so the approval flag is on the routine repair
+  // path rather than an exotic one. Before this PR the flag appeared in no usage output, no
+  // README text, and -- worst -- not in the `recordings app install` wrapper at all, which
+  // is the only install path the README documents. It was reachable solely by invoking the
+  // shell script directly after reading the refusal on stderr.
+  describe("the ad-hoc approval flag is discoverable", () => {
+    const flag = "--allow-adhoc-identity-migration";
+
+    test("the installer prints usage naming the flag, and exits 0", () => {
+      const result = Bun.spawnSync([
+        "bash",
+        join(repositoryRoot, "scripts/install_macos_app.sh"),
+        "--help",
+      ]);
+      expect(result.exitCode).toBe(0);
+      const usage = result.stdout.toString();
+      expect(usage).toContain("Usage: install_macos_app.sh");
+      expect(usage).toContain(flag);
+      // The consequence, not just the spelling: an operator reading this has to learn that
+      // approving the replacement is what costs them the grants.
+      expect(usage).toContain("Microphone");
+      expect(usage).toContain("Accessibility");
+    });
+
+    test("an unrecognized argument points at the usage output", () => {
+      // Pinned because the pre-existing negative test elsewhere asserts only the
+      // "Unknown argument" prefix, which a rewrite could satisfy while dropping the hint.
+      const result = Bun.spawnSync([
+        "bash",
+        join(repositoryRoot, "scripts/install_macos_app.sh"),
+        "--not-a-real-flag",
+      ]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr.toString()).toContain("--help");
+    });
+
+    test("the recordings CLI declares the flag and forwards it to the installer", () => {
+      // Declaring it without forwarding it, or forwarding it without declaring it, both
+      // leave the flag unusable through the documented path while a grep for the name
+      // still succeeds -- so assert both halves.
+      const cli = readRepositoryFile("src/cli/index.ts");
+      expect(cli).toContain(`"${flag}"`);
+      expect(cli).toContain(`installerArgs.push("${flag}")`);
+      expect(cli).toContain("allowAdhocIdentityMigration");
+    });
+
+    test("the README documents the flag on the local-only install path", () => {
+      const readme = readRepositoryFile("README.md");
+      expect(readme).toContain(flag);
+    });
+  });
+
   test("the installer refuses to run at all when the packaged guard is absent", () => {
     for (const artifactPolicy of ["release", "local-only"] as const) {
       const result = runInstallerPreflight({ artifactPolicy, removeIdentityGuard: true });

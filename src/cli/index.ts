@@ -833,6 +833,16 @@ appCommand
     "--allow-signing-identity-migration",
     "Allow one reviewed signer change that requires new macOS permission approval",
   )
+  // Distinct from --allow-signing-identity-migration, and it has to be reachable here:
+  // this is the only install path the README documents, so without it the installer's
+  // escape hatch is discoverable only from stderr and usable only by invoking
+  // scripts/install_macos_app.sh directly. A local-only repair install of an ad-hoc
+  // signed app hits the identity-migration gate every time, because every ad-hoc rebuild
+  // changes the CDHash.
+  .option(
+    "--allow-adhoc-identity-migration",
+    "Accept that replacing an ad-hoc signed local-only app voids its Microphone and Accessibility grants",
+  )
   .option("--launch", "Launch and verify the canonical app after installation")
   .option("--launch-timeout <seconds>", "Canonical process launch timeout")
   .action((opts: {
@@ -852,6 +862,7 @@ appCommand
     expectedOldIdentitySha256?: string;
     expectedNewIdentitySha256?: string;
     allowSigningIdentityMigration?: boolean;
+    allowAdhocIdentityMigration?: boolean;
     launch?: boolean;
     launchTimeout?: string;
   }) => {
@@ -993,6 +1004,9 @@ appCommand
     }
     if (opts.allowSigningIdentityMigration) {
       installerArgs.push("--allow-signing-identity-migration");
+    }
+    if (opts.allowAdhocIdentityMigration) {
+      installerArgs.push("--allow-adhoc-identity-migration");
     }
     if (opts.expectedOldIdentitySha256) {
       installerArgs.push("--expected-old-identity-sha256", opts.expectedOldIdentitySha256);

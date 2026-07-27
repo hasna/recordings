@@ -146,6 +146,63 @@ require_absolute_canonical_owned_home() {
   }
 }
 
+# Every accepted argument, because until now there was no usage output at all and an
+# unrecognized argument printed only "Unknown argument". That mattered most for
+# --allow-adhoc-identity-migration: the identity-migration gate refuses a local-only
+# reinstall by default, and an operator repairing a station had no way to discover the
+# approval flag except by reading the refusal on stderr or the script itself.
+print_usage() {
+  cat <<'USAGE'
+Usage: install_macos_app.sh --artifact <zip> --manifest <json> [options]
+
+Installs a Recordings macOS app artifact transactionally. Normally invoked through
+`recordings app install`, which forwards these arguments.
+
+Artifact and version:
+  --artifact <path>                    Finalized artifact archive to install
+  --manifest <path>                    Artifact manifest describing it
+  --manifest-sha256 <sha256>           Authenticated digest of the manifest
+  --expected-source-sha <sha>          Approved 40-character source commit
+  --expected-version <version>         Version the artifact must declare
+  --expected-team-id <team-id>         Required Apple Developer team identifier
+
+Target selection:
+  --expected-hostname <name>           Require this live short hostname before mutating
+  --artifact-policy <release|local-only>
+                                       Trust policy to evaluate the artifact under
+  --approved-target <name>             Approved target for a local-only artifact
+  --approved-target-identity-kind <kind>
+                                       hardware_uuid_sha256 or tailscale_node_id_sha256
+  --approved-target-identity-sha256 <sha256>
+                                       Authenticated digest of the target identity
+
+Identity migration. Replacing an installed app with one signed by a different identity
+voids the Microphone and Accessibility grants the installed app holds; macOS keys those
+grants to code identity, and they cannot be restored by the installer. Both approvals are
+one-shot and deliberately distinct: approving a release signer rotation is not approving
+an ad-hoc replacement of a certificate-rooted install.
+  --allow-signing-identity-migration   Approve one reviewed release signer change
+  --expected-old-identity-sha256 <sha256>
+                                       Exact installed identity approved for migration
+  --expected-new-identity-sha256 <sha256>
+                                       Exact candidate identity approved for migration
+  --allow-adhoc-identity-migration     Approve replacing an installed app with an ad-hoc
+                                       signed local-only build. Required for essentially
+                                       every local-only reinstall, including a repair
+                                       install of the same version, because each ad-hoc
+                                       rebuild produces a new CDHash and is therefore a
+                                       real identity migration. Accepts that Microphone
+                                       and Accessibility must be granted again afterwards.
+  --acknowledge-local-signing-and-permissions
+                                       Acknowledge local-only ad-hoc signing up front
+
+Launch and help:
+  --launch                             Launch the app after installing
+  --launch-timeout <seconds>           Seconds to wait for the launch to settle
+  --help, -h                           Print this message and exit 0
+USAGE
+}
+
 ARTIFACT_PATH=""
 MANIFEST_PATH=""
 EXPECTED_TEAM_ID="${RECORDINGS_EXPECTED_TEAM_IDENTIFIER:-}"
@@ -247,8 +304,13 @@ while [ "$#" -gt 0 ]; do
       LAUNCH_TIMEOUT_SECONDS="${2:-}"
       shift 2
       ;;
+    --help | -h)
+      print_usage
+      exit 0
+      ;;
     *)
       echo "Unknown argument: $1" >&2
+      echo "Run with --help for the accepted arguments." >&2
       exit 2
       ;;
   esac
