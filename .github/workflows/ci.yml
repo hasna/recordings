@@ -342,16 +342,42 @@ jobs:
         # slowest single test at 9.995s). A low-parallelism headless runner burning 10s TCC budgets
         # serially is the case this is sized for. A timeout kill shows up as this step's own red
         # outcome rather than as the annotation below, since a killed step runs no trailing shell.
+        id: native_tests
         if: steps.compile.outputs.compiled == 'true'
         continue-on-error: true
         timeout-minutes: 12
         shell: bash
         run: |
           set -o pipefail
-          if swift test --package-path src/native/Recordings 2>&1 | tee swift-test.log; then
-            echo "::notice title=Native tests passed::swift test is green on this runner and can become a gate."
+          swift test --package-path src/native/Recordings 2>&1 | tee swift-test.log
+
+      - name: What the native test run actually established
+        # `continue-on-error` above sets this step's CONCLUSION to success even when it was killed by
+        # its own timeout — that is what stops a non-gating step from failing the job, and it is also
+        # why the green tick on "Run the native test suites" must NOT be read as "the tests passed".
+        # Measured on run 30310641836, the first time that bound was in place: the step is reported
+        # `success` while swift-test.log holds 140 completions of 368 and no run summary at all,
+        # because the bound expired first. A tick that overstates its scope is the exact failure this
+        # workflow exists to prevent, so the outcome is stated here rather than left to be inferred
+        # from a conclusion that cannot express it.
+        #
+        # This has to be a separate step: a step killed by `timeout-minutes` runs no trailing shell,
+        # so the interpretation cannot live inside the block it describes. It is also the only
+        # interpreter now — the previous in-block if/else could distinguish pass from fail but not
+        # either from a kill, and having two would invite disagreement.
+        if: always() && steps.compile.outputs.compiled == 'true'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.native_tests.outcome }}
+        run: |
+          summary="$(grep -m1 'Test run with' swift-test.log 2>/dev/null || true)"
+          completed="$(grep -c 'passed after' swift-test.log 2>/dev/null || true)"
+          if [ -n "$summary" ] && [ "$OUTCOME" = 'success' ]; then
+            echo "::notice title=Native tests completed and passed::$summary  swift test is green on this runner and can become a gate."
+          elif [ -n "$summary" ]; then
+            echo "::warning title=Native tests ran and did NOT pass::$summary  The native targets COMPILE but their behaviour is not verified. Not a gate. See the swift-test.log artifact."
           else
-            echo "::warning title=Native tests NOT gated::swift test did not pass on a headless runner. The native targets COMPILE but their behaviour is unverified. See the swift-test.log artifact."
+            echo "::warning title=Native tests did NOT finish::swift test produced no run summary before its bound expired (step outcome: $OUTCOME); ${completed:-0} of the suite's tests had completed. The native targets COMPILE and LINK, and nothing whatever about their runtime behaviour is verified by this run. See the swift-test.log artifact."
           fi
 
       - name: Native test suites were not attempted
