@@ -1,0 +1,61 @@
+# Re-derivation battery for the version-site guards (todos 96546cc7), measured on 15303a6.
+#
+# Scope is named explicitly and EXCLUDES the three permanently-red files on this tree
+# (macos-app-lifecycle.test.ts, native-app-companion-contract.test.ts, config.test.ts). An
+# already-red target makes every mutation look caught -- the inverse trap. The driver's
+# RED-ON-CLEAN control enforces that mechanically; the scope is written down so a reader can
+# check it without running anything.
+#
+# Expected verdict for every row below is a kill, EXCEPT the rows explicitly marked
+# MUST-SURVIVE or EXPECTED-SURVIVOR. The driver reports these kills as
+# KILLED-UNATTRIBUTED because these guards assert with `expect` rather than emitting one of the
+# GUARD_SIGNAL messages; attribution was completed by confirming each failure lands on the
+# guard's own assertion line, not on an early throw. GUARD_SIGNAL was deliberately NOT widened
+# to make this file exit 0 -- and, for the same reason must-survive-controls.tsv is not, this
+# manifest is not wired into a package.json aggregate script.
+#
+# --- every version site agrees with package.json. Models 8de7068: one site bumped, the rest not.
+duplicate	src/__tests__/version-site-guard.test.ts	agree in the working tree, on the version package.json declares	src/version.ts	.15	1
+duplicate	src/__tests__/version-site-guard.test.ts	agree in the working tree, on the version package.json declares	src/native/Recordings/RecordingsLib/Info.plist	0.2.15	1
+duplicate	src/__tests__/version-site-guard.test.ts	agree in the working tree, on the version package.json declares	src/native/Recordings/RecordingsLib/Info.plist	0.2.15	2
+# --- a stale site is reported, not silently accepted: the mismatch filter removed.
+delete	src/__tests__/version-site-guard.test.ts	a single stale site is reported rather than silently accepted	scripts/set-version.ts	.filter((reading) => reading.version !== expected)	1
+# --- applyVersion writes every site in one pass: the per-file grouping removed.
+delete	src/__tests__/version-site-guard.test.ts	applyVersion rewrites every site in one pass	scripts/set-version.ts	.filter((candidate) => candidate.file === file)	1
+# --- A DROPPED SITE. The writer silently stops writing a plist key the release path reads, and
+# every site that remains still agrees. Both rows SURVIVED the original assertions
+# (`readings).toHaveLength(versionSites.length)` compares the array to its own source, and
+# `not.toContain("0.0.1")` is satisfied by a key that was never written at all). They are the
+# reason both assertions were re-pointed to independent literal expectations.
+delete	src/__tests__/version-site-guard.test.ts	applyVersion rewrites every site in one pass	scripts/set-version.ts	  {\n    file: "src/native/Recordings/RecordingsLib/Info.plist",\n    label: "Info.plist CFBundleVersion",\n    pattern: /(<key>CFBundleVersion<\/key>\s*<string>)([^<]+)(<\/string>)/,\n  },\n	1
+delete	src/__tests__/version-site-guard.test.ts	agree in the working tree, on the version package.json declares	scripts/set-version.ts	  {\n    file: "src/native/Recordings/RecordingsLib/Info.plist",\n    label: "Info.plist CFBundleVersion",\n    pattern: /(<key>CFBundleVersion<\/key>\s*<string>)([^<]+)(<\/string>)/,\n  },\n	1
+# --- version-format rejection, one anchor at a time. Occurrence 5 of "^" and occurrence 1 of "$"
+# are the two anchors in assertReleaseVersion; the indices are load-bearing. The "$" row SURVIVED
+# until a junk-suffixed case was added, because `v1.2.3` binds only the leading anchor.
+delete	src/__tests__/version-site-guard.test.ts	rejects versions the release path already refuses	scripts/set-version.ts	^	5
+delete	src/__tests__/version-site-guard.test.ts	rejects versions the release path already refuses	scripts/set-version.ts	$	1
+# --- prepack wiring. Nothing asserted version:check was in prepack at all; the one prepack needle
+# in the repo (native-release-build-hardening-contract's toStartWith) was broken outright by
+# putting version:check ahead of the fail-closed macOS gate.
+delete	src/__tests__/version-site-guard.test.ts	prepack checks the version sites after the platform gate and before the build	package.json	bun run version:check && 	1
+# --- MUST-SURVIVE CONTROL. A semantically neutral edit to the same file must NOT trip the guard.
+# A battery with no surviving control cannot distinguish a guard from a checksum.
+delete	src/__tests__/version-site-guard.test.ts	agree in the working tree, on the version package.json declares	scripts/set-version.ts	  /** Label used in check output. */\n	1
+
+# --- ADVERSARIAL REVIEW ADDITIONS (todos 96546cc7).
+#
+# The writer's OWN validation call. Deleting it left this whole file at 5 pass / 0 fail while
+# `bun run version:set v9.9.9` exited 0 and wrote `v9.9.9` into all four sites, after which
+# `version:check` reported them in agreement -- nothing else in the repo pins the version's
+# FORMAT. The first row is the guard added to catch it; the two EXPECTED-SURVIVOR rows are the
+# same mutation against the two pre-existing tests, kept because they are the measurement that
+# neither one ever bound the writer.
+delete	src/__tests__/version-site-guard.test.ts	the writer refuses a version the release path refuses, and writes nothing	scripts/set-version.ts	  assertReleaseVersion(version);\n	1
+# EXPECTED-SURVIVOR
+delete	src/__tests__/version-site-guard.test.ts	rejects versions the release path already refuses	scripts/set-version.ts	  assertReleaseVersion(version);\n	1
+# EXPECTED-SURVIVOR
+delete	src/__tests__/version-site-guard.test.ts	applyVersion rewrites every site in one pass	scripts/set-version.ts	  assertReleaseVersion(version);\n	1
+#
+# The generated SDK's version stamp -- a fifth copy of the release version that `versionSites`
+# deliberately does not write -- goes stale again.
+delete	src/__tests__/version-site-guard.test.ts	the generated SDK header carries the version package.json declares	src/sdk/v1.generated.ts	.15	1

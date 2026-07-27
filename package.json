@@ -54,7 +54,9 @@
     "dev:cli": "bun run src/cli/index.ts",
     "dev:mcp": "bun run src/mcp/index.ts",
     "verify:release": "bun run scripts/release-guard.ts",
-    "prepack": "bun run build:native-fs-guard && bun run build && bun run verify:release",
+    "version:set": "bun run scripts/set-version.ts",
+    "version:check": "bun run scripts/set-version.ts --check",
+    "prepack": "bun run build:native-fs-guard && bun run version:check && bun run build && bun run verify:release",
     "prepublishOnly": "bun run typecheck && bun run test",
     "typecheck:shortcut-contract": "tsc --noEmit -p tsconfig.test.json"
   },

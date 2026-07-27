@@ -484,6 +484,42 @@ context, `transcriber_prompt` for cleanup instructions, and `post_processing_mod
 `off`, `auto`, or `always`. Tool results preserve `raw_text` and return `processed_text`
 only when post-processing actually produced enhanced output.
 
+## Releasing
+
+The release version is hand-maintained in four places: `package.json`, `src/version.ts`, and both
+`CFBundleShortVersionString` and `CFBundleVersion` in
+`src/native/Recordings/RecordingsLib/Info.plist`. Bump them together, never by hand:
+
+```bash
+bun run version:set 0.3.0   # rewrites every hand-maintained site
+bun run generate:sdk        # restamps the generated SDK's header
+bun run version:check       # exits 1 if any site disagrees with package.json
+```
+
+A fifth copy is **generated**, not written: `src/server/openapi.ts` stamps `VERSION` into the
+OpenAPI document and `bun run generate:sdk` bakes it into the `// Source: …` header of
+`src/sdk/v1.generated.ts`. `version:set` leaves that file alone — the generator owns it, and
+patching the stamp by hand would hide real regeneration drift — so regenerate after every bump.
+`src/__tests__/version-site-guard.test.ts` fails when the committed header disagrees with
+`package.json`.
+
+`package.json` is the authority because `scripts/build_companion_cli.sh` compares the
+compiled CLI's `--version` against it and exits 1 on a mismatch. That abort propagates
+through `src/native/Recordings/build.sh` (`set -euo pipefail`), so a partial bump does
+not just fail an assertion -- the native app cannot be built at all, and the whole
+`native-app-companion-contract` suite aborts on its first test.
+
+Three things enforce it. `.github/workflows/ci.yml` runs the whole TypeScript suite on
+every push, which is what makes the two guards below actually block a branch rather than
+wait for someone to run them locally. `prepack` runs `build:native-fs-guard` first (the
+fail-closed macOS gate), then `version:check`, so a partial bump stops before the build
+rather than deep inside it. And `prepublishOnly` runs `bun test`, which covers the sites
+through `src/__tests__/native-bundle-version.test.ts` and
+`src/__tests__/version-site-guard.test.ts`.
+
+The Swift side is not covered: no reachable machine currently runs the Swift suite, so a
+version claim about the app bundle is only as verified as the last macOS build.
+
 ## Data Directory
 
 Data is stored in `~/.hasna/recordings/`.
