@@ -621,8 +621,13 @@ public final class RecordingEngine: ObservableObject {
             UserDefaults.standard.set(useFnKey, forKey: "useFnKey")
             updateFnMonitor()
             updateStatus()
+            logResolvedTrigger()
         }
     }
+    /// Why an enabled trigger cannot currently fire — e.g. fn is on while Accessibility is
+    /// denied. Held separately from `statusMessage` because `updateStatus()` rewrites that
+    /// on every return to idle; see `updateStatus()`.
+    @Published public private(set) var triggerBlockedReason: String?
     /// Advanced fallback policy (Settings only): when off, every recording is dictated
     /// literally and the classifier is never consulted.
     @Published public var intentDetectionEnabled: Bool = true {
@@ -844,18 +849,23 @@ public final class RecordingEngine: ObservableObject {
         if KeyboardShortcuts.getShortcut(for: .toggleRecording) == nil {
             KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
         }
+        logResolvedTrigger()
 
         // Set up fn key monitor — hold fn to record, release to stop (like WisprFlow)
         fnMonitor.onFnKeyDown = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fnKeyIsDown = true
-                guard self.useFnKey, Self.canBeginRecording(
+                guard self.useFnKey else { return }
+                guard Self.canBeginRecording(
                     isRecording: self.isRecording,
                     isTranscribing: self.isTranscribing,
                     isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse,
                     isDeliveryPending: self.deliveryIsPending
-                ) else { return }
+                ) else {
+                    self.logIgnoredTrigger(.fnKey)
+                    return
+                }
                 self.startRecording(trigger: .fnKey)
             }
         }
@@ -884,7 +894,10 @@ public final class RecordingEngine: ObservableObject {
                     isTranscribing: self.isTranscribing,
                     isAwaitingMicrophonePermission: self.microphonePermissionStartGate.isAwaitingResponse,
                     isDeliveryPending: self.deliveryIsPending
-                ) else { return }
+                ) else {
+                    self.logIgnoredTrigger(.keyboardShortcut)
+                    return
+                }
                 self.startRecording(trigger: .keyboardShortcut)
             }
         }
@@ -972,24 +985,77 @@ public final class RecordingEngine: ObservableObject {
         }
     }
 
+    /// Record which trigger is actually bound, at launch and whenever it changes.
+    ///
+    /// The log already showed `startRecording trigger=keyboardShortcut`, but never which
+    /// key was registered — so a hotkey silently rebound to a key the keyboard cannot send
+    /// was indistinguishable from a working one. Log the resolved binding so "is the
+    /// trigger armed, and to what" is answerable from the log alone.
+    public func logResolvedTrigger() {
+        let bound = KeyboardShortcuts.getShortcut(for: .toggleRecording)
+            .map { "carbonKeyCode=\($0.carbonKeyCode) carbonModifiers=\($0.carbonModifiers)" }
+            ?? "none"
+        // The permission labels belong on the same line: a press that fires but delivers
+        // nothing is a permission problem, and correlating two log lines by timestamp was
+        // the only way to tell that apart from a trigger that never fired.
+        log(
+            "trigger bindings: shortcut=\(bound) useFnKey=\(useFnKey) "
+                + "fnMonitorRunning=\(fnMonitor.isRunning) "
+                + "microphone=\(microphonePermissionLabel) accessibility=\(accessibilityPermissionLabel) "
+                + "blocked=\(triggerBlockedReason ?? "none")"
+        )
+    }
+
+    /// Both global triggers used to `return` silently when the engine was busy, so a press
+    /// that produced nothing left no trace at all — indistinguishable from a trigger that
+    /// never fired. Name the refusal instead.
+    private func logIgnoredTrigger(_ trigger: RecordingTrigger) {
+        log(
+            "trigger ignored trigger=\(trigger) isRecording=\(isRecording) "
+                + "isTranscribing=\(isTranscribing) deliveryPending=\(deliveryIsPending) "
+                + "awaitingMicrophonePermission=\(microphonePermissionStartGate.isAwaitingResponse)"
+        )
+    }
+
+    /// Accessibility is the gate in practice: `FnKeyMonitor` creates an *active* tap
+    /// (`options: .defaultTap`, and it returns nil to swallow fn), and an event-modifying
+    /// tap requires Accessibility. Only a listen-only tap would fall under Input
+    /// Monitoring, so naming both grants sent people to the wrong pane.
+    static let fnAccessibilityBlockedMessage =
+        "fn needs Accessibility: System Settings > Privacy & Security > Accessibility"
+
     private func updateFnMonitor(allowAutomaticPrompt: Bool = true) {
         if useFnKey {
             let ok = fnMonitor.start()
             log("fn monitor start ok=\(ok)")
-            if !ok {
+            if ok {
+                triggerBlockedReason = nil
+            } else {
                 if allowAutomaticPrompt {
                     let result = accessibilityPromptGate.trustForProtectedOperation()
                     log("fn monitor accessibility trusted=\(result.trusted) prompted=\(result.didPrompt)")
                 }
-                statusMessage = "fn needs Input Monitoring / Accessibility permission, and Globe must be set to Do Nothing"
+                triggerBlockedReason = Self.fnAccessibilityBlockedMessage
+                log("trigger blocked: \(Self.fnAccessibilityBlockedMessage)")
             }
         } else {
             fnMonitor.stop()
+            triggerBlockedReason = nil
         }
     }
 
     public func updateStatus() {
         if isRecording || isTranscribing || deliveryIsPending { return }
+        // A blocked trigger outlives one status write. `init` and every `useFnKey` change
+        // called `updateFnMonitor()` and then `updateStatus()`, so the fn permission
+        // warning was overwritten with "Ready" before it could ever be read — an enabled
+        // trigger that could not arm looked exactly like a working one. Idle now carries
+        // the reason until the blocker clears.
+        if let triggerBlockedReason {
+            statusMessage = triggerBlockedReason
+            flowPhase = .idle
+            return
+        }
         statusMessage = "Ready"
         flowPhase = .idle
     }

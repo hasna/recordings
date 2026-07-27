@@ -61,15 +61,30 @@ public struct SettingsView: View {
                     Spacer()
                     KeyboardShortcuts.Recorder(for: .toggleRecording) { _ in
                         engine.updateStatus()
+                        engine.logResolvedTrigger()
                     }
                     Button("Reset to F5") {
                         KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
                         engine.updateStatus()
+                        engine.logResolvedTrigger()
                     }
                 }
+                // No .onChange here: `RecordingEngine.useFnKey`'s own didSet re-arms the
+                // monitor and logs the resolved trigger, so it also covers a change made
+                // from the CLI or anywhere else — a view-local hook would not.
                 Toggle("Use fn/Globe as recording key", isOn: $engine.useFnKey)
-                Text("Hold to record, release to transcribe and paste.")
+                Text("Hold to record, release to transcribe and paste. fn needs Accessibility; the hotkey above needs no permission.")
                     .foregroundStyle(.secondary)
+                // A trigger that is switched on but cannot arm must say so next to its own
+                // switch. Silence here is what made 51 recorded hotkey presses look like a
+                // working trigger while nothing was delivered.
+                if let blocked = engine.triggerBlockedReason {
+                    Label(blocked, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Button("Open Accessibility Settings") {
+                        engine.openAccessibilitySettings()
+                    }
+                }
             }
 
             Section("Permissions") {
