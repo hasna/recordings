@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
+import { sliceBetween, withoutComments } from "./helpers/source-assertions.js";
+
 /// `CGEvent.post` returns `Void` and macOS reports no delivery. Until this contract existed
 /// the paste path treated "two CGEvents were constructed" as success: `postPaste()` returned
 /// true after construction, the coordinator answered `completion(transaction, .pasted)`
@@ -209,7 +211,10 @@ describe("native paste delivery verification contract", () => {
     /// `logLine` / `logToken` computed properties that those calls print.
     function loggingRegions(source: string): string[] {
       const regions: string[] = [];
-      for (const match of source.matchAll(/\blog\(/g)) {
+      // Every sink, not just `log(`. `NSLog(` does not match `/\blog\(/` (capital L), and `os_log`,
+      // `print`, `debugPrint` and `FileHandle.write` were unscanned entirely — so a leak only had to
+      // pick a different function name to become invisible to this guard.
+      for (const match of source.matchAll(/\b(?:log|NSLog|os_log|print|debugPrint|write)\(/g)) {
         regions.push(balancedRegion(source, match.index ?? 0, "(", ")"));
       }
       for (const match of source.matchAll(/var (?:logLine|logToken)\s*:\s*String\s*\{/g)) {
@@ -238,41 +243,58 @@ describe("native paste delivery verification contract", () => {
      */
     function taintedIdentifiers(source: string): Set<string> {
       const tainted = new Set<string>(TEXT_BEARING);
-      /// A snapshot binding carries the text even before `.value` is read off it, so interpolating
-      /// the binding itself would print the struct — text and all.
+      /// A snapshot binding carries the text even before `.value` is read off it. These are the SEED.
       for (const match of source.matchAll(/case\s+\.read\((?:let|var)\s+(\w+)\)/g)) {
         tainted.add(match[1] ?? "");
       }
 
-      /// Propagation is through ACCESS, not through calls. `let x = observed.value` is the text;
-      /// `let ok = writeClipboardAttempt(text, …)` is a Bool that merely touched some. Taking the
-      /// leading access chain — everything up to the first `(` — keeps
-      /// `snapshot.value.trimmingCharacters(…)` tainted while leaving a function whose ARGUMENT is
-      /// tainted alone, which is what a whole-expression match got wrong.
+      /// `.value` counts only on a receiver already known to hold text. A bare `/\.value\b/` rule
+      /// also matched `Unicode.Scalar.value` — an integer code point — and tainted
+      /// `latinLetterCount`, `isCJKScalar`, `startRecording` and `stopAndTranscribe`, which is how an
+      /// over-broad taint rule becomes a guard nobody can keep green.
+      const readsText = (expression: string): boolean =>
+        [...tainted].some((identifier) => {
+          const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          if (new RegExp(`${escaped}\\s*\\.\\s*count\\b`).test(expression)) return false;
+          return new RegExp(`(?:^|[^.\\w])${escaped}\\b`).test(expression);
+        }) || /\breadBack\(\)/.test(expression);
+
+      /// Propagation is through ACCESS, not through calls: `let x = observed.value` is the text,
+      /// `let ok = writeClipboardAttempt(text, …)` is a Bool that merely touched some.
       const isTainted = (expression: string): boolean => {
         const chain = (expression.split("(")[0] ?? "").trim();
         if (!chain) return false;
-        if (/(?:^|[^.\w])(?:\w+\.)*(?:value|readBack)\b/.test(chain)) return true;
-        return [...tainted].some((identifier) => {
-          const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          // A count derived from the text is not the text.
-          if (new RegExp(`${escaped}\\s*\\.\\s*count\\b`).test(chain)) return false;
-          return new RegExp(`(?:^|[^.\\w])${escaped}\\b`).test(chain);
-        });
+        if (readsText(chain)) return true;
+        // A function that RETURNS the text launders it otherwise, so the callee's own name counts.
+        const callee = chain.split(".").pop() ?? "";
+        return Boolean(callee) && tainted.has(callee);
       };
 
       const bindings = [
         ...source.matchAll(/(?:let|var)\s+(\w+)\s*(?::[^=\n]+)?=\s*([^\n]+)/g),
         ...source.matchAll(/(?:if|guard)\s+(?:let|var)\s+(\w+)\s*=\s*([^\n,{]+)/g),
       ];
-      // Fixed point: `a = snapshot.value; b = a; c = b` must all be tainted, and source order
-      // cannot be relied on.
+      /// Accessors that RETURN the text are themselves tainted, so a call to one taints its result.
+      /// Bounded to leaf-sized bodies: the laundering shape is a small helper
+      /// (`if case .read(let f) = r { return f.value }`), and sweeping 13 KB function bodies for a
+      /// substring is what produced the false positives above.
+      const accessors = [...source.matchAll(/(?:func|var)\s+(\w+)[^\n]*\{/g)].map((match) => ({
+        name: match[1] ?? "",
+        body: balancedRegion(source, (match.index ?? 0) + match[0].length - 1, "{", "}"),
+      }));
+
       for (let pass = 0; pass < 8; pass += 1) {
         const before = tainted.size;
         for (const binding of bindings) {
           const name = binding[1] ?? "";
           if (!name || tainted.has(name)) continue;
           if (isTainted(binding[2] ?? "")) tainted.add(name);
+        }
+        for (const accessor of accessors) {
+          if (!accessor.name || tainted.has(accessor.name)) continue;
+          if (accessor.body.length > 400) continue;
+          const returns = [...accessor.body.matchAll(/return\s+([^\n]+)/g)].map((m) => m[1] ?? "");
+          if (returns.some((expression) => readsText(expression))) tainted.add(accessor.name);
         }
         if (tainted.size === before) break;
       }
@@ -336,17 +358,26 @@ describe("native paste delivery verification contract", () => {
       expect(start).toBeGreaterThan(-1);
       const report = verification.slice(start, end);
 
-      // Every stored property, so a new `let pastedText: String` cannot slip in unnoticed.
-      const properties = [...report.matchAll(/^\s{4}let (\w+): ([^\n=]+)$/gm)].map((match) => ({
+      // Every stored property, `let` AND `var`, at ANY type. Skipping non-`String` types let a
+      // `let focusedRead: FocusedTextRead?` carry the whole snapshot into `logLine` via a private
+      // computed property — the report "carries counts and tokens, never the text" while holding the
+      // text. Type is not the invariant; carrying the text is.
+      const properties = [...report.matchAll(/^\s{4}(?:let|var) (\w+): ([^\n=]+)$/gm)].map((match) => ({
         name: match[1] ?? "",
         type: (match[2] ?? "").trim(),
       }));
       expect(properties.length).toBeGreaterThan(4);
       for (const property of properties) {
+        expect(
+          /Focused(?:TextRead|TextSnapshot)/.test(property.type),
+          `PasteDeliveryReport.${property.name} is typed ${property.type}, which carries the field text`,
+        ).toBe(false);
         if (property.type !== "String" && property.type !== "String?") continue;
         // The one permitted String is the target's bundle identifier, which is not user text.
         expect(property.name).toBe("targetBundleIdentifier");
       }
+      // And nothing inside the report may reach `.value` at all.
+      expect(report).not.toMatch(/\.value\b/);
     });
 
     test("the user-facing disclosure exists, because no new permission prompt announces it", () => {
@@ -412,8 +443,17 @@ describe("native paste delivery verification contract", () => {
     // settles immediately and never builds the `PendingDelivery` — so refusing here would discard
     // the read-back, the only evidence that can say whether the keystroke landed, and would tell
     // the owner to press Cmd-V for a paste that may already have succeeded, pasting it twice.
-    expect(afterPost).not.toContain("return .refusedSecureInput");
-    expect(afterPost).not.toContain("failNow");
+    // Asserted as the arm's EFFECT, not as a denylist of two spellings. Forbidding only
+    // `return .refusedSecureInput` and `failNow` left `return .constructionFailed` (which reaches
+    // `failNow(with: .eventPostFailed)`) and a helper-routed `return refusal` both open — each
+    // reinstating the exact regression this guard exists to prevent.
+    const activeArm = withoutComments(sliceBetween(afterPost, "case .active:", "case .inactive:"));
+    expect(activeArm.replace(/\s+/g, " ").trim()).toBe(
+      "case .active: self?.lastPasteSecureInputProbe = secureInputAfterPost",
+    );
+    // And no arm of this switch may return, by any spelling.
+    expect(withoutComments(sliceBetween(afterPost, "switch secureInputAfterPost {", "case .unknown:")))
+      .not.toMatch(/\breturn\b/);
 
     // `.refusedSecureInput` therefore keeps meaning "nothing was posted": it may only be returned
     // BEFORE the events are posted, which is what its `not_posted_secure_input` token asserts.

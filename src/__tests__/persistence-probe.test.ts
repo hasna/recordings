@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { readFileSync } from "fs";
+import { sliceBetween } from "./helpers/source-assertions.js";
 import {
   describeActiveStore,
   localStoreIsBehindSchema,
@@ -653,5 +654,24 @@ describe("probe marker rendering", () => {
     // The unguarded ternary is gone, not merely shadowed.
     expect(cli).not.toContain('persistence.outcome === "skipped"');
     expect(cli).not.toContain('persistence.outcome === "proved"');
+
+    // And the computed marker must REACH the output. Asserting only that the call and the palette
+    // appear in the source let the result be wrapped (`chalk.green(renderPersistenceMarker(...))`)
+    // or ignored outright (a fresh `chalk.green("✓")` in the `console.log`) — an exhaustively tested
+    // helper the renderer discards is the same vacuous check in a new place.
+    //
+    // `sliceBetween`, not two bare `indexOf` calls: `if (probeFailed)` occurs TWICE in this file, so
+    // slicing to its first occurrence produced an EMPTY region and everything below it was vacuous.
+    const persistenceBlock = sliceBetween(
+      cli,
+      "const persistenceMarker = renderPersistenceMarker(",
+      "if (probeFailed)",
+      { minimumLength: 120 },
+    );
+    expect(persistenceBlock).toMatch(
+      /console\.log\(persistenceMarker \+ ` Persistence round-trip: \$\{persistence\.message\}`\)/,
+    );
+    // No colour applied outside the injected palette in this block.
+    expect(persistenceBlock).not.toMatch(/chalk\.(?:green|yellow|red)\((?!\s*[,}])/);
   });
 });
