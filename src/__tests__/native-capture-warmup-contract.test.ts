@@ -94,11 +94,36 @@ describe("native capture warm-up contract", () => {
       "pcmStreamPipe?.cancel()",
       "activeCaptureConfiguration = nil",
       "resetRecordingIntent()",
+      // Without this the engine wedges: the start gate refuses every later press and no
+      // teardown path runs again. Asserted explicitly — a reviewer deleted this line and the
+      // rest of this suite stayed green.
+      "isWarmingUpCapture = false",
+      "isRecording = false",
     ]) {
       expect(abandon, `abandon path must include: ${teardown}`).toContain(teardown);
     }
     expect(abandon, "an empty buffer must never enter the pipeline").not.toContain(
       "stopAndTranscribe()",
+    );
+
+    // `recorder?.stop()` being present is not enough: capturing `nativeRecorder` *after*
+    // nil-ing it makes the call a silent no-op and leaves the microphone open with the macOS
+    // in-use indicator lit. The capture must precede the clear.
+    const captured = abandon.indexOf("let recorder = nativeRecorder");
+    const cleared = abandon.indexOf("nativeRecorder = nil");
+    const stopped = abandon.indexOf("recorder?.stop()");
+    expect(captured, "abandon must capture nativeRecorder before clearing it").toBeGreaterThan(-1);
+    expect(cleared).toBeGreaterThan(captured);
+    expect(stopped).toBeGreaterThan(cleared);
+    // Bumping the generation before stopping the recorder is what makes the
+    // `finalizeConverterTail` chunk harmless: it arrives stale and fails the guard in
+    // `confirmCaptureIsLive`. Order is load-bearing, not incidental.
+    expect(abandon.indexOf("recordingGeneration &+= 1")).toBeLessThan(stopped);
+
+    // A recorder that throws must not leave the warming flag set either.
+    const catchBlock = region(engine, 'log("native recorder failed error=', "\n        }\n");
+    expect(catchBlock, "the failed-start path must clear the warming flag").toContain(
+      "isWarmingUpCapture = false",
     );
 
     // Stop and Discard are live during warm-up, so neither may fall through the
@@ -120,14 +145,26 @@ describe("native capture warm-up contract", () => {
     const engine = read("RecordingsLib/RecordingEngine.swift");
 
     const gate = methodBody(engine, "nonisolated static func canBeginRecording(");
-    expect(gate).toContain("isWarmingUpCapture: Bool = false");
     expect(gate).toContain("!isWarmingUpCapture");
+    // No default. `false` is the permissive value for a safety input, so a caller that forgot
+    // it would compile and read as startable mid-warm-up.
+    expect(gate).toContain("isWarmingUpCapture: Bool,");
+    expect(gate, "a defaulted safety input silently reopens the hole").not.toContain(
+      "isWarmingUpCapture: Bool = false",
+    );
 
     // Every caller of the gate has to pass it, or the gate is decorative.
     const callSites = engine.match(/canBeginRecording\(/g) ?? [];
     const passedSites = engine.match(/isWarmingUpCapture: (self\.)?isWarmingUpCapture/g) ?? [];
     expect(passedSites.length, "every canBeginRecording call must pass warm-up").toBe(
       callSites.length - 1, // the declaration itself
+    );
+
+    // A press refused *because of* warm-up must say so. `logIgnoredTrigger` exists to end
+    // exactly this silence, and omitting the field prints every reason as false.
+    const ignored = methodBody(engine, "private func logIgnoredTrigger(_ trigger: RecordingTrigger) {");
+    expect(ignored, "the refusal log must name the warm-up state").toContain(
+      "isWarmingUpCapture=",
     );
   });
 
@@ -143,10 +180,31 @@ describe("native capture warm-up contract", () => {
     // is invisible — the whole point of the alert.
     expect(["mic.fill", "waveform", "ellipsis.circle"]).not.toContain(iconName);
 
-    expect(presentation).toContain("isWarmingUpCapture: Bool = false");
-    expect(presentation).toContain("attemptAlert: RecordingAttemptAlert? = nil");
     expect(presentation).toContain("if isRecording || isWarmingUpCapture {");
     expect(presentation).toContain("iconName = attemptAlert.iconName");
+    // Neither new argument may be defaulted: `false` and `nil` are the invisible values, so a
+    // surface that forgot them would compile and render warm-up as busy and a failure as idle.
+    expect(presentation).not.toContain("isWarmingUpCapture: Bool = false");
+    expect(presentation).not.toContain("attemptAlert: RecordingAttemptAlert? = nil");
+    expect(presentation).toContain("isWarmingUpCapture: Bool,");
+    expect(presentation).toContain("attemptAlert: RecordingAttemptAlert?\n    ) {");
+
+    // And every construction in the app and its tests must state both, including the runtime
+    // smoke probe, which omitted them entirely while the defaults existed.
+    for (const file of [
+      "App/MenuBarStatusView.swift",
+      "App/RuntimeSmoke.swift",
+      "RecordingsTests/MenuBarPresentationTests.swift",
+      "RecordingsTests/RecordingEngineDeliveryTests.swift",
+    ]) {
+      const source = read(file);
+      const sites = source.match(/MenuBarPresentation\(\n(?:.*\n)*?\s*\)/g) ?? [];
+      expect(sites.length, `no MenuBarPresentation call sites found in ${file}`).toBeGreaterThan(0);
+      for (const site of sites) {
+        expect(site, `${file}: call site omits isWarmingUpCapture`).toContain("isWarmingUpCapture:");
+        expect(site, `${file}: call site omits attemptAlert`).toContain("attemptAlert:");
+      }
+    }
 
     // Both menu-bar surfaces (the always-on label and the popover) must forward the new state,
     // or the engine tracks it and nothing on screen changes.

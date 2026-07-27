@@ -534,7 +534,7 @@ struct PasteSettlementObservationTests {
         let coordinator = engine.installPasteCoordinatorForTesting(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 7) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
         var observations = 0
         let subscription = engine.objectWillChange.sink { _ in observations += 1 }
@@ -562,8 +562,10 @@ struct PasteSettlementObservationTests {
         #expect(engine.canStartRecording)
         let presentation = MenuBarPresentation(
             isRecording: engine.isRecording,
+            isWarmingUpCapture: engine.isWarmingUpCapture,
             canStartRecording: engine.canStartRecording,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            attemptAlert: engine.attemptAlert
         )
         #expect(presentation.iconName == "mic.fill")
         #expect(presentation.primaryActionEnabled, "Start must re-enable from the settlement event alone")
@@ -716,8 +718,10 @@ struct MenuBarEngineContractTests {
         #expect(!engine.canStartRecording)
         let busy = MenuBarPresentation(
             isRecording: engine.isRecording,
+            isWarmingUpCapture: engine.isWarmingUpCapture,
             canStartRecording: engine.canStartRecording,
-            statusMessage: engine.statusMessage
+            statusMessage: engine.statusMessage,
+            attemptAlert: engine.attemptAlert
         )
         #expect(busy.iconName == "ellipsis.circle")
         #expect(!busy.primaryActionEnabled)
@@ -732,8 +736,10 @@ struct MenuBarEngineContractTests {
         _ = await waitUntil { engine.canStartRecording }
         let idle = MenuBarPresentation(
             isRecording: engine.isRecording,
+            isWarmingUpCapture: engine.isWarmingUpCapture,
             canStartRecording: engine.canStartRecording,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            attemptAlert: engine.attemptAlert
         )
         #expect(idle.iconName == "mic.fill")
         #expect(idle.primaryActionEnabled)

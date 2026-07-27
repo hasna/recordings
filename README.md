@@ -115,7 +115,10 @@ RECORDINGS_RELEASE_COMPATIBLE_COHORT_MANIFEST="/Library/Application Support/Hasn
   ./build.sh release app-update
 
 # Explicit local-only alternative when Developer ID credentials are unavailable.
-# Build on a Mac other than the approved target; this does not replace a release:
+# Build on a Mac other than the approved target; this does not replace a release.
+# The approved targets are declared once in
+# scripts/policy/local-only-approved-targets.txt, which the builder, the installer,
+# and the artifact tool all read; add a Mac there rather than in any guard:
 RECORDINGS_LOCAL_APPROVED_TARGET="station06" \
 RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_KIND="tailscale_node_id_sha256" \
 RECORDINGS_LOCAL_APPROVED_TARGET_IDENTITY_SHA256="AUTHENTICATED_TAILSCALE_NODE_ID_SHA256" \
@@ -236,7 +239,9 @@ signature check. The mutable `/Applications` path is never executed, caller stat
 not inherited, and all snapshot paths are removed by normal installer cleanup. The builder applies
 the same checks in its private build directory and removes the snapshot with the rest of the build
 workspace. The status parser then
-requires online `Self` with hostname `station06`,
+requires online `Self` whose hostname equals the caller's `--expected-hostname` — the
+approved target when the installer verifies the target, and the builder's own host when
+the builder verifies itself, which `build.sh` requires to differ from the target —
 requires the single nonempty `Self.ID` to contain no whitespace or NUL, hashes its exact decoded
 bytes without a newline, and compares the digest. Neither raw node ID is written to the manifest,
 build log, or installer log. Older schema-v3 artifacts without an
@@ -263,6 +268,31 @@ The native app uses OpenAI realtime transcription for the stop-and-paste path: s
 `gpt-4o-transcribe` remains the bounded quality fallback when realtime is empty,
 unsettled, or cannot be saved. Raw and processed transcript fields are still stored
 separately, so cleanup instructions never replace the verbatim transcript.
+
+### What the app reads to confirm a paste
+
+Posting a Cmd-V keystroke returns no delivery receipt — `CGEvent.post` returns `Void` — so
+the only way to know whether a transcript actually landed is to look. Around each paste the
+app therefore **reads the text value of whatever field is focused in the target app**, via
+Accessibility, once before the keystroke and once after, and compares them.
+
+State this plainly because it is a real change in what a dictation app can see:
+
+- The read covers the focused field's full value and its current selection, not only the
+  pasted fragment, so text you did not dictate is inside the app's process during the
+  comparison.
+- It is **never logged and never persisted.** The comparison happens in memory and only its
+  verdict (`pasted` / `not observed` / `unverified` plus a reason) reaches the log.
+- Fields longer than 20,000 characters are reported unverifiable rather than copied and
+  scanned.
+- A field that publishes no Accessibility value — terminals, canvas editors, some Electron
+  apps — is reported as unverified, never as a success.
+- Reading requires the Accessibility permission the app already needs to post the keystroke.
+  No additional permission is requested, which is exactly why this is worth writing down.
+
+One known limit, in the safe direction: pasting text identical to the selection it replaces
+leaves the field's value and the occurrence count unchanged, so a genuinely successful paste
+is reported as **not observed**. The app under-claims rather than over-claims.
 
 ## CLI Usage
 

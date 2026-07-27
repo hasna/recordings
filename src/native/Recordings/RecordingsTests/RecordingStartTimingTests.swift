@@ -17,7 +17,10 @@ private final class FakePCMRecorder: PCMRecordingSource, @unchecked Sendable {
         lock.withLock { startedFlag }
     }
 
-    var stopped: Bool {
+    /// Whether `stop()` was called. The microphone staying open is the worst outcome of a
+    /// botched teardown — it lights the macOS in-use indicator — so every abandon test asserts
+    /// this.
+    var isStopped: Bool {
         lock.withLock { stoppedFlag }
     }
 
@@ -90,6 +93,24 @@ private func waitUntil(
 private func confirmCapture(_ engine: RecordingEngine, _ recorder: FakePCMRecorder) async -> Bool {
     recorder.emitFirstChunk()
     return await waitUntil { engine.isRecording }
+}
+
+/// Full teardown checklist for an abandoned attempt. Kept in one place because a partial
+/// assertion here is indistinguishable from a pass: an abandon that forgets `recorder.stop()`
+/// leaves the microphone open with the macOS indicator lit, and one that forgets
+/// `isWarmingUpCapture = false` wedges the engine so the start gate refuses every later press.
+@MainActor
+private func expectFullyTornDown(
+    _ engine: RecordingEngine,
+    _ recorder: FakePCMRecorder,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    #expect(recorder.isStopped, "the microphone must be released, not left open", sourceLocation: sourceLocation)
+    #expect(!engine.isWarmingUpCapture, "a warming flag left set wedges the start gate", sourceLocation: sourceLocation)
+    #expect(!engine.isRecording, sourceLocation: sourceLocation)
+    #expect(!engine.captureIsActive, sourceLocation: sourceLocation)
+    #expect(!engine.isTranscribing, "an empty buffer must never enter the transcription pipeline", sourceLocation: sourceLocation)
+    #expect(engine.canStartRecording, "the engine must be immediately ready to try again", sourceLocation: sourceLocation)
 }
 
 @MainActor
@@ -191,13 +212,10 @@ struct RecordingCaptureWarmUpTests {
 
         engine.handleTriggerRelease(.fnKey)
 
-        #expect(!engine.isTranscribing, "an empty buffer must never enter the transcription pipeline")
-        #expect(!engine.captureIsActive)
-        #expect(recorder.stopped, "the microphone must be released, not left open")
+        expectFullyTornDown(engine, recorder)
         #expect(engine.attemptAlert == .releasedBeforeAudio)
         #expect(engine.flowPhase == .failed(RecordingAttemptAlert.releasedBeforeAudio.message))
         #expect(engine.statusMessage == RecordingAttemptAlert.releasedBeforeAudio.message)
-        #expect(engine.canStartRecording, "the engine must be immediately ready to try again")
     }
 
     @Test("the configurable shortcut takes the same path as fn")
@@ -209,7 +227,7 @@ struct RecordingCaptureWarmUpTests {
         #expect(engine.isWarmingUpCapture)
         engine.handleTriggerRelease(.keyboardShortcut)
 
-        #expect(!engine.isTranscribing)
+        expectFullyTornDown(engine, recorder)
         #expect(engine.attemptAlert == .releasedBeforeAudio)
     }
 
@@ -234,16 +252,14 @@ struct RecordingCaptureWarmUpTests {
 
         engine.startRecording(trigger: .fnKey)
         engine.handleTriggerRelease(.fnKey)
-        #expect(!engine.captureIsActive)
+        expectFullyTornDown(engine, recorder)
 
         // The recorder's delivery queue can still hand over a buffer that was in flight when
         // the tap was torn down.
         recorder.emitFirstChunk()
         try? await Task.sleep(for: .milliseconds(150))
 
-        #expect(!engine.isRecording)
-        #expect(!engine.captureIsActive)
-        #expect(engine.canStartRecording)
+        expectFullyTornDown(engine, recorder)
     }
 
     @Test("Stop clicked during warm-up abandons instead of transcribing silence")
@@ -255,7 +271,7 @@ struct RecordingCaptureWarmUpTests {
         #expect(engine.isWarmingUpCapture)
         engine.stopAndTranscribe()
 
-        #expect(!engine.isTranscribing)
+        expectFullyTornDown(engine, recorder)
         #expect(engine.attemptAlert == .releasedBeforeAudio)
     }
 
@@ -267,10 +283,10 @@ struct RecordingCaptureWarmUpTests {
         engine.startRecording(trigger: .manual)
         engine.cancelRecording()
 
-        #expect(!engine.captureIsActive)
-        #expect(recorder.stopped)
+        expectFullyTornDown(engine, recorder)
         #expect(engine.attemptAlert == nil, "the user asked for the discard; do not alarm them")
         #expect(engine.flowPhase == .idle)
+        #expect(engine.statusMessage == "Ready")
     }
 
     @Test("warm-up blocks a second start, and a new start clears the previous alert")

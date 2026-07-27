@@ -7,7 +7,7 @@ import { loadConfig } from "../lib/config.js";
 let _db: Database | null = null;
 let _adapter: SqliteAdapter | null = null;
 
-const MIGRATIONS = [
+export const MIGRATIONS = [
   // Migration 0: Initial schema
   `
   CREATE TABLE IF NOT EXISTS projects (
@@ -93,6 +93,15 @@ const MIGRATIONS = [
   ALTER TABLE agents ADD COLUMN active_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
   `,
 ];
+
+/**
+ * Migration id a fully-migrated store carries in `_migrations`.
+ *
+ * Exposed so a diagnostic can tell a current store from a legacy one by reading
+ * it, rather than by opening it read-write — which is itself the act of
+ * migrating, and therefore the thing being checked for.
+ */
+export const CURRENT_MIGRATION_LEVEL = MIGRATIONS.length - 1;
 
 export function getDatabase(dbPath?: string): Database {
   if (_db) return _db;

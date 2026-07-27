@@ -46,7 +46,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postedPayloads.append(pasteboardText)
-                return true
+                return .posted
             }
         )
 
@@ -55,7 +55,11 @@ struct PasteTargetTests {
             generation: 41,
             delay: 0.5,
             settlementDelay: 0.6,
-            prepare: { preparations += 1 }
+            prepare: { preparations += 1 },
+            // A posted keystroke is not a delivery, so `.pasted` is only reachable when the
+            // read-back confirms the text landed. Coordinator tests that mean "the paste
+            // worked" have to say so here; omitting this yields `.deliveredUnverified`.
+            verify: { .confirmedByFocusedValue }
         ) { transaction, outcome in
             completions.append((transaction.generation, outcome))
         })
@@ -78,7 +82,12 @@ struct PasteTargetTests {
         scheduled.removeFirst()()
         #expect(!coordinator.hasPendingTransaction)
 
-        #expect(coordinator.submit(text: "recording B", generation: 42, delay: 0) { transaction, outcome in
+        #expect(coordinator.submit(
+            text: "recording B",
+            generation: 42,
+            delay: 0,
+            verify: { .confirmedByFocusedValue }
+        ) { transaction, outcome in
             completions.append((transaction.generation, outcome))
         })
         pasteboardText = "another mutation"
@@ -96,7 +105,7 @@ struct PasteTargetTests {
         let coordinator = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
         coordinator.pendingTransactionWillChange = { announcements += 1 }
 
@@ -115,7 +124,7 @@ struct PasteTargetTests {
         let failing = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { _ in PasteboardWriteResult(verified: false, ownershipChangeCount: 1) },
-            postPaste: { false }
+            postPaste: { .constructionFailed }
         )
         var failureAnnouncements = 0
         failing.pendingTransactionWillChange = { failureAnnouncements += 1 }
@@ -137,7 +146,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in PasteboardWriteResult(verified: false, ownershipChangeCount: 1) },
             postPaste: {
                 postCalls += 1
-                return false
+                return .constructionFailed
             }
         )
 
@@ -159,7 +168,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in PasteboardWriteResult(verified: true, ownershipChangeCount: 1) },
             postPaste: {
                 postCalls += 1
-                return false
+                return .constructionFailed
             }
         )
         #expect(postFailureCoordinator.submit(text: "B", generation: 2, delay: 0) { _, outcome in
@@ -192,7 +201,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postCalls += 1
-                return true
+                return .posted
             }
         )
 
@@ -230,7 +239,7 @@ struct PasteTargetTests {
                 writeCalls += 1
                 return PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -265,7 +274,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postCalls += 1
-                return true
+                return .posted
             }
         )
 
@@ -302,7 +311,7 @@ struct PasteTargetTests {
             },
             postPaste: {
                 postCalls += 1
-                return true
+                return .posted
             }
         )
 
@@ -587,7 +596,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in
                 PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -632,7 +641,7 @@ struct PasteTargetTests {
             writeAndVerify: { _ in
                 PasteboardWriteResult(verified: true, ownershipChangeCount: 1)
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -686,9 +695,11 @@ struct PasteTargetTests {
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { text in RecordingEngine.writeClipboardAttempt(text, to: pasteboard) },
             postPaste: {
-                guard let payload = pasteboard.string(forType: .string) else { return false }
+                guard let payload = pasteboard.string(forType: .string) else {
+                    return .constructionFailed
+                }
                 postedPayloads.append(payload)
-                return true
+                return .posted
             }
         )
 
@@ -717,7 +728,7 @@ struct PasteTargetTests {
         let coordinator = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { text in RecordingEngine.writeClipboardAttempt(text, to: pasteboard) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -725,7 +736,8 @@ struct PasteTargetTests {
             generation: 1,
             delay: 0,
             settlementDelay: 0.6,
-            writeAttempted: { ownedChangeCount = $0.ownershipChangeCount }
+            writeAttempted: { ownedChangeCount = $0.ownershipChangeCount },
+            verify: { .confirmedByFocusedValue }
         ) { _, _ in
         } settlement: { transaction, outcome in
             guard outcome == .pasted,
@@ -767,7 +779,7 @@ struct PasteTargetTests {
                     ownershipChangeCount: attempted.ownershipChangeCount
                 )
             },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -815,7 +827,7 @@ struct PasteTargetTests {
         let coordinator = PasteTransactionCoordinator(
             schedule: { _, operation in scheduled.append(operation) },
             writeAndVerify: { text in RecordingEngine.writeClipboardAttempt(text, to: pasteboard) },
-            postPaste: { true }
+            postPaste: { .posted }
         )
 
         #expect(coordinator.submit(
@@ -824,7 +836,8 @@ struct PasteTargetTests {
             delay: 0,
             settlementDelay: 0.6,
             prepare: { prePasteValue = pasteboard.string(forType: .string) },
-            writeAttempted: { ownedChangeCount = $0.ownershipChangeCount }
+            writeAttempted: { ownedChangeCount = $0.ownershipChangeCount },
+            verify: { .confirmedByFocusedValue }
         ) { _, _ in
         } settlement: { transaction, outcome in
             guard outcome == .pasted,

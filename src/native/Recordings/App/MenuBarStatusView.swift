@@ -13,9 +13,9 @@ struct MenuBarStatusLabel: View {
     private var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
+            isWarmingUpCapture: store.engine.isWarmingUpCapture,
             canStartRecording: store.engine.canStartRecording,
             statusMessage: store.engine.statusMessage,
-            isWarmingUpCapture: store.engine.isWarmingUpCapture,
             attemptAlert: store.engine.attemptAlert
         )
     }
@@ -81,9 +81,9 @@ struct MenuBarStatusView: View {
     private var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: store.engine.isRecording,
+            isWarmingUpCapture: store.engine.isWarmingUpCapture,
             canStartRecording: store.engine.canStartRecording,
             statusMessage: store.engine.statusMessage,
-            isWarmingUpCapture: store.engine.isWarmingUpCapture,
             attemptAlert: store.engine.attemptAlert
         )
     }

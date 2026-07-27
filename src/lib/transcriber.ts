@@ -28,6 +28,146 @@ export function resetClient(): void {
   _clientApiKey = null;
 }
 
+/**
+ * Strip anything key-shaped out of a provider error before we print or log it.
+ *
+ * OpenAI's 401 body echoes a partially masked form of the key that was sent
+ * ("sk-abcd1234**********wxyz"). Even masked, that is credential material and
+ * must not land in terminal scrollback, CI logs or a diagnostics file.
+ */
+export function redactKeyMaterial(text: string): string {
+  return (
+    text
+      .replace(/\b(sk|rk|org)-[A-Za-z0-9_*\-]{4,}/g, "[redacted]")
+      .replace(/\bBearer\s+[A-Za-z0-9._*\-]{4,}/gi, "Bearer [redacted]")
+      // `Authorization: Basic <base64>` carries user:password. The `sk-` allowlist never saw it.
+      .replace(/\bBasic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [redacted]")
+      // URL userinfo (`https://user:secret@host/…`). `safeBaseUrl` strips this correctly but is
+      // only applied to base URLs, never to error text — and provider errors quote URLs.
+      .replace(/:\/\/[^/\s:@]+(?::[^/\s@]*)?@/g, "://[redacted]@")
+      // Header-shaped secrets. `x-api-key` is the header this package's own transport sets
+      // (`src/http/client.ts`), so it is the single most likely value to appear in a store error,
+      // and the prefix allowlist above could never match it: a Hasna API key is not `sk-` shaped.
+      .replace(
+        /\b(x-api-key|api[-_]?key|authorization|token|secret|password)(\s*[:=]\s*)("?)[^\s"',;}&]+\3/gi,
+        (_match, name: string, separator: string) => `${name}${separator}[redacted]`
+      )
+  );
+}
+
+export interface CredentialProbeResult {
+  ok: boolean;
+  /** HTTP status when the API answered, null when we never reached it. */
+  status: number | null;
+  model: string;
+  /** Which configured role this probe covered: transcription or enhancement. */
+  role: "transcription" | "enhancement";
+  message: string;
+}
+
+/**
+ * Performs the one authenticated request the credential probe rests on.
+ *
+ * Injected so the request path can be tested. Before this existed, review deleted the
+ * `models.retrieve` call and its success return outright — replacing them with an unconditional
+ * `{ok: true, status: 200}` that made no request at all — and `bun test
+ * src/__tests__/credential-probe.test.ts` still reported **7 pass / 0 fail, exit 0**. Every
+ * existing test passed an empty key, so all of them returned at the missing-key branch before a
+ * client was ever constructed, leaving the 401 rejection (the probe's headline claim), the 404
+ * model-unavailable case, the 200 success path, and `redactKeyMaterial` applied to a real error
+ * body all uncovered. A probe whose request can be removed without a failing test proves nothing.
+ *
+ * Mirrors the `executable` injection the capture probe already uses for the same reason.
+ */
+export type CredentialModelRetriever = (
+  model: string,
+  apiKey: string
+) => Promise<{ id?: string }>;
+
+const defaultCredentialModelRetriever: CredentialModelRetriever = async (model, apiKey) => {
+  // A throwaway client, not getClient(): that one caches by key at module scope, so probing the
+  // enhancement role would evict the transcription client and leave the wrong key cached for
+  // whatever ran next.
+  const client = new OpenAI({ apiKey });
+  return await client.models.retrieve(model);
+};
+
+/**
+ * Verify that the configured credential is ACCEPTED by the API, not merely
+ * present in config.
+ *
+ * A non-empty string in `openai_api_key` proves nothing: any placeholder
+ * satisfies it. This makes one real authenticated request, so a rejected or
+ * revoked key surfaces as a failure instead of a green tick.
+ *
+ * The model and key must be passed in as a matched PAIR, and the caller must not
+ * mix roles. An earlier version probed `resolveTranscriberModel(config)` — which
+ * is `transcriber_model || enhancement_model`, the POST-PROCESSING model — using
+ * `openai_api_key`, under a line labelled "Transcription credential". Two ways
+ * to be wrong: with split keys it retrieved the enhancement model with the
+ * transcription key and printed a red 404 on a working machine; and it never
+ * touched `config.transcription_model`, the model `transcribeAudio` actually
+ * uses, so that model being unavailable produced a green tick.
+ *
+ * Scope note: this proves authentication and model access. It does not prove
+ * quota or that a given audio file will transcribe.
+ */
+export async function verifyTranscriptionCredential(
+  config: RecordingsConfig,
+  model: string,
+  options: {
+    apiKey?: string;
+    role?: "transcription" | "enhancement";
+    /** Test seam. Defaults to a real authenticated `models.retrieve`. */
+    retrieveModel?: CredentialModelRetriever;
+  } = {}
+): Promise<CredentialProbeResult> {
+  const role = options.role ?? "transcription";
+  const apiKey = options.apiKey ?? config.openai_api_key;
+  const retrieveModel = options.retrieveModel ?? defaultCredentialModelRetriever;
+  if (!apiKey) {
+    return {
+      ok: false,
+      status: null,
+      model,
+      role,
+      message:
+        `no API key configured for the ${role} role. ` +
+        "Set OPENAI_API_KEY env var or add to ~/.secrets",
+    };
+  }
+
+  try {
+    const retrieved = await retrieveModel(model, apiKey);
+    return {
+      ok: true,
+      status: 200,
+      model,
+      role,
+      message: `credential accepted; ${role} model '${retrieved.id ?? model}' reachable`,
+    };
+  } catch (error) {
+    const status =
+      typeof (error as { status?: unknown }).status === "number"
+        ? ((error as { status: number }).status)
+        : null;
+    const detail = redactKeyMaterial((error as Error).message || String(error));
+    const hint =
+      status === 401
+        ? " — the key was REJECTED (not a missing key: a present but invalid one)"
+        : status === 404
+          ? ` — authenticated, but model '${model}' is not available to this key`
+          : "";
+    return {
+      ok: false,
+      status,
+      model,
+      role,
+      message: `${role} credential check failed${status ? ` (HTTP ${status})` : ""}: ${detail}${hint}`,
+    };
+  }
+}
+
 export async function transcribeAudio(
   audioPath: string,
   config: RecordingsConfig,

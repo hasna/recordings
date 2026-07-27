@@ -21,8 +21,12 @@ final class RuntimeSmokeProbe: ObservableObject {
     var presentation: MenuBarPresentation {
         MenuBarPresentation(
             isRecording: phase == .recording,
+            // The smoke probe drives phases directly and never runs a real recorder, so it has
+            // no warm-up window and no attempt outcome to report.
+            isWarmingUpCapture: false,
             canStartRecording: phase == .idle,
-            statusMessage: phase == .transcribing ? "Transcribing" : "Ready"
+            statusMessage: phase == .transcribing ? "Transcribing" : "Ready",
+            attemptAlert: nil
         )
     }
 

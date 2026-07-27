@@ -19,12 +19,16 @@ public struct MenuBarPresentation: Equatable, Sendable {
     /// `RecordingEngine.canStartRecording` exactly.
     public let primaryActionEnabled: Bool
 
+    /// Neither new argument has a default. `isWarmingUpCapture: false` and `attemptAlert: nil`
+    /// are the *invisible* values — a surface that forgot them would compile and quietly render
+    /// warm-up as busy and a failed attempt as idle, which is the class of bug this type exists
+    /// to prevent. Every caller states both.
     public init(
         isRecording: Bool,
+        isWarmingUpCapture: Bool,
         canStartRecording: Bool,
         statusMessage: String,
-        isWarmingUpCapture: Bool = false,
-        attemptAlert: RecordingAttemptAlert? = nil
+        attemptAlert: RecordingAttemptAlert?
     ) {
         if isRecording || isWarmingUpCapture {
             // The warm-up window — microphone open, first sample not yet delivered — presents

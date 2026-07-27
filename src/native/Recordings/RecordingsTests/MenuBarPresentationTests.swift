@@ -9,8 +9,10 @@ struct MenuBarPresentationTests {
     func idle() {
         let presentation = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: true,
-            statusMessage: "Ready"
+            statusMessage: "Ready",
+            attemptAlert: nil
         )
         #expect(presentation.iconName == "mic.fill")
         #expect(presentation.accessibilityLabel == "Recordings")
@@ -22,8 +24,10 @@ struct MenuBarPresentationTests {
     func recording() {
         let presentation = MenuBarPresentation(
             isRecording: true,
+            isWarmingUpCapture: false,
             canStartRecording: false,
-            statusMessage: "Recording — release to stop"
+            statusMessage: "Recording — release to stop",
+            attemptAlert: nil
         )
         #expect(presentation.iconName == "waveform")
         #expect(presentation.accessibilityLabel == "Recordings, recording")
@@ -36,8 +40,10 @@ struct MenuBarPresentationTests {
         for status in ["Transcribing...", "Deciding...", "Answering...", "Rewriting...", "Pasting..."] {
             let presentation = MenuBarPresentation(
                 isRecording: false,
+                isWarmingUpCapture: false,
                 canStartRecording: false,
-                statusMessage: status
+                statusMessage: status,
+                attemptAlert: nil
             )
             #expect(presentation.iconName == "ellipsis.circle", "expected busy icon for \(status)")
             #expect(!presentation.primaryActionEnabled, "Start must be disabled during \(status)")
@@ -54,9 +60,10 @@ struct MenuBarPresentationTests {
         // glyph would drop to the busy ellipsis for ~100 ms mid-hold.
         let presentation = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: true,
             canStartRecording: false,
             statusMessage: "Recording — release to stop",
-            isWarmingUpCapture: true
+            attemptAlert: nil
         )
         #expect(presentation.iconName == "waveform")
         #expect(presentation.accessibilityLabel == "Recordings, recording")
@@ -71,6 +78,7 @@ struct MenuBarPresentationTests {
         for alert in [RecordingAttemptAlert.releasedBeforeAudio, .noAudioCaptured] {
             let presentation = MenuBarPresentation(
                 isRecording: false,
+                isWarmingUpCapture: false,
                 canStartRecording: true,
                 statusMessage: "Ready",
                 attemptAlert: alert
@@ -89,6 +97,7 @@ struct MenuBarPresentationTests {
     func recordingOutranksAnAlert() {
         let presentation = MenuBarPresentation(
             isRecording: true,
+            isWarmingUpCapture: false,
             canStartRecording: false,
             statusMessage: "Recording — release to stop",
             attemptAlert: .releasedBeforeAudio
@@ -100,6 +109,7 @@ struct MenuBarPresentationTests {
     func alertKeepsTheStartGateTruthful() {
         let presentation = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: false,
             statusMessage: "Transcribing...",
             attemptAlert: .noAudioCaptured
@@ -114,8 +124,10 @@ struct MenuBarPresentationTests {
         // the click. The contract requires busy.
         let deciding = MenuBarPresentation(
             isRecording: false,
+            isWarmingUpCapture: false,
             canStartRecording: false,
-            statusMessage: "Deciding..."
+            statusMessage: "Deciding...",
+            attemptAlert: nil
         )
         #expect(!deciding.primaryActionEnabled)
         #expect(deciding.statusText == "Deciding")

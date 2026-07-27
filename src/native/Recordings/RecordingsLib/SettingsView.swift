@@ -59,17 +59,32 @@ public struct SettingsView: View {
                 HStack {
                     Text("Shortcut")
                     Spacer()
+                    // Re-evaluate on change, not just log: a chord the system already
+                    // reserves has to be reported the moment it is picked, not at next launch.
                     KeyboardShortcuts.Recorder(for: .toggleRecording) { _ in
-                        engine.updateStatus()
+                        engine.refreshTriggerDiagnostics()
                     }
                     Button("Reset to F5") {
                         KeyboardShortcuts.setShortcut(.init(.f5), for: .toggleRecording)
-                        engine.updateStatus()
+                        engine.refreshTriggerDiagnostics()
                     }
                 }
+                // No .onChange here: `RecordingEngine.useFnKey`'s own didSet re-arms the
+                // monitor and logs the resolved trigger, so it also covers a change made
+                // from the CLI or anywhere else — a view-local hook would not.
                 Toggle("Use fn/Globe as recording key", isOn: $engine.useFnKey)
-                Text("Hold to record, release to transcribe and paste.")
+                Text("Hold to record, release to transcribe and paste. fn needs Accessibility; the hotkey above needs no permission.")
                     .foregroundStyle(.secondary)
+                // A trigger that is switched on but cannot arm must say so next to its own
+                // switch. Silence here is what made 51 recorded hotkey presses look like a
+                // working trigger while nothing was delivered.
+                if let blocked = engine.triggerBlockedReason {
+                    Label(blocked, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Button("Open Accessibility Settings") {
+                        engine.openAccessibilitySettings()
+                    }
+                }
             }
 
             Section("Permissions") {
