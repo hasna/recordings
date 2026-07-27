@@ -26,6 +26,8 @@ import { VERSION } from "../version.js";
 import { applyEnhancementOptions } from "./options.js";
 import { removeCodexServerBlock, upsertCodexStdioBlock } from "./mcp-config.js";
 import {
+  classifyTccGrantDurability,
+  describeTccAuthorizationSubject,
   RECORDINGS_BUNDLE_IDENTIFIER,
   resolveTccPermission,
   runMacOSPermissionRequest,
@@ -1011,6 +1013,8 @@ appCommand
       bundle_id: RECORDINGS_BUNDLE_IDENTIFIER,
       installed_app_path: status.installed_app_path,
       legacy_install_paths: status.legacy_install_paths,
+      // The grants below belong to this bundle, not to the terminal running this command.
+      permission_subject: describeTccAuthorizationSubject(status.installed_app_path),
       microphone: status.microphone_permission,
       accessibility: status.accessibility_permission,
       app_code_hash: status.app_code_hash,
@@ -1018,14 +1022,38 @@ appCommand
       signing_identifier: status.signing_identifier,
       team_identifier: status.team_identifier,
       designated_requirement: status.designated_requirement,
+      grant_durability: classifyTccGrantDurability({
+        designatedRequirement: status.designated_requirement,
+        adHocSigned: status.ad_hoc_signed,
+      }),
       log_path: status.log_path,
     };
     if (program.opts().json) {
       console.log(JSON.stringify(permissions, null, 2));
       return;
     }
+    console.log(`Subject: ${permissions.permission_subject}`);
     console.log(`Microphone: ${permissions.microphone}`);
     console.log(`Accessibility: ${permissions.accessibility}`);
+    if (permissions.grant_durability === "dies_on_rebuild_cdhash_pinned") {
+      console.log(
+        chalk.yellow(
+          "Warning: this bundle's grants are pinned to this exact build, so the next rebuild "
+            + "will silently revoke them. Sign with a stable certificate identity to keep them.",
+        ),
+      );
+    }
+    if (
+      permissions.microphone === "undetermined_tcc_database_unreadable"
+      || permissions.accessibility === "undetermined_tcc_database_unreadable"
+    ) {
+      console.log(
+        chalk.yellow(
+          "Warning: the system TCC database could not be read, so a state above is unknown "
+            + "rather than ungranted. Reading it requires Full Disk Access.",
+        ),
+      );
+    }
     console.log(`Log: ${permissions.log_path}`);
   });
 

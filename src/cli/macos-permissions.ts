@@ -54,6 +54,16 @@ export interface TccAccessRow {
   csreqHex: string;
 }
 
+/// Outcome of looking for one service's row in one TCC database. `absent` and `unreadable`
+/// must stay distinct: Accessibility and Input Monitoring live in the *system* database,
+/// which only opens for a process holding Full Disk Access. Collapsing an unreadable
+/// database into "no row" reports `not_determined` for an app that is in fact fully
+/// authorized — the silent-failure mode this module exists to remove.
+export type TccAccessLookup =
+  | { kind: "row"; row: TccAccessRow }
+  | { kind: "absent" }
+  | { kind: "unreadable"; detail: string };
+
 /// Result of evaluating a stored `csreq` against the installed bundle.
 /// - `satisfied`: macOS will honour the grant for this exact binary.
 /// - `unsatisfied`: the grant belongs to a previous build/identity and is dead.
@@ -68,6 +78,7 @@ export type TccAuthorizationState =
   | "unknown"
   | "limited"
   | "not_determined"
+  | "undetermined_tcc_database_unreadable"
   | `unknown(${string})`;
 
 export type CodesignRequirementRunner = (
@@ -77,7 +88,7 @@ export type CodesignRequirementRunner = (
 
 export interface TccPermissionProbe {
   databaseExists: (dbPath: string) => boolean;
-  readAccessRow: (dbPath: string, service: string) => TccAccessRow | null;
+  readAccessRow: (dbPath: string, service: string) => TccAccessLookup;
   verifyStoredRequirement: (csreqHex: string, appPath: string) => TccIdentityVerification;
 }
 
@@ -163,12 +174,20 @@ const defaultTccPermissionProbe: TccPermissionProbe = {
       "' order by last_modified desc limit 1;";
     const result = spawnSync("/usr/bin/sqlite3", [dbPath, sql], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    // sqlite3 exits non-zero when it cannot open the file at all — the ordinary outcome for
+    // the system database without Full Disk Access. That is not "no grant", so it must not
+    // be reported as one.
+    if (result.error) return { kind: "unreadable", detail: result.error.message };
+    if (result.status !== 0) {
+      const detail = (result.stderr ?? "").trim() || `sqlite3 exited ${result.status}`;
+      return { kind: "unreadable", detail };
+    }
     const value = result.stdout?.trim() ?? "";
-    if (!value) return null;
+    if (!value) return { kind: "absent" };
     const [authValue = "", csreqHex = ""] = value.split("|");
-    return { authValue, csreqHex };
+    return { kind: "row", row: { authValue, csreqHex } };
   },
   verifyStoredRequirement: (csreqHex, appPath) =>
     verifyStoredRequirementWithCodesign(csreqHex, appPath),
@@ -185,11 +204,17 @@ export function resolveTccPermission(options: {
   probe?: TccPermissionProbe;
 }): TccAuthorizationState {
   const probe = options.probe ?? defaultTccPermissionProbe;
+  let sawUnreadableDatabase = false;
 
   for (const dbPath of tccDatabasePaths(options.home)) {
     if (!probe.databaseExists(dbPath)) continue;
-    const row = probe.readAccessRow(dbPath, options.service);
-    if (!row) continue;
+    const lookup = probe.readAccessRow(dbPath, options.service);
+    if (lookup.kind === "unreadable") {
+      sawUnreadableDatabase = true;
+      continue;
+    }
+    if (lookup.kind === "absent") continue;
+    const row = lookup.row;
 
     const label = tccAuthValueLabel(row.authValue.trim());
     if (label !== "allowed") return label as TccAuthorizationState;
@@ -205,5 +230,57 @@ export function resolveTccPermission(options: {
     }
   }
 
-  return "not_determined";
+  // Only claim "never asked" when every database that exists was actually readable.
+  return sawUnreadableDatabase ? "undetermined_tcc_database_unreadable" : "not_determined";
+}
+
+/// How long a TCC grant given to this bundle will outlive the build it was granted to.
+/// TCC stores the code requirement the grant was made against, so the requirement's *shape*
+/// decides persistence:
+/// - an ad-hoc signature yields a `cdhash H"..."` requirement, pinned to one exact binary,
+///   so every rebuild silently voids the grant;
+/// - a certificate-rooted requirement (`certificate root = H"..."`, or Developer ID's
+///   `anchor apple generic` form) names the signing certificate rather than the binary, so
+///   rebuilds with the same certificate keep the grant.
+///
+/// Measured on station03 (macOS 26.5.1): the live `com.hasna.recordings` Accessibility grant
+/// stores `identifier "com.hasna.recordings" and certificate root = H"6eb85e38..."` and
+/// survives rebuilds, while the stale `com.hasna.recordings-helper` grant stores a bare
+/// `cdhash` and did not.
+export type TccGrantDurability =
+  | "survives_rebuild_developer_id"
+  | "survives_rebuild_certificate_anchored"
+  | "dies_on_rebuild_cdhash_pinned"
+  | "unknown";
+
+export function classifyTccGrantDurability(options: {
+  designatedRequirement: string | null;
+  adHocSigned: boolean;
+}): TccGrantDurability {
+  // Ad-hoc signing cannot produce anything but a cdhash-pinned requirement, so it decides
+  // the answer even when the requirement text could not be read.
+  if (options.adHocSigned) return "dies_on_rebuild_cdhash_pinned";
+
+  const requirement = options.designatedRequirement?.trim();
+  if (!requirement) return "unknown";
+  if (/\bcdhash\b/i.test(requirement)) return "dies_on_rebuild_cdhash_pinned";
+  if (/\banchor\s+apple\s+generic\b/i.test(requirement)) return "survives_rebuild_developer_id";
+  if (/\bcertificate\s+(root|leaf|\d+)\b|\banchor\s+H"/i.test(requirement)) {
+    return "survives_rebuild_certificate_anchored";
+  }
+  return "unknown";
+}
+
+/// Names the exact code the reported grant belongs to.
+///
+/// A CLI process inherits the *terminal's* Accessibility grant, never the app's: run from
+/// Ghostty, `AXIsProcessTrusted()` answers for `com.mitchellh.ghostty` (which is itself
+/// granted on station03), so a permission report that does not name its subject will read
+/// "granted" while `Recordings.app` is denied. Every reported state here is a property of
+/// the bundle below and of nothing else.
+export function describeTccAuthorizationSubject(appPath: string | null): string {
+  if (!appPath) {
+    return `${RECORDINGS_BUNDLE_IDENTIFIER} (no installed bundle found — nothing to report a grant for)`;
+  }
+  return `${appPath} (${RECORDINGS_BUNDLE_IDENTIFIER})`;
 }
