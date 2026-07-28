@@ -32,9 +32,13 @@ const repositoryRoot = resolve(import.meta.dir, "../../..");
 /// suite red on this station — `FORCE_COLOR` and /tmp contention, measured — see the block at
 /// the top of `helpers/source-assertions.ts`; it is not a property of the file.
 ///
-/// Keeping the root under `$HOME` is still load-bearing, for a different reason: the `mktemp`
-/// stub rewrites EVERY `/tmp/…` template into the work root, not only the installer's one
-/// template, so re-rooting under `/tmp` still breaks. Do not "simplify" that away.
+/// Keeping the root under `$HOME` used to be load-bearing for a second reason, disclosed by
+/// #54: the `mktemp` stub rewrote EVERY `/tmp/…` template into the work root, not only the
+/// installer's one template, so re-rooting under `/tmp` produced a doubled path and failed.
+/// FIXED below — the rewrite is now keyed on the FIXTURE ROOT rather than on the `/tmp` prefix,
+/// so templates the installer places inside the root pass through untouched and the stub no
+/// longer depends on where the root lives. The root stays under `$HOME` because that is where
+/// a canonical, 700, single-owner directory is cheap to guarantee, not because the stub needs it.
 ///
 /// The macOS-only tool set is stubbed and every tool whose OUTPUT the installer consumes
 /// stays real. Nothing outside the fixture root is read or written, and the guard is
@@ -50,8 +54,17 @@ const repositoryRoot = resolve(import.meta.dir, "../../..");
 
 /// Distinct so the guard's refusal names two different identities, and so a swap of the
 /// two digest arguments is visible in its message rather than symmetric.
+///
+/// Every 64-hex value this fixture feeds the installer is distinct, which is what makes that
+/// claim true by construction rather than by luck. `EXISTING_IDENTITY_SHA256` used to be
+/// byte-identical to the `--manifest-sha256` argument (both `"a".repeat(64)`): not exploitable,
+/// because the installer never echoes `EXPECTED_MANIFEST_SHA256`, but it meant an assertion that
+/// the refusal names the INSTALLED identity was also satisfied by a run that echoed the manifest
+/// digest instead. `MANIFEST_SHA256` exists so no two of these can be confused for each other.
 export const EXISTING_IDENTITY_SHA256 = "a".repeat(64);
 export const CANDIDATE_IDENTITY_SHA256 = "b".repeat(64);
+export const MANIFEST_SHA256 = "d".repeat(64);
+const TREE_DIGEST = "c".repeat(64);
 
 /// The approved local-only target this fixture presents itself as. Read from the packaged
 /// policy rather than written twice: the installer refuses any target not on that list, so
@@ -122,6 +135,22 @@ const inertTools = [
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
+/// Refusal preamble shared by the stubs that can be asked something they do not recognise.
+///
+/// The refusal is RECORDED to the log directory, not only printed. The installer runs its
+/// designated-requirement cross-checks as `codesign --verify --strict -R … >/dev/null 2>&1`
+/// (install_macos_app.sh:1753-1754), so a stderr-only marker on that path is discarded by the
+/// caller and unobservable to a test -- and `exit 90` there is indistinguishable from a genuine
+/// "not compatible" answer. Appending to a log the harness reads back is what makes the refusal
+/// assertable regardless of how the installer redirects the call.
+const unstubbedRefusal = [
+  "unstubbed() {",
+  '  printf \'%s\\n\' "$1" >> "$RECORDINGS_FIXTURE_LOG_DIR/unstubbed.log"',
+  '  echo "unstubbed $1" >&2',
+  "  exit 90",
+  "}",
+];
+
 const writeExecutable = (path: string, lines: string[]): void => {
   writeFileSync(path, lines.join("\n") + "\n", { mode: 0o700 });
   chmodSync(path, 0o700);
@@ -135,12 +164,32 @@ const createApp = (path: string, marker: string): void => {
   writeExecutable(join(path, "Contents", "MacOS", "Recordings"), ["#!/bin/bash", "exit 0"]);
 };
 
+/// Which direction of the designated-requirement cross-check the stubbed `codesign` refuses.
+///
+/// The installer checks compatibility BOTH ways (install_macos_app.sh:1753-1754): the installed
+/// app's requirement against the candidate, and the candidate's requirement against the installed
+/// app. They are joined by `||`, so when the first refuses the second is never invoked -- the deny
+/// path makes 3 codesign calls, not 4, and `:1754` is executed by no denying case. Selecting a
+/// direction is what lets a case refuse only the SECOND check, which raises the flag through the
+/// clause that otherwise never runs.
+export type IncompatibleDirection =
+  /// `-R <installed requirement> <candidate app>` -- install_macos_app.sh:1753, short-circuits :1754.
+  | "installed-requirement-vs-candidate"
+  /// `-R <candidate requirement> <installed app>` -- install_macos_app.sh:1754, reached only when
+  /// :1753 passed, so this is the direction no other case exercises.
+  | "candidate-requirement-vs-installed"
+  /// Both refuse. Indistinguishable from the first at the installer level, because of the `||`.
+  | "both";
+
 export type GuardExecutionOptions = {
   /// Whether the stubbed `codesign --verify --strict -R` refuses each app against the
   /// other's designated requirement. That refusal is the ONLY thing that raises
   /// `identity_migration`, so this drives the installer's real computation rather than
   /// injecting the flag.
   identityMigration: boolean;
+  /// Which of the two cross-checks refuses when `identityMigration` is true. Ignored when it is
+  /// false, because then neither refuses. Defaults to `"both"`.
+  incompatibleDirection?: IncompatibleDirection;
   /// Which artifact policy the run executes under. A run pinned to one policy cannot see a
   /// wrapper conditioned on the other, and this is the only input the installer's own
   /// policy-shaped conditionals read -- see the BOUND note in
@@ -162,6 +211,15 @@ export type GuardExecutionResult = {
   /// Every `codesign` invocation, so a case can prove the identity comparison really ran
   /// instead of the run failing earlier for an unrelated reason.
   codesignInvocations: string[];
+  /// Every stubbed-`bun` invocation, for the same reason: a case can prove the stub was really
+  /// driven rather than the run failing before it.
+  bunInvocations: string[];
+  /// Every argument vector a stub REFUSED as unrecognised. Must be empty for a run to mean
+  /// anything: a stub that answers success by default degrades silently the moment the installer
+  /// learns a new pre-guard subcommand, which is the exact failure mode this harness exists to
+  /// prevent. Read from a log rather than from stderr because the installer discards stderr on
+  /// the designated-requirement cross-checks.
+  unstubbedInvocations: string[];
 };
 
 export function runInstallerToIdentityGuard(
@@ -193,7 +251,11 @@ export function runInstallerToIdentityGuard(
     // here allow for the wrong reason.
     mkdirSync(join(home, "Applications"), { recursive: true, mode: 0o700 });
     chmodSync(join(home, "Applications"), 0o700);
-    createApp(join(home, "Applications", "Recordings.app"), "installed");
+    // The stubs discriminate installed-vs-candidate by comparing against this exact path, so it
+    // is named once and handed to them rather than each stub re-deriving it from an installer
+    // internal.
+    const installedApp = join(home, "Applications", "Recordings.app");
+    createApp(installedApp, "installed");
 
     for (const [relativePath, mode] of [
       ["scripts/install_macos_app.sh", 0o700],
@@ -246,9 +308,18 @@ export function runInstallerToIdentityGuard(
       "#!/bin/bash",
       "printf 'drwx------  1 fixture fixture 0 Jan  1 00:00 fixture\\n'",
     ]);
-    // The installer's preflight work directory is hardcoded to `/tmp`, which is mode 1777
-    // here. Redirecting that one template into the fixture root is what makes the run
-    // hermetic; every other template is already inside it and passes through.
+    // The installer's preflight work directory is hardcoded to `/tmp`
+    // (install_macos_app.sh:355, the only one of its five `mktemp -d` templates that is not
+    // already inside the fixture root). Redirecting it into the root is what makes the run
+    // hermetic.
+    //
+    // Keyed on the FIXTURE ROOT, not on the `/tmp` prefix. The prefix form rewrote EVERY
+    // template, so the fixture's own four templates were rewritten too the moment the root
+    // itself sat under `/tmp` -- producing
+    // `/tmp/<root>/work/<root>/home/.hasna/.recordings-install-maintenance.claim.XXXXXX` and a
+    // `failed to create directory via template` abort. Anchoring on the root is what makes the
+    // rewrite mean "outside my sandbox" instead of "spelled /tmp", so it holds wherever the
+    // root lives and does not restate an installer-internal path literal.
     writeExecutable(join(bin, "mktemp"), [
       "#!/bin/bash",
       "set -euo pipefail",
@@ -256,7 +327,8 @@ export function runInstallerToIdentityGuard(
       'if [ "${1:-}" = "-d" ] && [ "$#" -eq 2 ]; then',
       '  template="$2"',
       '  case "$template" in',
-      '    /tmp/*) template="$RECORDINGS_FIXTURE_WORK_ROOT/${template#/tmp/}" ;;',
+      '    "$RECORDINGS_FIXTURE_ROOT"/*) ;;',
+      '    *) template="$RECORDINGS_FIXTURE_WORK_ROOT/${template##*/}" ;;',
       "  esac",
       '  exec /usr/bin/mktemp -d "$template"',
       "fi",
@@ -265,34 +337,78 @@ export function runInstallerToIdentityGuard(
     // The designated-requirement comparison, which is the installer's own computation of
     // the migration flag. `-d -r-` reports each app's requirement; `--verify --strict -R`
     // cross-checks each against the other's, and its refusal is what sets the flag.
+    //
+    // Which app a call is ABOUT is decided by comparing the subject to the installed app path
+    // this fixture created, not by looking for `/unpacked/` in the arguments. `/unpacked/` is
+    // `install_macos_app.sh:1303`'s internal spelling of its staging directory: renaming it there
+    // would have made this stub label the candidate as the installed app, the two digests would
+    // have collided, and the run would have died on the manifest mismatch at `:1726` -- fail-closed,
+    // but for a reason no message names. The fixture owns the installed path, so it is the honest
+    // discriminator.
+    //
+    // Anything this stub does not recognise EXITS 90 rather than succeeding. A default-success
+    // stub silently stops testing the moment the installer learns a new pre-guard `codesign`
+    // invocation, which is the failure this harness exists to prevent.
     writeExecutable(join(bin, "codesign"), [
       "#!/bin/bash",
       "set -euo pipefail",
+      ...unstubbedRefusal,
       'printf \'%s\\n\' "$*" >> "$RECORDINGS_FIXTURE_LOG_DIR/codesign.log"',
+      // The app a call is about is always its LAST argument, for both invocation shapes.
+      'subject=""',
+      'if [ "$#" -gt 0 ]; then subject="${!#}"; fi',
       'case "$*" in',
       '  *"-d -r-"*)',
-      '    label=installed',
-      '    case "$*" in *"/unpacked/"*) label=candidate ;; esac',
+      '    label=candidate',
+      '    if [ "$subject" = "$RECORDINGS_FIXTURE_INSTALLED_APP" ]; then label=installed; fi',
       "    printf 'designated => identifier \"com.hasna.recordings\" and certificate leaf = \"%s\"\\n' \"$label\" >&2",
       "    exit 0",
       "    ;;",
-      '  *" -R "*) [ "$RECORDINGS_FIXTURE_IDENTITY_MIGRATION" = 1 ] && exit 1 ;;',
+      // The two directions of install_macos_app.sh:1753-1754, told apart by their SUBJECT: the
+      // first verifies the candidate against the installed requirement, the second verifies the
+      // installed app against the candidate's.
+      '  *"--verify --strict -R "*)',
+      '    if [ "$RECORDINGS_FIXTURE_IDENTITY_MIGRATION" != 1 ]; then exit 0; fi',
+      '    case "$RECORDINGS_FIXTURE_INCOMPATIBLE_DIRECTION" in',
+      "      both) exit 1 ;;",
+      '      installed-requirement-vs-candidate)',
+      '        if [ "$subject" != "$RECORDINGS_FIXTURE_INSTALLED_APP" ]; then exit 1; fi',
+      "        exit 0",
+      "        ;;",
+      '      candidate-requirement-vs-installed)',
+      '        if [ "$subject" = "$RECORDINGS_FIXTURE_INSTALLED_APP" ]; then exit 1; fi',
+      "        exit 0",
+      "        ;;",
+      '      *) unstubbed "codesign direction: $RECORDINGS_FIXTURE_INCOMPATIBLE_DIRECTION" ;;',
+      "    esac",
+      "    ;;",
+      '  *) unstubbed "codesign: $*" ;;',
       "esac",
-      "exit 0",
     ]);
     // The artifact tool. Real `bun` still runs the installer's inline `-e` comparisons, so
     // the macOS version check is genuinely evaluated; the subcommands that need a real
     // signed artifact, a real ZIP, or macOS filesystem APIs are answered from the fixture.
+    //
+    // The inert subcommands are ENUMERATED and everything else EXITS 90. Falling through to
+    // `exit 0` meant this stub answered success for a subcommand nobody had considered, so an
+    // installer change that added a parsed pre-guard call would have degraded the harness
+    // silently -- it would keep passing while no longer proving anything. Adding a subcommand
+    // to the installer now fails here with the argument vector printed, which is a two-second
+    // diagnosis instead of a green run that means nothing.
+    //
+    // `requirement-digest` picks its answer from the SUBJECT app path the fixture created, not
+    // from `/unpacked/`: see the codesign stub above for why that literal was the wrong key.
     writeExecutable(join(bin, "bun"), [
       "#!/bin/bash",
       "set -euo pipefail",
+      ...unstubbedRefusal,
       'printf \'%s\\n\' "$*" >> "$RECORDINGS_FIXTURE_LOG_DIR/bun.log"',
       'case "$*" in',
       "  -e*) exec \"$RECORDINGS_FIXTURE_REAL_BUN\" \"$@\" ;;",
       '  *" requirement-digest "*)',
       '    case "$*" in',
-      '      *"/unpacked/"*) printf \'%s\\n\' "$RECORDINGS_FIXTURE_CANDIDATE_IDENTITY" ;;',
-      '      *) printf \'%s\\n\' "$RECORDINGS_FIXTURE_EXISTING_IDENTITY" ;;',
+      '      *"$RECORDINGS_FIXTURE_INSTALLED_APP"*) printf \'%s\\n\' "$RECORDINGS_FIXTURE_EXISTING_IDENTITY" ;;',
+      '      *) printf \'%s\\n\' "$RECORDINGS_FIXTURE_CANDIDATE_IDENTITY" ;;',
       "    esac",
       "    ;;",
       // Must agree with the candidate's requirement digest or the installer refuses the
@@ -311,6 +427,28 @@ export function runInstallerToIdentityGuard(
       '    [ -n "$staging_target" ] || exit 1',
       '    cp -R "$RECORDINGS_FIXTURE_CANDIDATE_SOURCE" "$staging_target/Recordings.app"',
       "    ;;",
+      // Subcommands the installer invokes before or just after the guard whose EFFECT this run
+      // does not depend on: each verifies, fsyncs, or journals something the fixture has already
+      // arranged. Enumerated rather than left to a default so that a NEW one is not silently
+      // added to this list by omission. Every entry corresponds to a real call site --
+      // native-fs-guard-check :523, verify-filesystem-tree :643/:1660/:1735,
+      // fsync-directory :688/:893/:905, fsync-tree :892/:1776, verify-archive :1309/:1356,
+      // verify-app :1646, assert-transition :1736, journal-write :1627, journal-get :1249-1251,
+      // journal-recover :1265, transaction-cleanup :1559.
+      ...[
+        "native-fs-guard-check",
+        "verify-filesystem-tree",
+        "verify-archive",
+        "verify-app",
+        "assert-transition",
+        "fsync-directory",
+        "fsync-tree",
+        "journal-write",
+        "journal-get",
+        "journal-recover",
+        "transaction-cleanup",
+      ].map((subcommand) => `  *" ${subcommand}"*) exit 0 ;;`),
+      '  *) unstubbed "bun: $*" ;;',
       "esac",
       "exit 0",
     ]);
@@ -329,12 +467,15 @@ export function runInstallerToIdentityGuard(
       RECORDINGS_BUN_EXECUTABLE: join(bin, "bun"),
       RECORDINGS_FIXTURE_REAL_BUN: process.execPath,
       RECORDINGS_FIXTURE_LOG_DIR: logs,
+      RECORDINGS_FIXTURE_ROOT: root,
       RECORDINGS_FIXTURE_WORK_ROOT: work,
       RECORDINGS_FIXTURE_CANDIDATE_SOURCE: candidateSource,
+      RECORDINGS_FIXTURE_INSTALLED_APP: installedApp,
       RECORDINGS_FIXTURE_CANDIDATE_IDENTITY: CANDIDATE_IDENTITY_SHA256,
       RECORDINGS_FIXTURE_EXISTING_IDENTITY: EXISTING_IDENTITY_SHA256,
-      RECORDINGS_FIXTURE_TREE_DIGEST: "c".repeat(64),
+      RECORDINGS_FIXTURE_TREE_DIGEST: TREE_DIGEST,
       RECORDINGS_FIXTURE_IDENTITY_MIGRATION: options.identityMigration ? "1" : "0",
+      RECORDINGS_FIXTURE_INCOMPATIBLE_DIRECTION: options.incompatibleDirection ?? "both",
     };
     for (const tool of realTools) {
       const real = Bun.which(tool.toLowerCase());
@@ -348,7 +489,7 @@ export function runInstallerToIdentityGuard(
     const argumentList = [
       "--artifact", artifact,
       "--manifest", manifest,
-      "--manifest-sha256", "a".repeat(64),
+      "--manifest-sha256", MANIFEST_SHA256,
       "--expected-source-sha", "b".repeat(40),
       "--expected-version", "0.2.14",
       ...policyArguments(options.artifactPolicy ?? "local-only", target, targetIdentitySha256),
@@ -373,6 +514,8 @@ export function runInstallerToIdentityGuard(
         line.includes(".Recordings-transaction."),
       ),
       codesignInvocations: logLines("codesign.log"),
+      bunInvocations: logLines("bun.log"),
+      unstubbedInvocations: logLines("unstubbed.log"),
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
