@@ -1,15 +1,14 @@
 # syntax=docker/dockerfile:1
 # Image built from the published @hasna/recordings npm tarball by the ECR image
-# builder (CodeBuild, ARM64). Runs recordings-serve (PURE REMOTE, Amendment A1):
-# the serve process reads/writes the shared cloud Postgres directly with
-# @hasna/contracts API-key auth. No local sqlite/sync in the service.
+# builder (CodeBuild, ARM64). Runs recordings-serve with the `postgresql` data
+# backend: the serve process reads/writes the shared Postgres directly with
+# @hasna/contracts API-key auth. No on-box sqlite/sync in the service.
 
 FROM oven/bun:1.3.13-alpine AS runtime
 
 ENV NODE_ENV=production \
     HASNA_APP_NAME=recordings \
-    HASNA_APP_MODE=self_hosted \
-    HASNA_RECORDINGS_STORAGE_MODE=remote \
+    HASNA_RECORDINGS_STORAGE_MODE=postgresql \
     HOST=0.0.0.0 \
     PORT=8874 \
     NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem \

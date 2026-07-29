@@ -140,8 +140,8 @@ describe("native app companion contract", () => {
           env: {
             HOME: join(directory, "home"),
             PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
-            HASNA_RECORDINGS_STORAGE_MODE: "local",
-            RECORDINGS_STORAGE_MODE: "local",
+            HASNA_RECORDINGS_CLIENT_STORE: "sqlite",
+            RECORDINGS_CLIENT_STORE: "sqlite",
             HASNA_RECORDINGS_DB_PATH: join(directory, "recordings.db"),
             RECORDINGS_AUDIO_DIR: join(directory, "audio"),
           },

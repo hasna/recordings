@@ -1496,8 +1496,8 @@ run_signed_helper_contract() {
         HOME="$contract_home"
         PATH="/usr/bin:/bin:/usr/sbin:/sbin"
         TMPDIR="$contract_home"
-        HASNA_RECORDINGS_STORAGE_MODE="local"
-        RECORDINGS_STORAGE_MODE="local"
+        HASNA_RECORDINGS_CLIENT_STORE="sqlite"
+        RECORDINGS_CLIENT_STORE="sqlite"
         HASNA_RECORDINGS_DB_PATH="$contract_home/recordings.db"
         RECORDINGS_AUDIO_DIR="$contract_home/audio"
     )

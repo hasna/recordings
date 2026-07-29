@@ -4,7 +4,7 @@
   "class": "service",
   "contractVersion": "v1",
   "kitVersion": "0.4.2",
-  "description": "Speech-to-text recording store for AI coding agents. CLI + MCP + HTTP API (recordings-serve) + generated SDK. Cloud mode (HASNA_RECORDINGS_STORAGE_MODE=remote / HASNA_RECORDINGS_DATABASE_URL set) is PURE REMOTE per Amendment A1: the serve process reads/writes the shared cloud Postgres directly with API-key auth via @hasna/contracts.",
+  "description": "Speech-to-text recording store for AI coding agents. CLI + MCP + HTTP API (recordings-serve) + generated SDK. The server's data backend is a two-value switch, HASNA_RECORDINGS_STORAGE_MODE=sqlite|postgresql (a HASNA_RECORDINGS_DATABASE_URL implies postgresql); on postgresql the serve process reads/writes that database directly with API-key auth via @hasna/contracts. The client is a separate two-value switch, HASNA_RECORDINGS_CLIENT_STORE=sqlite|http, and never opens Postgres.",
   "bins": ["recordings", "recordings-mcp", "recordings-serve"],
   "storage": {
     "mode": "local",

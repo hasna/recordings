@@ -26,7 +26,7 @@ describe("public readiness", () => {
   });
 
   test("rejects missing or invalid signing verifier configuration before probing storage", async () => {
-    process.env.HASNA_RECORDINGS_STORAGE_MODE = "remote";
+    process.env.HASNA_RECORDINGS_STORAGE_MODE = "postgresql";
     for (const message of ["signing secret is required", "signing secret is too short"]) {
       let storageProbes = 0;
       const fetch = buildFetch({
@@ -49,7 +49,7 @@ describe("public readiness", () => {
   });
 
   test("does not expose database errors to unauthenticated callers or logs", async () => {
-    process.env.HASNA_RECORDINGS_STORAGE_MODE = "remote";
+    process.env.HASNA_RECORDINGS_STORAGE_MODE = "postgresql";
     const logged: unknown[][] = [];
     const fetch = buildFetch({
       pingCloud: async () => { throw new Error("password=secret host=private-db.internal"); },

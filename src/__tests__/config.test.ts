@@ -30,6 +30,8 @@ const envKeys = [
   "RECORDINGS_DATABASE_URL",
   "HASNA_RECORDINGS_STORAGE_MODE",
   "RECORDINGS_STORAGE_MODE",
+  "HASNA_RECORDINGS_CLIENT_STORE",
+  "RECORDINGS_CLIENT_STORE",
   "HASNA_RECORDINGS_STORAGE_CONFIG",
 ];
 
@@ -47,16 +49,16 @@ beforeEach(() => {
 describe("store transport resolution", () => {
   test("no api env resolves to the local store", () => {
     const store = getStore({});
-    expect(store.mode).toBe("local");
+    expect(store.mode).toBe("sqlite");
     expect(store.baseUrl).toBeNull();
   });
 
-  test("api url + key resolves to the cloud-http store (bearer only, no DSN)", () => {
+  test("api url + key resolves to the http store (bearer only, no DSN)", () => {
     const store = getStore({
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
-    expect(store.mode).toBe("cloud-http");
+    expect(store.mode).toBe("http");
     expect(store.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 });
