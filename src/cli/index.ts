@@ -450,7 +450,7 @@ program
 
 program
   .command("save <text>")
-  .description("Save raw text as a recording (no audio). Routes to the self_hosted API when configured, else local.")
+  .description("Save raw text as a recording (no audio). Routes to the /v1 API when configured, else the on-box SQLite store.")
   .option("-t, --tags <tags>", "Comma-separated tags")
   .option("--enhance", "Enhance the text via the configured model before saving")
   .option("--model <model>", "Value for model_used", "direct-input")

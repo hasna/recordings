@@ -271,7 +271,7 @@ globalThis.fetch = async () => new Response(JSON.stringify({ agents: [] }), {
   headers: { "content-type": "application/json" },
 });
 const cloud = getStore({
-  HASNA_RECORDINGS_STORAGE_MODE: "cloud",
+  HASNA_RECORDINGS_CLIENT_STORE: "http",
   HASNA_RECORDINGS_API_URL: "https://recordings.invalid/v1",
   HASNA_RECORDINGS_API_KEY: "fixture-only",
 });
@@ -290,7 +290,7 @@ console.log(JSON.stringify({ blocked, cloudMode: cloud.mode, cloudCount: agents.
       new Response(child.stderr).text(),
     ]);
     expect(exitCode, stderr).toBe(0);
-    expect(JSON.parse(stdout)).toEqual({ blocked: 16, cloudMode: "cloud-http", cloudCount: 0 });
+    expect(JSON.parse(stdout)).toEqual({ blocked: 16, cloudMode: "http", cloudCount: 0 });
   });
 });
 

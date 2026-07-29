@@ -1,11 +1,11 @@
 /**
- * Cloud (A1 pure-remote) service wiring for `recordings-serve`.
+ * PostgreSQL-backed `/v1` service wiring for `recordings-serve`.
  *
- * Per Amendment A1 the serve process reads and writes the shared cloud Postgres
- * DIRECTLY through the repo-native async adapter (`PgAdapterAsync`) — there is
- * NO local sync/cache in the service. Everything is lazy: nothing touches
- * Postgres or crypto until the first `/v1` (or `/ready`) request, so the
- * local-first CLI/MCP paths keep ZERO cloud dependencies.
+ * When the server's data backend is `postgresql` it reads and writes that
+ * database DIRECTLY through the repo-native async adapter (`PgAdapterAsync`) —
+ * there is NO on-box sync/cache in the service. Everything is lazy: nothing
+ * touches Postgres or crypto until the first `/v1` (or `/ready`) request, so the
+ * SQLite-backed CLI/MCP paths keep ZERO Postgres dependencies.
  *
  * Auth is enforced by the vendored `@hasna/contracts` kit: stateless HMAC-signed
  * API keys, hashed at rest in the cloud Postgres `api_keys` table, verified per request.
@@ -14,7 +14,6 @@ import { verifyApiKey, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import { ApiKeyStore, type AuthQueryClient } from "@hasna/contracts/auth";
 import { PgAdapterAsync } from "../db/remote-storage.js";
 import {
-  isCloudModeEnabled,
   requireSigningSecret,
   resolveCloudDatabaseUrl,
 } from "./cloud-config.js";
@@ -26,7 +25,15 @@ import {
 import { applyRecordedCloudMigrations } from "./migrate-command.js";
 
 export const RECORDINGS_APP_SLUG = "recordings";
-export { isCloudModeEnabled, requireSigningSecret, resolveCloudDatabaseUrl, resolveSigningSecret } from "./cloud-config.js";
+export {
+  isPostgresBackendEnabled,
+  resolveDataBackend,
+  configuredDataBackend,
+  requireSigningSecret,
+  resolveCloudDatabaseUrl,
+  resolveSigningSecret,
+} from "./cloud-config.js";
+export type { DataBackend } from "./cloud-config.js";
 
 let cachedPg: PgAdapterAsync | null = null;
 let cachedStore: ApiKeyStore | null = null;
@@ -39,7 +46,7 @@ export function getCloudPg(): PgAdapterAsync {
   const url = resolveCloudDatabaseUrl();
   if (!url) {
     throw new Error(
-      "Cloud /v1 requires a remote database URL (HASNA_RECORDINGS_DATABASE_URL / RECORDINGS_DATABASE_URL / DATABASE_URL).",
+      "The /v1 API requires a PostgreSQL database URL (HASNA_RECORDINGS_DATABASE_URL / RECORDINGS_DATABASE_URL / DATABASE_URL).",
     );
   }
   cachedPg = new PgAdapterAsync(url);

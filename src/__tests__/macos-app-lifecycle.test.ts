@@ -3886,8 +3886,8 @@ cat > "$1" <<'EOF'
 set -euo pipefail
 [ -z "\${HASNA_RECORDINGS_API_URL:-}" ] || exit 71
 [ -z "\${HASNA_RECORDINGS_API_KEY:-}" ] || exit 71
-[ "\${HASNA_RECORDINGS_STORAGE_MODE:-}" = local ] || exit 71
-[ "\${RECORDINGS_STORAGE_MODE:-}" = local ] || exit 71
+[ "\${HASNA_RECORDINGS_CLIENT_STORE:-}" = sqlite ] || exit 71
+[ "\${RECORDINGS_CLIENT_STORE:-}" = sqlite ] || exit 71
 case "\${HASNA_RECORDINGS_DB_PATH:-}" in "$HOME"/*) ;; *) exit 71 ;; esac
 [ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 71
 case "\${1:-}" in
@@ -4763,7 +4763,7 @@ fi
     const result = await runBuild(fixture, {
       HASNA_RECORDINGS_API_URL: "https://example.invalid",
       HASNA_RECORDINGS_API_KEY: "fixture-not-a-secret",
-      HASNA_RECORDINGS_STORAGE_MODE: "cloud",
+      HASNA_RECORDINGS_CLIENT_STORE: "http",
       HASNA_RECORDINGS_DB_PATH: "/should/not/be/used.sqlite",
       REVERSE_ENTITLEMENT_ORDER: "1",
     });

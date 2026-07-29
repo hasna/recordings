@@ -64,18 +64,18 @@ describe("describeActiveStore", () => {
 
     const description = describeActiveStore(makeConfig(dbPath), {});
 
-    expect(description.transport).toBe("local");
+    expect(description.transport).toBe("sqlite");
     expect(description.mode_source).toBe("default");
     expect(description.base_url).toBeNull();
     expect(description.local_db_path).toBe(dbPath);
     expect(description.local_db_recordings).toBe(3);
-    // Rows in the local file are the live data in local mode, not a divergence.
+    // Rows in the on-box file are the live data when it is the store, not a divergence.
     expect(description.divergent).toBe(false);
   });
 
-  // The station03 shape: URL + key present, no mode variable anywhere, so
+  // The station03 shape: URL + key present, no store variable anywhere, so
   // nothing in a config file or a login profile reveals that writes left the box.
-  test("reports cloud-http and names the URL+key presence as the reason", () => {
+  test("reports the http store and names the URL+key presence as the reason", () => {
     const dbPath = join(makeTempDir(), "recordings.db");
 
     const description = describeActiveStore(makeConfig(dbPath), {
@@ -83,7 +83,7 @@ describe("describeActiveStore", () => {
       HASNA_RECORDINGS_API_KEY: FAKE_API_KEY,
     });
 
-    expect(description.transport).toBe("cloud-http");
+    expect(description.transport).toBe("http");
     expect(description.mode_source).toBe(AUTO_FLIP_MODE_SOURCE);
     expect(description.base_url).toBe("https://recordings.example.test/v1");
     expect(description.warning).toContain("launchctl getenv");
@@ -166,7 +166,7 @@ describe("describeActiveStore", () => {
 });
 
 interface FakeStoreOptions {
-  mode?: "local" | "cloud-http";
+  mode?: "sqlite" | "http";
   baseUrl?: string | null;
   /** Simulate a write that is accepted but not durable. */
   dropOnWrite?: boolean;
@@ -190,7 +190,7 @@ function makeFakeStore(options: FakeStoreOptions = {}): {
   let counter = 0;
 
   const store = {
-    mode: options.mode ?? "local",
+    mode: options.mode ?? "sqlite",
     baseUrl: options.baseUrl ?? null,
     async createRecording(input: CreateRecordingInput) {
       if (options.createThrows) throw new Error(options.createThrows);
@@ -221,7 +221,7 @@ function makeFakeStore(options: FakeStoreOptions = {}): {
 describe("probeRecordingPersistence", () => {
   test("passes only after a write is read back and removed again", async () => {
     const { store, rows, deleted } = makeFakeStore({
-      mode: "cloud-http",
+      mode: "http",
       baseUrl: "https://recordings.example.test/v1",
     });
 
@@ -231,7 +231,7 @@ describe("probeRecordingPersistence", () => {
     expect(result.attempted).toBe(true);
     expect(result.read_back).toBe(true);
     expect(result.cleaned_up).toBe(true);
-    expect(result.transport).toBe("cloud-http");
+    expect(result.transport).toBe("http");
     expect(result.message).toContain("https://recordings.example.test/v1");
     expect(deleted).toHaveLength(1);
     // Nothing is left behind in a store people audit.
@@ -242,7 +242,7 @@ describe("probeRecordingPersistence", () => {
     // Reuses makeFakeStore rather than hand-rolling a second stub: the ad-hoc one
     // ignored deletes, so it disagreed with the real Store contract and made a
     // correct implementation look broken.
-    const { store, created } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store, created } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({ store });
 
@@ -337,7 +337,7 @@ describe("credential safety in reports", () => {
       HASNA_RECORDINGS_API_KEY: FAKE_API_KEY,
     });
 
-    expect(description.transport).toBe("cloud-http");
+    expect(description.transport).toBe("http");
     expect(JSON.stringify(description)).not.toContain(FAKE_API_KEY);
     expect(description.base_url).toContain("recordings.example.test");
     expect(description.base_url).toContain("redacted");
@@ -358,7 +358,7 @@ describe("credential safety in reports", () => {
 
   test("the persistence probe message does not leak the URL password", async () => {
     const { store } = makeFakeStore({
-      mode: "cloud-http",
+      mode: "http",
       baseUrl: `${URL_WITH_PASSWORD}/v1`,
     });
 
@@ -369,7 +369,7 @@ describe("credential safety in reports", () => {
     expect(JSON.stringify(result)).not.toContain(FAKE_API_KEY);
   });
 
-  test("an unresolvable mode value is redacted rather than echoed", () => {
+  test("an unresolvable value in a retired mode variable is redacted rather than echoed", () => {
     const dbPath = join(makeTempDir(), "recordings.db");
 
     const description = describeActiveStore(makeConfig(dbPath), {
@@ -390,12 +390,12 @@ describe("credential safety in reports", () => {
 });
 
 describe("writing to a shared store requires consent", () => {
-  // The probe writes a real row. Against a self-hosted API that row is briefly
+  // The probe writes a real row. Against the /v1 API that row is briefly
   // visible to every reader, and the server's idempotency ledger keeps a
   // permanent orphan per create, so this must not happen by default.
-  test("SKIPS a cloud-http store unless allowRemoteWrite is set", async () => {
+  test("SKIPS the http store unless allowRemoteWrite is set", async () => {
     const { store, rows } = makeFakeStore({
-      mode: "cloud-http",
+      mode: "http",
       baseUrl: "https://recordings.example.test/v1",
     });
 
@@ -423,7 +423,7 @@ describe("writing to a shared store requires consent", () => {
   // which is the distinction `ok` alone could not express and why the third state exists.
   test("a skip is reported as not-measured, and is not a failure", async () => {
     const { store } = makeFakeStore({
-      mode: "cloud-http",
+      mode: "http",
       baseUrl: "https://recordings.example.test/v1",
     });
 
@@ -438,7 +438,7 @@ describe("writing to a shared store requires consent", () => {
   // reachability and credential acceptance without adding a row to production.
   test("a skip still probes reachability read-only, and reports what it found", async () => {
     const reachableStore = makeFakeStore({
-      mode: "cloud-http",
+      mode: "http",
       baseUrl: "https://recordings.example.test/v1",
     });
     let statsCalls = 0;
@@ -459,7 +459,7 @@ describe("writing to a shared store requires consent", () => {
     expect(reachableStore.created).toHaveLength(0);
 
     const unreachableStore = makeFakeStore({
-      mode: "cloud-http",
+      mode: "http",
       baseUrl: "https://recordings.example.test/v1",
     });
     (unreachableStore.store as unknown as { getRecordingStats: () => Promise<unknown> })
@@ -475,7 +475,7 @@ describe("writing to a shared store requires consent", () => {
   });
 
   test("writes to a local store without any extra consent", async () => {
-    const { store, deleted } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store, deleted } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({ store });
 
@@ -487,7 +487,7 @@ describe("writing to a shared store requires consent", () => {
   // The module refuses to open a store read-write while inspecting it, then the
   // probe created and migrated one. Reporting it is the minimum honesty.
   test("reports when the probe itself created the local store", async () => {
-    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({
       store,
@@ -499,7 +499,7 @@ describe("writing to a shared store requires consent", () => {
   });
 
   test("does not claim to have created a store that already existed", async () => {
-    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({
       store,
@@ -513,7 +513,7 @@ describe("writing to a shared store requires consent", () => {
 
 describe("legacy local stores are not migrated silently", () => {
   test("SKIPS a local store that is behind the schema", async () => {
-    const { store, rows } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store, rows } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({ store, localStoreIsLegacy: true });
 
@@ -531,7 +531,7 @@ describe("legacy local stores are not migrated silently", () => {
   });
 
   test("writes to a legacy store once the migration is accepted", async () => {
-    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({
       store,
@@ -545,7 +545,7 @@ describe("legacy local stores are not migrated silently", () => {
 
   // An unknown schema level must not block the normal path, only a known-legacy one.
   test("does not skip when the schema level could not be determined", async () => {
-    const { store } = makeFakeStore({ mode: "local", baseUrl: null });
+    const { store } = makeFakeStore({ mode: "sqlite", baseUrl: null });
 
     const result = await probeRecordingPersistence({ store, localStoreIsLegacy: null });
 
