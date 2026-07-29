@@ -10,6 +10,7 @@ import {
 import {
   registerAgent,
   getAgent,
+  heartbeatAgent,
   listAgents,
   setAgentFocus,
 } from "../db/agents.js";
@@ -106,6 +107,42 @@ describe("getAgent", () => {
   test("returns null for non-existent agent", () => {
     const found = getAgent("nonexistent", db);
     expect(found).toBeNull();
+  });
+
+  test("normalizes empty optional columns and parses object metadata", () => {
+    const now = new Date().toISOString();
+    db.query(
+      "INSERT INTO agents (id, name, description, role, metadata, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("defaults", "defaulted", "", "", JSON.stringify({ team: "quality" }), now, now);
+
+    expect(getAgent("defaults", db)).toEqual({
+      id: "defaults",
+      name: "defaulted",
+      description: null,
+      role: "agent",
+      metadata: { team: "quality" },
+      created_at: now,
+      last_seen_at: now,
+    });
+  });
+});
+
+describe("heartbeatAgent", () => {
+  test("updates an existing agent and returns the refreshed row", () => {
+    const agent = registerAgent("heartbeat", undefined, undefined, db);
+    db.query("UPDATE agents SET last_seen_at = ? WHERE id = ?").run(
+      "2000-01-01T00:00:00.000Z",
+      agent.id,
+    );
+
+    const refreshed = heartbeatAgent("heartbeat", db);
+
+    expect(refreshed?.id).toBe(agent.id);
+    expect(refreshed?.last_seen_at).not.toBe("2000-01-01T00:00:00.000Z");
+  });
+
+  test("returns null without writing for an unknown agent", () => {
+    expect(heartbeatAgent("missing", db)).toBeNull();
   });
 });
 
