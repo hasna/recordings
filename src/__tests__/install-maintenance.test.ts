@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { Subprocess } from "bun";
 import {
   acquireLocalStoreReaderLease,
   withLocalStoreReaderLease,
@@ -20,8 +21,15 @@ import {
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const installer = join(repositoryRoot, "scripts", "install_macos_app.sh");
 const temporaryPaths: string[] = [];
+const subprocesses = new Set<Subprocess>();
 
-afterEach(() => {
+afterEach(async () => {
+  const children = [...subprocesses];
+  subprocesses.clear();
+  for (const child of children) {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+  await Promise.all(children.map((child) => child.exited));
   for (const path of temporaryPaths.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -202,6 +210,7 @@ async function runEarlyInstaller(
     stdout: "pipe",
     stderr: "pipe",
   });
+  subprocesses.add(child);
   const [exitCode, stderr] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
@@ -284,6 +293,7 @@ console.log(JSON.stringify({ blocked, cloudMode: cloud.mode, cloudCount: agents.
       stdout: "pipe",
       stderr: "pipe",
     });
+    subprocesses.add(child);
     const [exitCode, stdout, stderr] = await Promise.all([
       child.exited,
       new Response(child.stdout).text(),
@@ -319,6 +329,7 @@ describe("installer maintenance marker", () => {
       stdout: "ignore",
       stderr: "ignore",
     });
+    subprocesses.add(crashed);
     const owner = join(fixture.marker, "owner");
     for (let attempt = 0; attempt < 200 && !existsSync(owner); attempt += 1) {
       await Bun.sleep(10);
@@ -369,6 +380,7 @@ describe("installer maintenance marker", () => {
       stdout: "ignore",
       stderr: "pipe",
     });
+    subprocesses.add(child);
     for (let attempt = 0; attempt < 200 && !existsSync(fixture.marker); attempt += 1) {
       await Bun.sleep(10);
     }
@@ -415,6 +427,7 @@ await new Promise(() => {});
         stdout: "pipe",
         stderr: "pipe",
       });
+      subprocesses.add(reader);
       const readerReady = new Response(reader.stdout).text();
       const readers = join(fixture.home, ".hasna", ".recordings-store-readers");
       for (let attempt = 0; attempt < 200 &&
@@ -434,6 +447,7 @@ await new Promise(() => {});
         stdout: "ignore",
         stderr: "pipe",
       });
+      subprocesses.add(child);
       for (let attempt = 0; attempt < 200 && !existsSync(fixture.marker); attempt += 1) {
         await Bun.sleep(10);
       }
