@@ -95,6 +95,7 @@ import {
   parseLaunchTimeout,
   prepareReleaseInstallInputs,
 } from "../lib/release-install-policy.js";
+import { exportDesktopSnapshot } from "./desktop-snapshot.js";
 
 const program = new Command();
 
@@ -1188,6 +1189,18 @@ appCommand
     }
     process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
+  });
+
+appCommand
+  .command("snapshot [output]")
+  .description("Write the current main desktop to a PNG for local debugging")
+  .action((output?: string) => {
+    const path = exportDesktopSnapshot(output);
+    if (program.opts().json) {
+      console.log(JSON.stringify({ path }, null, 2));
+    } else {
+      console.log(chalk.green(`Desktop snapshot written: ${path}`));
+    }
   });
 
 appCommand

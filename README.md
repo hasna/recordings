@@ -59,6 +59,9 @@ recordings app install \
 
 recordings app open           # launch it
 recordings app status         # show install state
+recordings app snapshot       # write ./desktop-snapshot.png for local UI debugging
+# From this repository, optionally choosing another output path:
+bun run desktop:snapshot -- /tmp/recordings-desktop.png
 /Applications/Recordings.app/Contents/Helpers/recordings-update-client status
 
 # Release builds run only as the isolated _recordingsbuild account. Provision these first:
