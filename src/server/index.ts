@@ -18,9 +18,9 @@ const DEFAULT_PORT = 8874;
 function parsePort(): number {
   const arg = process.argv.find((a) => a === "--port" || a.startsWith("--port="));
   if (arg) {
-    if (arg.includes("=")) return parseInt(arg.split("=")[1]!, 10) || DEFAULT_PORT;
+    if (arg.includes("=")) return parseInt(arg.split("=", 2)[1] ?? "", 10) || DEFAULT_PORT;
     const idx = process.argv.indexOf(arg);
-    return parseInt(process.argv[idx + 1]!, 10) || DEFAULT_PORT;
+    return parseInt(process.argv[idx + 1] ?? "", 10) || DEFAULT_PORT;
   }
   const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : undefined;
   return envPort || DEFAULT_PORT;

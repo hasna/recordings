@@ -93,7 +93,9 @@ function listQuery(
 
 function unwrap<T>(res: unknown, key: string): T {
   if (res && typeof res === "object" && key in (res as Record<string, unknown>)) {
-    return (res as Record<string, T>)[key]!;
+    const value = (res as Record<string, T | undefined>)[key];
+    if (value === undefined) throw new Error(`Response field ${key} is undefined`);
+    return value;
   }
   return res as T;
 }

@@ -200,7 +200,11 @@ export async function assertCloudSchemaContract(
     }
   }
   const idempotencyColumns = columns.filter((column) => column.table_name === "recording_idempotency");
-  const expectedIdempotencyColumns = Object.keys(REQUIRED_COLUMNS.recording_idempotency!);
+  const expectedIdempotencySpec = REQUIRED_COLUMNS.recording_idempotency;
+  if (expectedIdempotencySpec === undefined) {
+    throw new Error("cloud schema contract is missing recording_idempotency");
+  }
+  const expectedIdempotencyColumns = Object.keys(expectedIdempotencySpec);
   const unexpectedIdempotencyColumn = idempotencyColumns.find(
     (column) => !expectedIdempotencyColumns.includes(column.column_name),
   );
