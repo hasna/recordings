@@ -28,7 +28,7 @@
       "readiness": {
         "method": "GET",
         "path": "/ready",
-        "public": false
+        "public": true
       },
       "version": {
         "method": "GET",
@@ -76,6 +76,11 @@
     }
   },
   "metadata": {
+    "release": {
+      "artifactScan": {
+        "script": "scan:artifact"
+      }
+    },
     "service": {
       "port": 8874,
       "healthPath": "/health",
