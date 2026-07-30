@@ -4491,6 +4491,69 @@ fi
     ).toBeTrue();
   });
 
+  test("local-station build signs with the supplied Developer ID instead of ad-hoc", async () => {
+    // Regression (station03, 2026-07-30): the Fn/Globe push-to-talk was permanently dead.
+    // FnKeyMonitor.swift creates a CGEventTap, which macOS only permits with Accessibility,
+    // and TCC keys that grant to bundle-id + code-signing identity. Every local-station
+    // artifact was force-signed ad-hoc, so its CDHash changed on each rebuild, TCC orphaned
+    // the grant, AXIsProcessTrusted() stayed false, and Recordings.log recorded
+    // "fn monitor start ok=false" forever. A pinned Developer ID gives the bundle a stable
+    // designated requirement, which is the only thing a TCC grant can durably attach to.
+    const fixture = createBuildFixture();
+    const result = await runLocalBuild(fixture, {
+      RECORDINGS_LOCAL_APPROVED_TARGET: "station03",
+      RECORDINGS_CODESIGN_IDENTITY: "Developer ID Application: Example Corp (EXAMPLE123)",
+      RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "EXAMPLE123",
+      SIGNING_FLAGS: "0x10000(runtime)",
+      MISSING_TIMESTAMP: "1",
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stderr).toContain("Developer ID signed, non-notarized, and restricted to station03");
+    expect(result.stderr).not.toContain("ad-hoc signed, non-notarized");
+    const codesignLog = readFileSync(join(fixture.markers, "codesign.log"), "utf8");
+    expect(codesignLog).toContain("--force --sign Developer ID Application: Example Corp (EXAMPLE123)");
+    expect(codesignLog).not.toContain("--force --sign -");
+    // Non-notarized: a trusted timestamp stays a release-only claim.
+    expect(codesignLog).not.toContain("--timestamp");
+    const bunLog = readFileSync(join(fixture.markers, "bun.log"), "utf8");
+    expect(bunLog).toContain("--artifact-policy local_only");
+    expect(bunLog).toContain("--approved-target station03");
+    // The pinned team reaches both the embedded provenance and the artifact finalizer, so the
+    // manifest cannot later claim ad-hoc for a Developer ID bundle. The manifest CONTENT
+    // invariants are asserted against the real finalizer in macos-artifact.test.ts; this
+    // fixture stubs bun, so only the arguments are observable here.
+    expect(bunLog).toContain("--team-id EXAMPLE123");
+    expect(bunLog).toContain("--expected-team-id EXAMPLE123");
+    // Still a local-station artifact: bound to one target, never notarized.
+    expect(bunLog).toContain("--approved-target-identity-kind tailscale_node_id_sha256");
+    expect(existsSync(join(fixture.markers, "xcrun.log"))).toBeFalse();
+    expect(
+      existsSync(join(fixture.native, ".build", "release", "Recordings-0.2.12-macos-station03-local-only.zip")),
+    ).toBeTrue();
+  });
+
+  test("local-station Developer ID build refuses an identity without a pinned team", async () => {
+    const fixture = createBuildFixture();
+    const result = await runLocalBuild(fixture, {
+      RECORDINGS_LOCAL_APPROVED_TARGET: "station03",
+      RECORDINGS_CODESIGN_IDENTITY: "Developer ID Application: Example Corp (EXAMPLE123)",
+      RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("RECORDINGS_EXPECTED_TEAM_IDENTIFIER");
+  });
+
+  test("local-station build refuses a signing identity that is not a Developer ID Application", async () => {
+    const fixture = createBuildFixture();
+    const result = await runLocalBuild(fixture, {
+      RECORDINGS_LOCAL_APPROVED_TARGET: "station03",
+      RECORDINGS_CODESIGN_IDENTITY: "Apple Development: Example Corp (EXAMPLE123)",
+      RECORDINGS_EXPECTED_TEAM_IDENTIFIER: "EXAMPLE123",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Developer ID Application");
+  });
+
   test("local-only build fails closed when the approved-target policy is absent", async () => {
     const fixture = createBuildFixture();
     rmSync(join(fixture.root, "scripts", "policy", "local-only-approved-targets.txt"));
