@@ -61,13 +61,12 @@ import { join } from "node:path";
  *      Kept here rather than deleted because it is the reason this file's split moved, and because
  *      the same trap recurs in any stub that parses `console.log` of a NUMBER: only strings are
  *      left uncoloured.
- *   2. CONTENTION. The station routinely runs several full recordings suites at once out of
- *      different worktrees, and this suite scans a shared /tmp — the hazard this very comment warns
- *      about below. Those are the FIFO timeouts, at an internal 5000ms budget that no `--timeout`
- *      flag reaches. With `FORCE_COLOR` unset the residual failures are all timing-shaped and scale
- *      with load: 132 pass / 8 fail at load ~20, 114 pass / 26 fail at load 44-60 on the same
- *      commit, which is why no split belongs here either. GitHub Actions sets neither `FORCE_COLOR`
- *      nor a competing suite, which is why both causes were absent from the only clean measurement.
+ *   2. CONTENTION — **FIXED BY SHARING THE SUITE BUDGET.** The station routinely runs several full
+ *      recordings suites at once out of different worktrees, and this suite scans a shared /tmp —
+ *      the hazard this very comment warns about below. Those were FIFO timeouts at an internal
+ *      5000ms budget that no `--timeout` flag reached. The FIFO helper now uses the same validated
+ *      `RECORDINGS_TEST_TIMEOUT_MS` value as the enclosing lifecycle test, so a hosted or contended
+ *      run no longer fails on a hidden shorter deadline.
  *
  * WHY NO SPLIT IS RECORDED. Every split ever written here has gone stale, including two written as
  * corrections. On one unchanged tree, three consecutive runs measured 48/92, 48/92, 49/91; the

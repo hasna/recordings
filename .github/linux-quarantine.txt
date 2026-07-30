@@ -33,10 +33,9 @@
 # FOLLOW-UP 2026-07-28: the FORCE_COLOR half is now FIXED IN THE FIXTURE rather than worked around by
 # an env flag. The `stat` stub writes bare integers (`process.stdout.write`) and unsets FORCE_COLOR
 # for its own children, so the 38 owner-mismatch aborts go to 0 with no change to how the suite is
-# invoked. Contention remains, and remains untouched by this: it is the FIFO timeouts, on an internal
-# 5000ms budget no `--timeout` flag reaches. Do not read the fix as closing both causes — a quiet
-# machine with FORCE_COLOR set still showed all 38 aborts before it, so "measure on a quiet machine"
-# was necessary and not sufficient, and it is the reason the two were conflated for so long.
+# invoked. The remaining FIFO contention defect is now fixed separately: synchronization uses the
+# same validated `RECORDINGS_TEST_TIMEOUT_MS` budget as the enclosing lifecycle test instead of an
+# unreachable internal 5000ms deadline.
 #
 # That is why the mechanism is kept with an empty list instead of being deleted. It is the only
 # reason the three entries were ever disproven: `scripts/ci-linux-suite.ts` re-runs each quarantined

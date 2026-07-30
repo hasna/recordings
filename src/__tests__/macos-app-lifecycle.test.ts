@@ -47,7 +47,10 @@ const temporaryPaths: string[] = [];
 // Validated rather than coerced: `Number(undefined)` is NaN and `Number("")` is 0, either of which
 // would silently make every case here time out instantly.
 const configuredTimeoutMs = Number(Bun.env.RECORDINGS_TEST_TIMEOUT_MS);
-setDefaultTimeout(Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 30_000);
+const testTimeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+  ? configuredTimeoutMs
+  : 30_000;
+setDefaultTimeout(testTimeoutMs);
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -88,7 +91,7 @@ async function readFifoLine(path: string): Promise<string> {
         timeout = setTimeout(() => {
           reader.kill();
           reject(new Error(`timed out waiting for FIFO synchronization: ${path}`));
-        }, 5_000);
+        }, testTimeoutMs);
       }),
     ]);
     const [exitCode, stdout, stderr] = result;

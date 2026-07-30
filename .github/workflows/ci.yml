@@ -64,19 +64,12 @@ jobs:
       # repository real time. Measured headroom: the slowest of the 974 tests in the JUnit report
       # from run 30302342895 took 1.88s, so this is ~64x the slowest observed test.
       #
-      # It cannot rescue a test carrying its own hardcoded budget — the FIFO waits in
-      # macos-app-lifecycle reject at an internal 5000ms setTimeout that no flag reaches. Those pass
-      # on a runner and fail only on a contended machine, so the fix there is an uncontended
-      # machine, not a larger number here.
-      #
       # CORRECTED 2026-07-28: this value was itself a NO-OP for macos-app-lifecycle, the one suite it
       # was chiefly aimed at. That file called `setDefaultTimeout(30_000)` at module scope, and an
       # in-file `setDefaultTimeout` overrides `bun test --timeout` — so a run invoked with 120000
-      # still reported "this test timed out after 30000ms". The paragraph above was right that a
-      # hardcoded budget defeats this variable, and wrong about which budgets those were: it named the
-      # FIFO wait and missed the one covering every case in the file. That line now reads
-      # `RECORDINGS_TEST_TIMEOUT_MS`, so this value reaches it. The FIFO 5000ms is still out of reach
-      # and still needs an uncontended machine.
+      # still reported "this test timed out after 30000ms". The file now uses
+      # `RECORDINGS_TEST_TIMEOUT_MS` for both its default test timeout and its FIFO synchronization
+      # waits, so one measured budget governs the whole lifecycle case.
       RECORDINGS_TEST_TIMEOUT_MS: "120000"
       JUNIT_REPORT: gated-junit.xml
     steps:
