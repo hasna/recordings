@@ -55,13 +55,17 @@ export function startRecording(config: RecordingsConfig): string {
 
   // Build sox/rec command based on config
   const args = buildRecordArgs(filepath, config);
+  const [command, ...commandArgs] = args;
+  if (command === undefined) {
+    throw new RecordingError("Recording command is empty.");
+  }
   const releaseLease = isGlobalRecordingsStatePath(filepath)
     ? acquireLocalStoreReaderLease()
     : () => {};
   let recordProcess: ChildProcess;
 
   try {
-    recordProcess = spawn(args[0]!, args.slice(1), {
+    recordProcess = spawn(command, commandArgs, {
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (error) {

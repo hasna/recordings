@@ -139,7 +139,11 @@ function runMigrations(db: Database): void {
 
   for (let i = currentLevel + 1; i < MIGRATIONS.length; i++) {
     try {
-      db.run(MIGRATIONS[i]!);
+      const migration = MIGRATIONS[i];
+      if (migration === undefined) {
+        throw new Error(`Missing SQLite migration at version ${i}`);
+      }
+      db.run(migration);
       db.query("INSERT INTO _migrations (id) VALUES (?)").run(i);
     } catch (e) {
       if (isBenignMigrationError(e)) {

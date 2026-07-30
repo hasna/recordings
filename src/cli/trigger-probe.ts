@@ -243,7 +243,8 @@ export function parseTriggerBindingsLog(logText: string | null): AppTriggerObser
   if (!logText) return null;
   const lines = logText.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]!;
+    const line = lines[index];
+    if (line === undefined) continue;
     const markerAt = line.indexOf(TRIGGER_LOG_MARKER);
     if (markerAt === -1) continue;
     const body = line.slice(markerAt + TRIGGER_LOG_MARKER.length);

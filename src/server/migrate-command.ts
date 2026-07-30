@@ -21,7 +21,11 @@ export async function applyRecordedCloudMigrations(
   const appliedSet = new Set(applied.map((row) => Number(row.version)));
   for (let version = 0; version < PG_MIGRATIONS.length; version++) {
     if (appliedSet.has(version)) continue;
-    await pg.exec(PG_MIGRATIONS[version]!);
+    const migration = PG_MIGRATIONS[version];
+    if (migration === undefined) {
+      throw new Error(`Missing PostgreSQL migration at version ${version}`);
+    }
+    await pg.exec(migration);
     await pg.run("INSERT INTO _pg_migrations (version) VALUES (?) ON CONFLICT DO NOTHING", version);
   }
   await ensureApiKeySchema();

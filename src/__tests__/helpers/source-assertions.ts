@@ -363,7 +363,8 @@ export function switchArmsByOutcome(body: string): Map<string, string> {
   const starts = [...body.matchAll(/^[ \t]*(case|default)\b/gm)];
   starts.forEach((start, position) => {
     const from = start.index ?? 0;
-    const to = position + 1 < starts.length ? (starts[position + 1]!.index ?? body.length) : body.length;
+    const nextStart = starts[position + 1];
+    const to = nextStart?.index ?? body.length;
     const arm = body.slice(from, to);
     const colon = arm.indexOf(":");
     expect(colon, `a switch arm has no \`:\` separating its label from its body: ${arm.slice(0, 60)}`)
@@ -423,7 +424,10 @@ export function evaluateSwiftCondition(condition: string, env: Record<string, bo
   // `Object.hasOwn`, not `in`: `text in env` walks the prototype chain, so `toString`,
   // `constructor`, `__proto__`, `valueOf` and `hasOwnProperty` all answer truthy on a plain
   // object and would be read as bound identifiers rather than rejected.
-  if (Object.hasOwn(env, text)) return env[text]!;
+  if (Object.hasOwn(env, text)) {
+    const value = env[text];
+    if (value !== undefined) return value;
+  }
   throw new Error(
     `condition contains an expression this evaluator cannot decide: ${JSON.stringify(text)} — ` +
       "extend the evaluator, do not loosen the assertion",
