@@ -1060,10 +1060,20 @@ describe("macOS finalized artifact installer", () => {
     expect(droppedFlag.exitCode).toBe(2);
     expect(droppedFlag.stderr).toContain("not valid for local-only artifacts");
 
+    // A local-station artifact may now be Developer ID signed, so a WELL-FORMED team is no
+    // longer refused at argument parsing. The guard is not weakened, it moved: a team that
+    // does not match the artifact's own manifest must still fail rather than install.
     const wrongTeam = createInstallerFixture();
     const teamMismatch = await runLocalInstaller(wrongTeam, ["--expected-team-id", "EXAMPLE123"]);
-    expect(teamMismatch.exitCode).toBe(2);
-    expect(teamMismatch.stderr).toContain("do not accept --expected-team-id");
+    expect(teamMismatch.exitCode).not.toBe(0);
+    expect(existsSync(join(wrongTeam.home, "Applications", "Recordings.app"))).toBeFalse();
+
+    // A MALFORMED team is still refused up front, before any verification or mutation.
+    const malformedTeam = createInstallerFixture();
+    const badTeam = await runLocalInstaller(malformedTeam, ["--expected-team-id", "nope"]);
+    expect(badTeam.exitCode).toBe(2);
+    expect(badTeam.stderr).toContain("10-character Developer ID team identifier");
+    expect(existsSync(join(malformedTeam.markers, "bun.log"))).toBeFalse();
   });
 
   test("Tailscale-bound local install verifies live Self before creating install state", async () => {

@@ -1730,7 +1730,10 @@ if [ "$ARTIFACT_POLICY" = "release" ] && [ -z "$candidate_requirement" ]; then
   exit 1
 fi
 identity_migration=0
-candidate_identity_sha256="$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" requirement-digest --app "$CANDIDATE_APP" --artifact-policy "$ARTIFACT_POLICY")"
+# Pass the SAME pinned team already given to verify-archive and verify-app. Without it the
+# digest verifies the candidate against the ad-hoc shape, which rejects a correctly
+# Developer-ID-signed local-station bundle and, under `set -euo pipefail`, aborts the install.
+candidate_identity_sha256="$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" requirement-digest --app "$CANDIDATE_APP" --artifact-policy "$ARTIFACT_POLICY" --expected-team-id "$EXPECTED_TEAM_ID")"
 candidate_tree_sha256="$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" tree-digest --path "$CANDIDATE_APP")"
 [ "$candidate_identity_sha256" = "$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" manifest-get \
   --manifest "$MANIFEST_SNAPSHOT" \

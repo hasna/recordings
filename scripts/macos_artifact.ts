@@ -187,7 +187,7 @@ export type MacOSArtifactManifest = BuildProvenance & {
   };
   provenance_sha256: string;
   signing: {
-    mode?: "ad_hoc";
+    mode?: "ad_hoc" | "developer_id";
     authority: string;
     team_id: string;
     trusted_timestamp: string;
@@ -2460,11 +2460,19 @@ function assertInstallTransition(
   assertVersionTransition(installedVersion, installedSource, manifest);
 }
 
-function requirementDigest(appPath: string, artifactPolicy: ArtifactPolicy): void {
+function requirementDigest(
+  appPath: string,
+  artifactPolicy: ArtifactPolicy,
+  expectedTeamId: string = "ADHOC",
+): void {
   if (artifactPolicy === "local_only") {
+    // The pinned team decides which local signing shape is verified. Hard-coding "ADHOC" here
+    // rejected every correctly Developer-ID-signed local-station bundle, and because
+    // install_macos_app.sh calls this for EVERY local install under `set -euo pipefail`, that
+    // rejection aborted the install outright — making a properly signed build uninstallable.
     const evidence = signingEvidence(
       appPath,
-      "ADHOC",
+      expectedTeamId,
       APP_ENTITLEMENTS,
       join(appPath, "Contents", "MacOS", "Recordings"),
       "local_only",
@@ -5367,7 +5375,11 @@ function main(): void {
       argument("--manifest-sha256"),
     );
   } else if (command === "requirement-digest") {
-    requirementDigest(argument("--app"), artifactPolicyArgument());
+    requirementDigest(
+      argument("--app"),
+      artifactPolicyArgument(),
+      optionalArgument("--expected-team-id") ?? "ADHOC",
+    );
   } else if (command === "tailscale-node-id-sha256") {
     console.log(tailscaleNodeIdSha256(readFileSync(0, "utf8"), argument("--expected-hostname")));
   } else if (command === "verify-filesystem-tree") {

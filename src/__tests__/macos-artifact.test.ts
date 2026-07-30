@@ -252,6 +252,7 @@ fi
 function runRequirementDigest(
   policy: "release" | "local_only",
   environment: Record<string, string> = {},
+  extraArguments: string[] = [],
 ) {
   const { app, bin } = requirementDigestFixture();
   return Bun.spawnSync(
@@ -263,6 +264,7 @@ function runRequirementDigest(
       app,
       "--artifact-policy",
       policy,
+      ...extraArguments,
     ],
     {
       env: {
@@ -360,6 +362,46 @@ describe("macOS artifact manifest", () => {
     ["wrong entitlements", { ENTITLEMENTS_JSON: JSON.stringify({ "com.apple.security.app-sandbox": true }) }],
   ])("real local requirement-digest rejects %s", (_label, environment) => {
     const result = runRequirementDigest("local_only", environment);
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test("real local requirement-digest accepts a Developer ID bundle under its pinned team", () => {
+    // P0 regression: requirement-digest hard-coded the "ADHOC" sentinel for local_only, so a
+    // correctly Developer-ID-signed local-station bundle was rejected as "not consistently
+    // ad-hoc signed". install_macos_app.sh calls requirement-digest unconditionally for every
+    // local install under `set -euo pipefail`, so that abort made a properly signed build
+    // UNINSTALLABLE — closing one half of the bug while opening the other.
+    const result = runRequirementDigest(
+      "local_only",
+      {
+        SIGNING_DETAILS: [
+          "Executable=/tmp/Recordings.app/Contents/MacOS/Recordings",
+          "Identifier=com.hasna.recordings",
+          "CodeDirectory v=20400 size=123 flags=0x10000(runtime)",
+          "Authority=Developer ID Application: Example Corp (EXAMPLE123)",
+          "TeamIdentifier=EXAMPLE123",
+        ].join("\n"),
+        DESIGNATED_REQUIREMENT: 'identifier "com.hasna.recordings" and anchor apple generic',
+      },
+      ["--expected-team-id", "EXAMPLE123"],
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    // The real designated requirement is hashed, NOT the ad-hoc sentinel — that requirement is
+    // the stable identity a TCC Accessibility grant attaches to.
+    expect(result.stdout.toString().trim()).toBe(
+      Bun.CryptoHasher.hash(
+        "sha256",
+        'identifier "com.hasna.recordings" and anchor apple generic',
+        "hex",
+      ),
+    );
+    expect(result.stdout.toString().trim()).not.toBe(
+      Bun.CryptoHasher.hash("sha256", "none-ad-hoc", "hex"),
+    );
+  });
+
+  test("real local requirement-digest still rejects an ad-hoc bundle when a team is pinned", () => {
+    const result = runRequirementDigest("local_only", {}, ["--expected-team-id", "EXAMPLE123"]);
     expect(result.exitCode).not.toBe(0);
   });
 
