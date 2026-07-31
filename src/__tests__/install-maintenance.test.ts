@@ -416,44 +416,54 @@ await new Promise(() => {});
         stderr: "pipe",
       });
       const readerReady = new Response(reader.stdout).text();
-      const readers = join(fixture.home, ".hasna", ".recordings-store-readers");
-      for (let attempt = 0; attempt < 200 &&
-        (!existsSync(readers) || !readdirSync(readers).some((entry) => entry.startsWith("lease-")));
-        attempt += 1) await Bun.sleep(10);
-      expect(existsSync(readers)).toBeTrue();
-      const lease = readdirSync(readers).find((entry) => entry.startsWith("lease-"));
-      expect(lease).toBeDefined();
-      const owner = readFileSync(join(readers, lease!, "owner"), "utf8").trim().split("\n");
-      const cIdentity = normalizedProcessStart("C", reader.pid);
-      const localizedIdentity = normalizedProcessStart(nonEnglishProcessLocale!, reader.pid);
-      expect(owner).toEqual([String(reader.pid), cIdentity]);
-      expect(localizedIdentity).not.toBe(cIdentity);
+      try {
+        const readers = join(fixture.home, ".hasna", ".recordings-store-readers");
+        for (let attempt = 0; attempt < 200 &&
+          (!existsSync(readers) || !readdirSync(readers).some((entry) => entry.startsWith("lease-")));
+          attempt += 1) await Bun.sleep(10);
+        expect(existsSync(readers)).toBeTrue();
+        const lease = readdirSync(readers).find((entry) => entry.startsWith("lease-"));
+        expect(lease).toBeDefined();
+        const owner = readFileSync(join(readers, lease!, "owner"), "utf8").trim().split("\n");
+        const cIdentity = normalizedProcessStart("C", reader.pid);
+        const localizedIdentity = normalizedProcessStart(nonEnglishProcessLocale!, reader.pid);
+        expect(owner).toEqual([String(reader.pid), cIdentity]);
+        expect(localizedIdentity).not.toBe(cIdentity);
 
-      const child = Bun.spawn(installerArguments(fixture), {
-        env: installerEnvironment(fixture, { LC_ALL: "C", LANG: "C", TZ: "UTC0" }),
-        stdout: "ignore",
-        stderr: "pipe",
-      });
-      for (let attempt = 0; attempt < 200 && !existsSync(fixture.marker); attempt += 1) {
-        await Bun.sleep(10);
+        const child = Bun.spawn(installerArguments(fixture), {
+          env: installerEnvironment(fixture, { LC_ALL: "C", LANG: "C", TZ: "UTC0" }),
+          stdout: "ignore",
+          stderr: "pipe",
+        });
+        try {
+          for (let attempt = 0; attempt < 200 && !existsSync(fixture.marker); attempt += 1) {
+            await Bun.sleep(10);
+          }
+          expect(existsSync(fixture.marker)).toBeTrue();
+          await Bun.sleep(100);
+          expect(child.exitCode).toBeNull();
+          expect(readdirSync(readers).some((entry) => entry.startsWith("lease-"))).toBeTrue();
+
+          reader.kill("SIGTERM");
+          const [readerExit, readerStdout, exitCode, stderr] = await Promise.all([
+            reader.exited,
+            readerReady,
+            child.exited,
+            new Response(child.stderr).text(),
+          ]);
+          expect(readerExit, readerStdout).toBe(0);
+          expect(readerStdout).toContain("ready");
+          expect(exitCode, stderr).toBe(79);
+          expect(stderr).not.toContain("Timed out waiting");
+          expect(existsSync(fixture.marker)).toBeFalse();
+        } finally {
+          if (child.exitCode === null) child.kill("SIGKILL");
+          await child.exited;
+        }
+      } finally {
+        if (reader.exitCode === null) reader.kill("SIGKILL");
+        await reader.exited;
       }
-      expect(existsSync(fixture.marker)).toBeTrue();
-      await Bun.sleep(100);
-      expect(child.exitCode).toBeNull();
-      expect(readdirSync(readers).some((entry) => entry.startsWith("lease-"))).toBeTrue();
-
-      reader.kill("SIGTERM");
-      const [readerExit, readerStdout, exitCode, stderr] = await Promise.all([
-        reader.exited,
-        readerReady,
-        child.exited,
-        new Response(child.stderr).text(),
-      ]);
-      expect(readerExit, readerStdout).toBe(0);
-      expect(readerStdout).toContain("ready");
-      expect(exitCode, stderr).toBe(79);
-      expect(stderr).not.toContain("Timed out waiting");
-      expect(existsSync(fixture.marker)).toBeFalse();
     },
   );
 
