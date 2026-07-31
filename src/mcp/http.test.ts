@@ -153,8 +153,8 @@ describe("recordings MCP HTTP transport", () => {
 
   test("MCP agent/project pages and model stats enforce output caps", async () => {
     const tempDir = join(tmpdir(), `open-recordings-mcp-caps-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const previousMode = process.env.HASNA_RECORDINGS_STORAGE_MODE;
-    process.env.HASNA_RECORDINGS_STORAGE_MODE = "local";
+    const previousStore = process.env.HASNA_RECORDINGS_CLIENT_STORE;
+    process.env.HASNA_RECORDINGS_CLIENT_STORE = "sqlite";
     __resetStore();
     mkdirSync(tempDir, { recursive: true });
     resetDatabase();
@@ -238,10 +238,10 @@ describe("recordings MCP HTTP transport", () => {
       closeDatabase();
       resetDatabase();
       __resetStore();
-      if (previousMode === undefined) {
-        delete process.env.HASNA_RECORDINGS_STORAGE_MODE;
+      if (previousStore === undefined) {
+        delete process.env.HASNA_RECORDINGS_CLIENT_STORE;
       } else {
-        process.env.HASNA_RECORDINGS_STORAGE_MODE = previousMode;
+        process.env.HASNA_RECORDINGS_CLIENT_STORE = previousStore;
       }
       if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
     }
@@ -249,8 +249,8 @@ describe("recordings MCP HTTP transport", () => {
 
   test("MCP list/search keep full rows bounded and direct detail complete", async () => {
     const tempDir = join(tmpdir(), `open-recordings-mcp-compact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const previousMode = process.env.HASNA_RECORDINGS_STORAGE_MODE;
-    process.env.HASNA_RECORDINGS_STORAGE_MODE = "local";
+    const previousStore = process.env.HASNA_RECORDINGS_CLIENT_STORE;
+    process.env.HASNA_RECORDINGS_CLIENT_STORE = "sqlite";
     __resetStore();
     mkdirSync(tempDir, { recursive: true });
     resetDatabase();
@@ -306,10 +306,10 @@ describe("recordings MCP HTTP transport", () => {
       closeDatabase();
       resetDatabase();
       __resetStore();
-      if (previousMode === undefined) {
-        delete process.env.HASNA_RECORDINGS_STORAGE_MODE;
+      if (previousStore === undefined) {
+        delete process.env.HASNA_RECORDINGS_CLIENT_STORE;
       } else {
-        process.env.HASNA_RECORDINGS_STORAGE_MODE = previousMode;
+        process.env.HASNA_RECORDINGS_CLIENT_STORE = previousStore;
       }
       if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
     }

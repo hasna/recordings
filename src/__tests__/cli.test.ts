@@ -33,8 +33,8 @@ function isolatedCliEnv(home: string, overrides: Record<string, string> = {}) {
   return {
     HOME: home,
     PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
-    HASNA_RECORDINGS_STORAGE_MODE: "local",
-    RECORDINGS_STORAGE_MODE: "local",
+    HASNA_RECORDINGS_CLIENT_STORE: "sqlite",
+    RECORDINGS_CLIENT_STORE: "sqlite",
     HASNA_RECORDINGS_API_URL: "",
     HASNA_RECORDINGS_API_KEY: "",
     RECORDINGS_API_URL: "",

@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
-# @hasna/recordings self_hosted service — ARM64 / Bun.
-# Default CMD runs recordings-serve (cloud / PURE REMOTE per Amendment A1: the
-# serve process reads/writes RDS Postgres directly with @hasna/contracts API-key
-# auth). The ECS one-shot migration task overrides the command with `... migrate`.
+# @hasna/recordings server image — ARM64 / Bun.
+# Default CMD runs recordings-serve with the `postgresql` data backend: the serve
+# process reads/writes Postgres directly with @hasna/contracts API-key auth. The
+# one-shot migration task overrides the command with `... migrate`.
 
 FROM --platform=linux/arm64 oven/bun:1 AS deps
 WORKDIR /app
@@ -23,7 +23,7 @@ WORKDIR /app
 # verify-full-capable clients.
 COPY docker/rds-global-bundle.pem /etc/ssl/certs/rds-global-bundle.pem
 ENV NODE_ENV=production \
-    HASNA_RECORDINGS_STORAGE_MODE=remote \
+    HASNA_RECORDINGS_STORAGE_MODE=postgresql \
     NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem \
     PGSSLROOTCERT=/etc/ssl/certs/rds-global-bundle.pem \
     HOST=0.0.0.0 \
@@ -32,6 +32,6 @@ COPY package.json bun.lock ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 EXPOSE 8874
-# Fail-closed: recordings-serve /v1 refuses to serve without a cloud DSN +
+# Fail-closed: recordings-serve /v1 refuses to serve without a Postgres DSN +
 # signing secret (503), and /ready reports DB reachability — no silent stub.
 CMD ["bun", "dist/server/index.js"]

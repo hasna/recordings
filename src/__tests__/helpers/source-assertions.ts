@@ -63,11 +63,12 @@ import { join } from "node:path";
  *      left uncoloured.
  *   2. CONTENTION. The station routinely runs several full recordings suites at once out of
  *      different worktrees, and this suite scans a shared /tmp — the hazard this very comment warns
- *      about below. Those are the FIFO timeouts, at an internal 5000ms budget that no `--timeout`
- *      flag reaches. With `FORCE_COLOR` unset the residual failures are all timing-shaped and scale
- *      with load: 132 pass / 8 fail at load ~20, 114 pass / 26 fail at load 44-60 on the same
- *      commit, which is why no split belongs here either. GitHub Actions sets neither `FORCE_COLOR`
- *      nor a competing suite, which is why both causes were absent from the only clean measurement.
+ *      about below. Those were FIFO timeouts at an internal 5000ms budget; the FIFO helper now uses
+ *      the suite's configured timeout too, so a raised test budget can distinguish load sensitivity
+ *      from a regression. With `FORCE_COLOR` unset the residual failures scaled with load: 132 pass /
+ *      8 fail at load ~20, 114 pass / 26 fail at load 44-60 on the same commit, which is why no split
+ *      belongs here either. GitHub Actions sets neither `FORCE_COLOR` nor a competing suite, which
+ *      is why both causes were absent from the only clean measurement.
  *
  * WHY NO SPLIT IS RECORDED. Every split ever written here has gone stale, including two written as
  * corrections. On one unchanged tree, three consecutive runs measured 48/92, 48/92, 49/91; the
@@ -363,7 +364,8 @@ export function switchArmsByOutcome(body: string): Map<string, string> {
   const starts = [...body.matchAll(/^[ \t]*(case|default)\b/gm)];
   starts.forEach((start, position) => {
     const from = start.index ?? 0;
-    const to = position + 1 < starts.length ? (starts[position + 1]!.index ?? body.length) : body.length;
+    const nextStart = starts[position + 1];
+    const to = nextStart?.index ?? body.length;
     const arm = body.slice(from, to);
     const colon = arm.indexOf(":");
     expect(colon, `a switch arm has no \`:\` separating its label from its body: ${arm.slice(0, 60)}`)
@@ -423,7 +425,10 @@ export function evaluateSwiftCondition(condition: string, env: Record<string, bo
   // `Object.hasOwn`, not `in`: `text in env` walks the prototype chain, so `toString`,
   // `constructor`, `__proto__`, `valueOf` and `hasOwnProperty` all answer truthy on a plain
   // object and would be read as bound identifiers rather than rejected.
-  if (Object.hasOwn(env, text)) return env[text]!;
+  if (Object.hasOwn(env, text)) {
+    const value = env[text];
+    if (value !== undefined) return value;
+  }
   throw new Error(
     `condition contains an expression this evaluator cannot decide: ${JSON.stringify(text)} — ` +
       "extend the evaluator, do not loosen the assertion",

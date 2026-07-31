@@ -26,7 +26,7 @@ provides recording controls and access to the main window while it is in the bac
   the CLI and MCP write), searchable and filterable by project, mode, and machine, with a
   detail pane (copy, paste-into-front-app, audio playback, metadata).
 - **Projects** — app projects are registered through the same canonical Store before a
-  recording can reference them, preserving referential integrity in local and remote modes.
+  recording can reference them, preserving referential integrity on either store.
 - **Settings** (⌘,) — OpenAI key, language, recording shortcut, permissions, projects,
   and voice shortcuts.
 
@@ -432,9 +432,23 @@ Endpoints: `GET /health` → `{"status":"ok","name":"recordings"}`, MCP at `/mcp
 
 ## HTTP API (`recordings-serve`)
 
-`recordings-serve` is the self-hosted HTTP API. In cloud mode it is PURE REMOTE
-(Amendment A1): the process reads/writes the shared cloud Postgres directly with
-API-key auth via [`@hasna/contracts`](https://www.npmjs.com/package/@hasna/contracts).
+`recordings-serve` is the HTTP API. Its data backend is a single two-value
+switch, `HASNA_RECORDINGS_STORAGE_MODE=sqlite | postgresql` (a
+`HASNA_RECORDINGS_DATABASE_URL` on its own implies `postgresql`). On
+`postgresql` the process reads/writes that database directly with API-key auth
+via [`@hasna/contracts`](https://www.npmjs.com/package/@hasna/contracts).
+
+There are no deployment modes. `local`, `self-hosted`, `cloud`, `remote` and
+`hybrid` no longer select anything, and passing one is an error that names the
+variable and value to use instead. Where the server runs, and who operates it,
+never changed how it stored data.
+
+The CLI and MCP client are a separate, two-value switch:
+`HASNA_RECORDINGS_CLIENT_STORE=sqlite | http`. Setting
+`HASNA_RECORDINGS_API_URL` + `HASNA_RECORDINGS_API_KEY` selects `http` on its
+own; `HASNA_RECORDINGS_CLIENT_STORE=sqlite` forces the on-box file even when
+both are set. The client never opens Postgres — it reaches the shared dataset
+only through this API.
 
 ```bash
 recordings-serve --port 8874          # start the API
@@ -455,8 +469,9 @@ Versioned API (`/v1/*`, API-key auth via `x-api-key` or `Authorization: Bearer`)
 | GET/POST | `/v1/agents` · GET `/v1/agents/:id` | `recordings:read` / `recordings:write` |
 | GET/POST | `/v1/projects` · GET `/v1/projects/:id` | `recordings:read` / `recordings:write` |
 
-Env: `HASNA_RECORDINGS_DATABASE_URL` (remote Postgres DSN — enables cloud `/v1`)
-and `HASNA_RECORDINGS_API_SIGNING_KEY` (HMAC signing secret for API-key auth).
+Env: `HASNA_RECORDINGS_STORAGE_MODE` (`sqlite` | `postgresql`),
+`HASNA_RECORDINGS_DATABASE_URL` (PostgreSQL DSN — implies `postgresql`) and
+`HASNA_RECORDINGS_API_SIGNING_KEY` (HMAC signing secret for API-key auth).
 
 ## SDK
 

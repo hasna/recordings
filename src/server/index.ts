@@ -4,12 +4,12 @@
  *
  * Usage:
  *   recordings-serve [--port <port>] [--host <host>]
- *   recordings-serve migrate      # one-shot cloud schema migration (ECS task)
+ *   recordings-serve migrate      # one-shot PostgreSQL schema migration (ECS task)
  *   recordings-serve --version
  *
- * In cloud (A1 pure-remote) mode the process reads/writes the shared cloud Postgres
- * Postgres directly with @hasna/contracts API-key auth. Fail-closed: `/v1`
- * refuses to serve without a DSN + signing secret (503).
+ * With the `postgresql` data backend the process reads/writes that database
+ * directly with @hasna/contracts API-key auth. Fail-closed: `/v1` refuses to
+ * serve without a DSN + signing secret (503).
  */
 import { VERSION } from "../version.js";
 
@@ -18,9 +18,9 @@ const DEFAULT_PORT = 8874;
 function parsePort(): number {
   const arg = process.argv.find((a) => a === "--port" || a.startsWith("--port="));
   if (arg) {
-    if (arg.includes("=")) return parseInt(arg.split("=")[1]!, 10) || DEFAULT_PORT;
+    if (arg.includes("=")) return parseInt(arg.split("=", 2)[1] ?? "", 10) || DEFAULT_PORT;
     const idx = process.argv.indexOf(arg);
-    return parseInt(process.argv[idx + 1]!, 10) || DEFAULT_PORT;
+    return parseInt(process.argv[idx + 1] ?? "", 10) || DEFAULT_PORT;
   }
   const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : undefined;
   return envPort || DEFAULT_PORT;
@@ -46,10 +46,11 @@ Options:
   -h, --help      display help for command
 
 Commands:
-  migrate         Apply the cloud schema, then exit. Idempotent.
+  migrate         Apply the PostgreSQL schema, then exit. Idempotent.
 
 Environment:
-  HASNA_RECORDINGS_DATABASE_URL   Remote Postgres DSN (enables cloud /v1)
+  HASNA_RECORDINGS_STORAGE_MODE     Data backend: sqlite | postgresql
+  HASNA_RECORDINGS_DATABASE_URL     PostgreSQL DSN (implies postgresql)
   HASNA_RECORDINGS_API_SIGNING_KEY  HMAC signing secret for API-key auth`);
 }
 

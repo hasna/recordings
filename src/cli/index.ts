@@ -451,7 +451,7 @@ program
 
 program
   .command("save <text>")
-  .description("Save raw text as a recording (no audio). Routes to the self_hosted API when configured, else local.")
+  .description("Save raw text as a recording (no audio). Routes to the /v1 API when configured, else the on-box SQLite store.")
   .option("-t, --tags <tags>", "Comma-separated tags")
   .option("--enhance", "Enhance the text via the configured model before saving")
   .option("--model <model>", "Value for model_used", "direct-input")
@@ -1878,7 +1878,9 @@ program
 
         console.log(chalk.bold("Which bundle the grants apply to\n"));
         if (running.length === 1) {
-          console.log(`  Running         ${chalk.cyan(running[0]!)}`);
+          const [runningBundle] = running;
+          if (runningBundle === undefined) throw new Error("Running app bundle path is missing");
+          console.log(`  Running         ${chalk.cyan(runningBundle)}`);
         } else if (running.length > 1) {
           console.log(`  Running         ${chalk.red(`${running.length} instances — grants are ambiguous`)}`);
           for (const path of running) console.log(`                  ${path}`);
@@ -2955,7 +2957,10 @@ function getCodeSigningInfo(appPath: string): {
   const identifier = output.match(/^Identifier=(.+)$/m)?.[1]?.trim() ?? null;
   const teamIdentifier = output.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim() ?? null;
   const designatedRequirement = output.match(/^designated => (.+)$/m)?.[1]?.trim() ?? null;
-  const authorities = [...output.matchAll(/^Authority=(.+)$/gm)].map((match) => match[1]!.trim());
+  const authorities = [...output.matchAll(/^Authority=(.+)$/gm)].flatMap((match) => {
+    const authority = match[1];
+    return authority === undefined ? [] : [authority.trim()];
+  });
   return { cdHash, adHoc, identifier, teamIdentifier, designatedRequirement, authorities };
 }
 
