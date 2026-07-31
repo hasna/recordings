@@ -82,6 +82,26 @@ describe("CLI enhancement options", () => {
     expect(cfg.transcriber_prompt).toBe("Use terse notes");
   });
 
+  test("the explicit transcriber prompt wins over its legacy alias", () => {
+    const cfg = config(true);
+
+    applyEnhancementOptions(cfg, {
+      transcriberPrompt: "explicit",
+      systemPrompt: "legacy",
+    });
+
+    expect(cfg.transcriber_prompt).toBe("explicit");
+  });
+
+  test("enhancement model supplies the transcriber fallback when no override exists", () => {
+    const cfg = config(true);
+
+    applyEnhancementOptions(cfg, { enhancementModel: "gpt-fallback" });
+
+    expect(cfg.enhancement_model).toBe("gpt-fallback");
+    expect(cfg.transcriber_model).toBe("gpt-fallback");
+  });
+
   test("frozen model and enhancement trigger options override mutable config", () => {
     const cfg = config(true);
 
@@ -104,6 +124,28 @@ describe("CLI enhancement options", () => {
     expect(() => applyEnhancementOptions(config(true), {
       enhanceTriggersJson: '{"not":"an array"}',
     })).toThrow("Invalid enhancement triggers snapshot");
+  });
+
+  test("frozen enhancement triggers require strings and valid JSON", () => {
+    expect(() => applyEnhancementOptions(config(true), {
+      enhanceTriggersJson: '["valid", 17]',
+    })).toThrow("Invalid enhancement triggers snapshot");
+    expect(() => applyEnhancementOptions(config(true), {
+      enhanceTriggersJson: "not-json",
+    })).toThrow();
+  });
+
+  test("frozen keyword transforms require a string map", () => {
+    for (const keywordTransformsJson of [
+      "null",
+      "[]",
+      '{"spoken":17}',
+      "not-json",
+    ]) {
+      expect(() => applyEnhancementOptions(config(true), {
+        keywordTransformsJson,
+      })).toThrow();
+    }
   });
 
   test("frozen realtime-only model cannot bypass bounded transcription normalization", () => {
@@ -147,5 +189,10 @@ describe("CLI list pagination", () => {
     expect(parseListPagination("1junk", "2junk")).toEqual({ limit: 20, offset: 0 });
     expect(parseListPagination("-7", "-2")).toEqual({ limit: 1, offset: 0 });
     expect(parseListPagination("0", "0")).toEqual({ limit: 1, offset: 0 });
+    expect(parseListPagination("9007199254740992", "9007199254740992")).toEqual({
+      limit: 20,
+      offset: 0,
+    });
+    expect(parseListPagination(" +12 ", " +3 ")).toEqual({ limit: 12, offset: 3 });
   });
 });
