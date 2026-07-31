@@ -64,11 +64,11 @@ export function defaultApiBaseUrl(name: string): string {
 
 interface EnvKeys {
   /** The live client-store switch. */
-  storeKeys: string[];
+  storeKeys: [string, ...string[]];
   /** Variables that used to carry a deployment mode and must no longer route anything. */
-  retiredModeKeys: string[];
-  apiUrlKeys: string[];
-  apiKeyKeys: string[];
+  retiredModeKeys: [string, ...string[]];
+  apiUrlKeys: [string, ...string[]];
+  apiKeyKeys: [string, ...string[]];
 }
 
 function envKeys(name: string): EnvKeys {
@@ -102,7 +102,7 @@ function assertNoRetiredMode(env: Env, keys: EnvKeys): void {
     const normalized = normalizeModeToken(value);
     if ((SERVER_BACKEND_VALUES as readonly string[]).includes(normalized)) continue;
     if (asRetiredDeploymentMode(value)) {
-      throw retiredDeploymentModeError(value, key, clientStoreReplacement(keys.storeKeys[0]!));
+      throw retiredDeploymentModeError(value, key, clientStoreReplacement(keys.storeKeys[0]));
     }
     throw new Error(
       `${key}=${value} is not a client store. ${key} no longer selects one; ` +
@@ -154,7 +154,7 @@ export function resolveTransport(name: string, env: Env = process.env): Transpor
   let modeSource = "default";
 
   if (storeHit) {
-    requested = normalizeClientStore(storeHit.value, storeHit.key, keys.storeKeys[0]!);
+    requested = normalizeClientStore(storeHit.value, storeHit.key, keys.storeKeys[0]);
     modeSource = storeHit.key;
   } else if (urlHit && keyHit) {
     // The fleet flip (@hasna/machines) writes ONLY HASNA_<APP>_API_URL +
@@ -327,7 +327,8 @@ export function createHttpTransport(options: TransportOptions): HttpTransport {
       const jitter = Math.floor(Math.random() * (backoff / 2 + 1));
       await sleep(backoff + jitter);
     }
-    throw last!.error;
+    if (last === null) throw new Error(`Request to ${rel} completed without a result`);
+    throw last.error;
   }
 
   return {

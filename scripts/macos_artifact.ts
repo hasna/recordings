@@ -187,7 +187,7 @@ export type MacOSArtifactManifest = BuildProvenance & {
   };
   provenance_sha256: string;
   signing: {
-    mode?: "ad_hoc";
+    mode?: "ad_hoc" | "developer_id";
     authority: string;
     team_id: string;
     trusted_timestamp: string;
@@ -552,14 +552,43 @@ export function parseDesignatedRequirement(output: string): string {
   return requirement;
 }
 
+/**
+ * A local-station artifact is signed one of two ways, and the expected team identifier is
+ * what says which: the sentinel `ADHOC`, or a real 10-character Apple team.
+ *
+ * Developer ID signing exists on this path because ad-hoc signing cannot hold a macOS TCC
+ * grant. TCC keys Accessibility (and Microphone) to bundle id plus signing identity, and an
+ * ad-hoc signature offers only a CDHash that changes on every rebuild, so the hold-to-talk
+ * CGEventTap in FnKeyMonitor.swift lost its permission on each reinstall. Ad-hoc remains
+ * supported for builders that hold no signing key.
+ */
+export function isLocalOnlySigningTeam(expectedTeamId: string): boolean {
+  return expectedTeamId === "ADHOC" || /^[A-Z0-9]{10}$/.test(expectedTeamId);
+}
+
+export function localOnlySigningMode(expectedTeamId: string): "ad_hoc" | "developer_id" {
+  if (expectedTeamId === "ADHOC") return "ad_hoc";
+  if (!/^[A-Z0-9]{10}$/.test(expectedTeamId)) {
+    throw new Error(
+      "local-only Developer ID signing requires ADHOC or a 10-character Apple team identifier",
+    );
+  }
+  return "developer_id";
+}
+
 export function designatedRequirementForPolicy(
   output: string,
   artifactPolicy: ArtifactPolicy,
   adHocSignatureVerified = false,
+  developerIdSignatureVerified = false,
 ): string {
   if (artifactPolicy === "release") return parseDesignatedRequirement(output);
+  // A Developer ID local-station artifact always carries a real designated requirement, and
+  // that requirement is the whole point of signing it: it is the stable identity a TCC grant
+  // attaches to. Never let it degrade to the ad-hoc sentinel.
+  if (developerIdSignatureVerified) return parseDesignatedRequirement(output);
   if (!adHocSignatureVerified) {
-    throw new Error("local-only designated requirement evidence requires verified ad-hoc signing");
+    throw new Error("local-only designated requirement evidence requires verified signing");
   }
   try {
     return parseDesignatedRequirement(output);
@@ -650,11 +679,24 @@ function signingEvidence(
     if (!timestamp || timestamp.toLowerCase() === "none") {
       throw new Error(`${codePath} is missing a trusted signing timestamp`);
     }
+  } else if (localOnlySigningMode(expectedTeamId) === "developer_id") {
+    // Developer ID signed but deliberately NOT notarized: the notarization, single-target
+    // binding and builder attestation are what still separate this from a release. Only the
+    // signing identity is shared, and only because TCC cannot key a durable Accessibility
+    // grant to anything weaker (see localOnlySigningMode).
+    if (!authority.startsWith("Developer ID Application:")) {
+      throw new Error(`${codePath} is not signed by a Developer ID Application authority`);
+    }
+    if (teamId !== expectedTeamId) {
+      throw new Error(`${codePath} TeamIdentifier ${teamId || "missing"} does not match ${expectedTeamId}`);
+    }
+    if (rawSignature.toLowerCase() === "adhoc") {
+      throw new Error(`${codePath} is ad-hoc signed but a Developer ID team was pinned`);
+    }
+    // A trusted timestamp is a release-only claim; local-station builds never pass --timestamp.
+    timestamp = rawTimestamp && rawTimestamp.toLowerCase() !== "none" ? rawTimestamp : "none";
   } else {
     mode = "ad_hoc";
-    if (expectedTeamId !== "ADHOC") {
-      throw new Error("local-only code verification requires the ADHOC signing identity");
-    }
     if (rawSignature.toLowerCase() !== "adhoc" || authority) {
       throw new Error(`${codePath} is not consistently ad-hoc signed for local-only use`);
     }
@@ -679,6 +721,7 @@ function signingEvidence(
     requirementOutput,
     artifactPolicy,
     mode === "ad_hoc",
+    artifactPolicy !== "release" && mode === "developer_id",
   );
   const entitlements = canonicalEntitlements(codePath);
   if (entitlements !== canonicalJson(expectedEntitlements)) {
@@ -1620,18 +1663,33 @@ export function assertManifestShape(manifest: MacOSArtifactManifest): void {
           `(${localOnlyApprovedTargetsMessage()}) and machine identity`,
       );
     }
-    if (
-      manifest.non_notarized !== true ||
-      manifest.team_id !== "ADHOC" ||
-      manifest.signing.mode !== "ad_hoc" ||
-      manifest.signing.authority !== "adhoc" ||
-      manifest.signing.helper_authority !== "adhoc" ||
-      manifest.signing.team_id !== "ADHOC" ||
-      manifest.signing.helper_team_id !== "ADHOC" ||
-      manifest.signing.trusted_timestamp !== "none" ||
-      manifest.signing.helper_trusted_timestamp !== "none"
+    // A local-station manifest is internally consistent in exactly one of two shapes: fully
+    // ad-hoc, or fully Developer ID under one pinned team. Mixing them (e.g. a Developer ID
+    // app with an ad-hoc helper) would leave the bundle without one stable identity for TCC
+    // to key on, which is the failure this whole path exists to prevent.
+    if (manifest.non_notarized !== true || !isLocalOnlySigningTeam(manifest.team_id)) {
+      throw new Error("local-only manifest requires a non-notarized ADHOC or Developer ID team");
+    }
+    if (manifest.team_id === "ADHOC") {
+      if (
+        manifest.signing.mode !== "ad_hoc" ||
+        manifest.signing.authority !== "adhoc" ||
+        manifest.signing.helper_authority !== "adhoc" ||
+        manifest.signing.team_id !== "ADHOC" ||
+        manifest.signing.helper_team_id !== "ADHOC" ||
+        manifest.signing.trusted_timestamp !== "none" ||
+        manifest.signing.helper_trusted_timestamp !== "none"
+      ) {
+        throw new Error("local-only manifest requires consistent ad-hoc signing evidence");
+      }
+    } else if (
+      manifest.signing.mode !== "developer_id" ||
+      !manifest.signing.authority.startsWith("Developer ID Application:") ||
+      !manifest.signing.helper_authority.startsWith("Developer ID Application:") ||
+      manifest.signing.team_id !== manifest.team_id ||
+      manifest.signing.helper_team_id !== manifest.team_id
     ) {
-      throw new Error("local-only manifest requires consistent ad-hoc signing evidence");
+      throw new Error("local-only manifest requires consistent Developer ID signing evidence");
     }
     if (
       manifest.notarization.status !== "Not Submitted" ||
@@ -2057,7 +2115,8 @@ function writeProvenance(
       throw new Error("release provenance has an invalid target or Team ID");
     }
   } else if (
-    expectedTeamId !== "ADHOC" ||
+    // ADHOC or a pinned Developer ID team; localOnlySigningMode rejects anything else.
+    !isLocalOnlySigningTeam(expectedTeamId) ||
     !isLocalOnlyApprovedTarget(approvedTarget) ||
     approvedTargetIdentityKind !== "tailscale_node_id_sha256" ||
     builderIdentityKind !== "tailscale_node_id_sha256" ||
@@ -2066,8 +2125,8 @@ function writeProvenance(
     approvedTargetIdentitySha256 === builderIdentitySha256
   ) {
     throw new Error(
-      "new local-only provenance requires ADHOC and a Tailscale node-bound approved-target identity " +
-        `(${localOnlyApprovedTargetsMessage()})`,
+      "new local-only provenance requires ADHOC or a pinned Developer ID team and a Tailscale " +
+        `node-bound approved-target identity (${localOnlyApprovedTargetsMessage()})`,
     );
   } else {
     provenance.artifact_policy = "local_only";
@@ -2218,11 +2277,13 @@ function finalizeLocalArtifact(
   approvedTarget: string,
   approvedTargetIdentityKind: TargetIdentityKind,
   approvedTargetIdentitySha256: string,
+  expectedTeamId: string = "ADHOC",
 ): void {
   assertCurrentSourceRevision(packageRoot, expectedSourceSha);
   if (approvedTargetIdentityKind !== "tailscale_node_id_sha256") {
     throw new Error("new local-only artifacts require a Tailscale node ID identity hash");
   }
+  const localSigningMode = localOnlySigningMode(expectedTeamId);
   const executablePath = join(appPath, "Contents", "MacOS", "Recordings");
   const helperPath = join(appPath, "Contents", "Helpers", "recordings");
   const embeddedPath = provenancePath(appPath);
@@ -2235,26 +2296,26 @@ function finalizeLocalArtifact(
     provenance.approved_target_identity_sha256 !== approvedTargetIdentitySha256 ||
     provenance.builder_identity_kind !== "tailscale_node_id_sha256" ||
     provenance.non_notarized !== true ||
-    provenance.team_id !== "ADHOC"
+    provenance.team_id !== expectedTeamId
   ) {
     throw new Error("embedded provenance is not approved for this local-only target");
   }
   assertExpectedCodeLayout(appPath);
   const outerSigning = signingEvidence(
     appPath,
-    "ADHOC",
+    expectedTeamId,
     APP_ENTITLEMENTS,
     executablePath,
     "local_only",
   );
   const helperSigning = signingEvidence(
     helperPath,
-    "ADHOC",
+    expectedTeamId,
     HELPER_ENTITLEMENTS,
     helperPath,
     "local_only",
   );
-  const items = nestedItems(appPath, "ADHOC", "local_only", outerSigning, helperSigning);
+  const items = nestedItems(appPath, expectedTeamId, "local_only", outerSigning, helperSigning);
   const manifest: MacOSArtifactManifest = {
     ...provenance,
     artifact_type: "recordings-macos-app",
@@ -2262,7 +2323,7 @@ function finalizeLocalArtifact(
     binding: { bundle_tree_sha256: treeDigest(appPath) },
     provenance_sha256: sha256File(embeddedPath),
     signing: {
-      mode: "ad_hoc",
+      mode: localSigningMode,
       authority: outerSigning.authority,
       team_id: outerSigning.teamId,
       trusted_timestamp: outerSigning.timestamp,
@@ -2306,7 +2367,7 @@ function finalizeLocalArtifact(
     appPath,
     archivePath,
     manifest,
-    "ADHOC",
+    expectedTeamId,
     "local_only",
     approvedTarget,
     approvedTargetIdentitySha256,
@@ -2399,11 +2460,19 @@ function assertInstallTransition(
   assertVersionTransition(installedVersion, installedSource, manifest);
 }
 
-function requirementDigest(appPath: string, artifactPolicy: ArtifactPolicy): void {
+function requirementDigest(
+  appPath: string,
+  artifactPolicy: ArtifactPolicy,
+  expectedTeamId: string = "ADHOC",
+): void {
   if (artifactPolicy === "local_only") {
+    // The pinned team decides which local signing shape is verified. Hard-coding "ADHOC" here
+    // rejected every correctly Developer-ID-signed local-station bundle, and because
+    // install_macos_app.sh calls this for EVERY local install under `set -euo pipefail`, that
+    // rejection aborted the install outright — making a properly signed build uninstallable.
     const evidence = signingEvidence(
       appPath,
-      "ADHOC",
+      expectedTeamId,
       APP_ENTITLEMENTS,
       join(appPath, "Contents", "MacOS", "Recordings"),
       "local_only",
@@ -5233,6 +5302,7 @@ function main(): void {
       argument("--approved-target"),
       targetIdentityKindArgument(undefined, true),
       argument("--approved-target-identity-sha256"),
+      optionalArgument("--expected-team-id") ?? "ADHOC",
     );
   } else if (command === "verify-archive") {
     const teamId = argument("--team-id");
@@ -5305,7 +5375,11 @@ function main(): void {
       argument("--manifest-sha256"),
     );
   } else if (command === "requirement-digest") {
-    requirementDigest(argument("--app"), artifactPolicyArgument());
+    requirementDigest(
+      argument("--app"),
+      artifactPolicyArgument(),
+      optionalArgument("--expected-team-id") ?? "ADHOC",
+    );
   } else if (command === "tailscale-node-id-sha256") {
     console.log(tailscaleNodeIdSha256(readFileSync(0, "utf8"), argument("--expected-hostname")));
   } else if (command === "verify-filesystem-tree") {
