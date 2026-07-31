@@ -53,7 +53,7 @@ describe("saveFeedback", () => {
     });
 
     expect(getDatabase().query(
-      "SELECT message, email, category, version FROM feedback ORDER BY id",
+      "SELECT message, email, category, version FROM feedback ORDER BY rowid",
     ).all()).toEqual([
       {
         message: "Contact me",
