@@ -3,14 +3,15 @@
 // EVERY CLI command and MCP tool reads/writes through a `Store`. There are two
 // transports behind the one interface:
 //   • LocalStore  — on-box SQLite (src/db/*), first-class, fully functional.
-//   • ApiStore    — the self-hosted / cloud HTTP `/v1` API with a bearer key.
+//   • ApiStore    — the server's HTTP `/v1` API with a bearer key.
 //
 // The transport is resolved from the environment by `resolveStorageClient`
 // (src/http/client.ts): presence of HASNA_RECORDINGS_API_URL +
-// HASNA_RECORDINGS_API_KEY (or an explicit STORAGE_MODE) routes to the ApiStore;
-// otherwise the LocalStore is used. `self_hosted` and `cloud` are the SAME client
-// code (ApiStore) — only the URL/key differ; that distinction is server-side
-// tenancy, never a client concern.
+// HASNA_RECORDINGS_API_KEY (or an explicit HASNA_RECORDINGS_CLIENT_STORE=http)
+// routes to the ApiStore; otherwise the LocalStore is used. WHO operates the
+// server, and whether its internal storage is SQLite or PostgreSQL, is invisible
+// here — the client has exactly two stores, `sqlite` and `http`, and deployment
+// modes are removed (src/lib/retired-deployment-modes.ts).
 //
 // SAFETY: the ApiStore authenticates with a bearer key ONLY. A raw database DSN
 // is NEVER read or accepted on the client. The key value is never logged.
@@ -44,7 +45,7 @@ export interface RecordingStats {
 }
 
 export interface Store {
-  readonly mode: "local" | "cloud-http";
+  readonly mode: "sqlite" | "http";
   readonly baseUrl: string | null;
 
   // ── recordings ──
@@ -92,7 +93,9 @@ function listQuery(
 
 function unwrap<T>(res: unknown, key: string): T {
   if (res && typeof res === "object" && key in (res as Record<string, unknown>)) {
-    return (res as Record<string, T>)[key]!;
+    const value = (res as Record<string, T | undefined>)[key];
+    if (value === undefined) throw new Error(`Response field ${key} is undefined`);
+    return value;
   }
   return res as T;
 }
@@ -100,7 +103,7 @@ function unwrap<T>(res: unknown, key: string): T {
 // ── LocalStore (on-box SQLite) ────────────────────────────────────────────────
 
 const localStore: Store = {
-  mode: "local",
+  mode: "sqlite",
   baseUrl: null,
   async createRecording(input, idempotencyKey) {
     return withLocalStoreReaderLease(() =>
@@ -154,11 +157,11 @@ const localStore: Store = {
   },
 };
 
-// ── ApiStore (self-hosted / cloud HTTP `/v1` + bearer key) ────────────────────
+// ── ApiStore (the server's HTTP `/v1` API + bearer key) ──────────────────────
 
 function apiStore(client: StorageClient): Store {
   return {
-    mode: "cloud-http",
+    mode: "http",
     baseUrl: client.baseUrl,
     async createRecording(input, idempotencyKey) {
       const keyCandidate = idempotencyKey === undefined
@@ -358,7 +361,7 @@ let cached: Store | null = null;
 export function getStore(env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env): Store {
   if (env === process.env && cached) return cached;
   const resolved = resolveStorageClient(APP, env);
-  const store = resolved.transport === "cloud-http" ? apiStore(resolved.client) : localStore;
+  const store = resolved.transport === "http" ? apiStore(resolved.client) : localStore;
   if (env === process.env) cached = store;
   return store;
 }

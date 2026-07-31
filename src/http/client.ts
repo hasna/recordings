@@ -5,48 +5,77 @@
 // vendored here — rather than imported from `@hasna/contracts` — because the
 // published contracts package does not yet expose the client subpath, and this
 // package externalizes `@hasna/contracts` at build time. Vendoring keeps the
-// self_hosted read/write path self-contained in the shipped `dist` bundle so an
+// HTTP read/write path self-contained in the shipped `dist` bundle so an
 // installed CLI works without an unpublished dependency.
 //
-// It makes `mode=self_hosted` real for a client: when the flip env resolves to
-// cloud, ALL reads and writes are routed to the app's `<API_URL>/v1` HTTP API
-// with the bearer key. Otherwise the app uses its local store.
+// THE CLIENT HAS EXACTLY TWO STORES: `sqlite` (an on-box file) and `http` (the
+// server's `<API_URL>/v1` API with a bearer key). It NEVER opens Postgres — the
+// server's internal storage engine is the server's business and is invisible
+// here. Deployment modes (`local | self_hosted | cloud | remote | hybrid`) are
+// removed; see src/lib/retired-deployment-modes.ts for why a retired word now
+// throws instead of being silently normalized.
 //
 // SAFETY: never logs, returns, or embeds the API key value.
 
-export type Env = Record<string, string | undefined>;
-export type StorageMode = "local" | "cloud";
+import {
+  asRetiredDeploymentMode,
+  normalizeModeToken,
+  retiredDeploymentModeError,
+  type RetiredModeReplacement,
+} from "../lib/retired-deployment-modes.js";
 
-const DEPRECATED_MODE_ALIASES = ["self_hosted", "remote", "hybrid"] as const;
+export type Env = Record<string, string | undefined>;
+
+/** Where a client reads and writes. Two arms, no third. */
+export type ClientStore = "sqlite" | "http";
+
+/**
+ * Values that belong to the SERVER's data-backend switch, not to the client.
+ *
+ * `recordings-serve` is configured with `HASNA_RECORDINGS_STORAGE_MODE=postgresql`,
+ * and a CLI running in that same container inherits the variable. It says nothing
+ * about where the CLIENT should read, so the client ignores it rather than
+ * guessing — while a retired deployment word in the same variable still throws,
+ * because that one WOULD have changed the client's routing before this change.
+ */
+const SERVER_BACKEND_VALUES = ["sqlite", "postgresql", "postgres"] as const;
 
 function envToken(name: string): string {
   return name.toUpperCase().replace(/-/g, "_");
 }
 
-function normalizeMode(value: string): { mode: StorageMode; deprecatedAlias: string | null } {
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if (normalized === "local") return { mode: "local", deprecatedAlias: null };
-  if (normalized === "cloud") return { mode: "cloud", deprecatedAlias: null };
-  if ((DEPRECATED_MODE_ALIASES as readonly string[]).includes(normalized)) {
-    return { mode: "cloud", deprecatedAlias: normalized };
-  }
-  throw new Error(`Unknown storage mode: ${value}. Use local or cloud.`);
+function clientStoreReplacement(envKey: string): RetiredModeReplacement {
+  return { envKey, onBox: "sqlite", offBox: "http" };
 }
 
-export function defaultCloudBaseUrl(name: string): string {
+function normalizeClientStore(value: string, sourceEnvKey: string, replacementEnvKey: string): ClientStore {
+  const normalized = normalizeModeToken(value);
+  if (normalized === "sqlite") return "sqlite";
+  if (normalized === "http" || normalized === "https") return "http";
+  if (asRetiredDeploymentMode(value)) {
+    throw retiredDeploymentModeError(value, sourceEnvKey, clientStoreReplacement(replacementEnvKey));
+  }
+  throw new Error(`Unknown client store: ${value}. Use sqlite or http.`);
+}
+
+export function defaultApiBaseUrl(name: string): string {
   return `https://${name}.hasna.xyz`;
 }
 
 interface EnvKeys {
-  modeKeys: string[];
-  apiUrlKeys: string[];
-  apiKeyKeys: string[];
+  /** The live client-store switch. */
+  storeKeys: [string, ...string[]];
+  /** Variables that used to carry a deployment mode and must no longer route anything. */
+  retiredModeKeys: [string, ...string[]];
+  apiUrlKeys: [string, ...string[]];
+  apiKeyKeys: [string, ...string[]];
 }
 
 function envKeys(name: string): EnvKeys {
   const token = envToken(name);
   return {
-    modeKeys: [`HASNA_${token}_STORAGE_MODE`, `HASNA_${token}_MODE`, `${token}_STORAGE_MODE`, `${token}_MODE`],
+    storeKeys: [`HASNA_${token}_CLIENT_STORE`, `${token}_CLIENT_STORE`],
+    retiredModeKeys: [`HASNA_${token}_STORAGE_MODE`, `HASNA_${token}_MODE`, `${token}_STORAGE_MODE`, `${token}_MODE`],
     apiUrlKeys: [`HASNA_${token}_API_URL`, `${token}_API_URL`],
     apiKeyKeys: [`HASNA_${token}_API_KEY`, `${token}_API_KEY`],
   };
@@ -58,6 +87,28 @@ function firstEnv(env: Env, keys: readonly string[]): { key: string; value: stri
     if (value) return { key, value };
   }
   return null;
+}
+
+/**
+ * Refuse a retired deployment word wherever one of the old mode variables still
+ * carries it. Values that belong to the server's backend switch are ignored (see
+ * SERVER_BACKEND_VALUES); anything else in those variables is an error, because
+ * before this change an unrecognized value there silently fell back to on-box.
+ */
+function assertNoRetiredMode(env: Env, keys: EnvKeys): void {
+  for (const key of keys.retiredModeKeys) {
+    const value = env[key]?.trim();
+    if (!value) continue;
+    const normalized = normalizeModeToken(value);
+    if ((SERVER_BACKEND_VALUES as readonly string[]).includes(normalized)) continue;
+    if (asRetiredDeploymentMode(value)) {
+      throw retiredDeploymentModeError(value, key, clientStoreReplacement(keys.storeKeys[0]));
+    }
+    throw new Error(
+      `${key}=${value} is not a client store. ${key} no longer selects one; ` +
+        `set ${keys.storeKeys[0]}=sqlite or ${keys.storeKeys[0]}=http instead.`,
+    );
+  }
 }
 
 export function toV1BaseUrl(apiUrl: string): string {
@@ -73,12 +124,14 @@ export function toV1BaseUrl(apiUrl: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
-export type TransportKind = "local" | "cloud-http";
+export type TransportKind = ClientStore;
 
 export interface TransportResolution {
+  /** The store actually in use. `sqlite` whenever routing to `http` was refused. */
   transport: TransportKind;
-  mode: StorageMode;
-  deprecatedAlias: string | null;
+  /** The store that was asked for. Differs from `transport` only when misconfigured. */
+  requested: ClientStore;
+  /** What decided it: an env var NAME, `auto:api-url+api-key`, or `default`. Never a value. */
   modeSource: string;
   baseUrl: string | null;
   apiKeyPresent: boolean;
@@ -87,61 +140,58 @@ export interface TransportResolution {
 }
 
 // Resolve where a client should read/write given the environment.
-// transport is `cloud-http` IFF mode resolves to cloud (self_hosted alias ok)
-// AND an API key is present. Cloud requested but no key => misconfigured (caller
-// hard-fails) so we never silently drift onto the wrong local dataset.
+// transport is `http` IFF the client store resolves to http AND an API key is
+// present. http requested but no key => misconfigured (caller hard-fails) so we
+// never silently drift onto the wrong on-box dataset.
 export function resolveTransport(name: string, env: Env = process.env): TransportResolution {
   const keys = envKeys(name);
-  const modeHit = firstEnv(env, keys.modeKeys);
+  assertNoRetiredMode(env, keys);
+  const storeHit = firstEnv(env, keys.storeKeys);
   const urlHit = firstEnv(env, keys.apiUrlKeys);
   const keyHit = firstEnv(env, keys.apiKeyKeys);
 
-  let mode: StorageMode = "local";
-  let deprecatedAlias: string | null = null;
+  let requested: ClientStore = "sqlite";
   let modeSource = "default";
 
-  if (modeHit) {
-    const normalized = normalizeMode(modeHit.value);
-    mode = normalized.mode;
-    deprecatedAlias = normalized.deprecatedAlias;
-    modeSource = modeHit.key;
+  if (storeHit) {
+    requested = normalizeClientStore(storeHit.value, storeHit.key, keys.storeKeys[0]);
+    modeSource = storeHit.key;
   } else if (urlHit && keyHit) {
     // The fleet flip (@hasna/machines) writes ONLY HASNA_<APP>_API_URL +
-    // HASNA_<APP>_API_KEY — no mode var. Presence of both IS the self_hosted
-    // signal, so route to cloud. Rollback = unset either var -> back to local.
-    // An explicit mode var (handled above) still wins, so `...MODE=local`
-    // forces local even when the URL/key are present.
-    mode = "cloud";
+    // HASNA_<APP>_API_KEY — no store var. Presence of both IS the signal to use
+    // the API, so route to http. Rollback = unset either var -> back to sqlite.
+    // An explicit store var (handled above) still wins, so `...CLIENT_STORE=sqlite`
+    // forces the on-box file even when the URL/key are present.
+    requested = "http";
     modeSource = "auto:api-url+api-key";
   }
 
-  if (mode === "local") {
-    return { transport: "local", mode, deprecatedAlias, modeSource, baseUrl: null, apiKeyPresent: Boolean(keyHit), misconfigured: false, warning: null };
+  if (requested === "sqlite") {
+    return { transport: "sqlite", requested, modeSource, baseUrl: null, apiKeyPresent: Boolean(keyHit), misconfigured: false, warning: null };
   }
 
   if (!keyHit) {
     return {
-      transport: "local",
-      mode,
-      deprecatedAlias,
+      transport: "sqlite",
+      requested,
       modeSource,
       baseUrl: null,
       apiKeyPresent: false,
       misconfigured: true,
-      warning: `${modeSource}=cloud but no API key is set (${keys.apiKeyKeys[0]}). Refusing to route to cloud.`,
+      warning: `${modeSource}=http but no API key is set (${keys.apiKeyKeys[0]}). Refusing to route to the API.`,
     };
   }
 
-  const rawUrl = urlHit?.value ?? defaultCloudBaseUrl(name);
+  const rawUrl = urlHit?.value ?? defaultApiBaseUrl(name);
   let baseUrl: string;
   try {
     baseUrl = toV1BaseUrl(rawUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { transport: "local", mode, deprecatedAlias, modeSource, baseUrl: null, apiKeyPresent: true, misconfigured: true, warning: `Invalid API URL: ${message}.` };
+    return { transport: "sqlite", requested, modeSource, baseUrl: null, apiKeyPresent: true, misconfigured: true, warning: `Invalid API URL: ${message}.` };
   }
 
-  return { transport: "cloud-http", mode, deprecatedAlias, modeSource, baseUrl, apiKeyPresent: true, misconfigured: false, warning: null };
+  return { transport: "http", requested, modeSource, baseUrl, apiKeyPresent: true, misconfigured: false, warning: null };
 }
 
 export class HasnaHttpError extends Error {
@@ -277,7 +327,8 @@ export function createHttpTransport(options: TransportOptions): HttpTransport {
       const jitter = Math.floor(Math.random() * (backoff / 2 + 1));
       await sleep(backoff + jitter);
     }
-    throw last!.error;
+    if (last === null) throw new Error(`Request to ${rel} completed without a result`);
+    throw last.error;
   }
 
   return {
@@ -357,24 +408,24 @@ export function createStorageClient(name: string, transport: HttpTransport): Sto
 }
 
 export type ResolveResult =
-  | { transport: "local"; client: null; resolution: TransportResolution }
-  | { transport: "cloud-http"; client: StorageClient; resolution: TransportResolution };
+  | { transport: "sqlite"; client: null; resolution: TransportResolution }
+  | { transport: "http"; client: StorageClient; resolution: TransportResolution };
 
 // The one call an app's storage resolver makes. Returns a ready StorageClient
-// when the flip resolves to cloud-http (mode=self_hosted/cloud + API_URL +
-// API_KEY), else { transport:'local' }. Throws if cloud was requested but
-// misconfigured (so callers never silently read the wrong dataset).
+// when the client store resolves to `http` (CLIENT_STORE=http, or API_URL +
+// API_KEY present), else { transport:'sqlite' }. Throws if the API was requested
+// but misconfigured (so callers never silently read the wrong dataset).
 export function resolveStorageClient(name: string, env: Env = process.env, fetchImpl?: FetchLike): ResolveResult {
   const resolution = resolveTransport(name, env);
   if (resolution.misconfigured) {
-    throw new Error(resolution.warning ?? `Client for '${name}' is misconfigured for cloud mode.`);
+    throw new Error(resolution.warning ?? `Client for '${name}' is misconfigured for the /v1 API.`);
   }
-  if (resolution.transport === "local" || !resolution.baseUrl) {
-    return { transport: "local", client: null, resolution };
+  if (resolution.transport === "sqlite" || !resolution.baseUrl) {
+    return { transport: "sqlite", client: null, resolution };
   }
   const keys = envKeys(name);
   const apiKey = firstEnv(env, keys.apiKeyKeys)?.value;
-  if (!apiKey) throw new Error(`Client for '${name}' resolved to cloud-http without an API key.`);
+  if (!apiKey) throw new Error(`Client for '${name}' resolved to the /v1 API without an API key.`);
   const transport = createHttpTransport({ name, baseUrl: resolution.baseUrl, apiKey, ...(fetchImpl ? { fetchImpl } : {}) });
-  return { transport: "cloud-http", client: createStorageClient(name, transport), resolution };
+  return { transport: "http", client: createStorageClient(name, transport), resolution };
 }

@@ -1059,13 +1059,50 @@ elif [ "$MODE" = "local" ]; then
         echo "Local-only artifacts must be built on a different authenticated Tailscale node." >&2
         exit 1
     fi
-    CODESIGN_IDENTITY="-"
-    EXPECTED_TEAM_ID="ADHOC"
+    # Signing identity for a local-station artifact.
+    #
+    # This used to be an unconditional `CODESIGN_IDENTITY="-"`, and that was the defect
+    # behind "the Fn key does nothing". Hold-to-talk is a CGEventTap (RecordingsLib/
+    # FnKeyMonitor.swift), macOS only creates that tap for a process with Accessibility,
+    # and TCC keys every grant to bundle identifier PLUS code-signing identity. An ad-hoc
+    # signature has no identity to key on beyond a CDHash that changes on every rebuild,
+    # so each reinstall orphaned the grant, AXIsProcessTrusted() stayed false and the app
+    # logged "fn monitor start ok=false" forever. Ad-hoc is therefore not a neutral default
+    # here — it structurally prevents the permission the feature needs from ever sticking.
+    #
+    # So when a Developer ID Application identity is supplied, sign with it and pin its
+    # team. That is the same stable identity a release uses; what still separates this from
+    # a release is notarization, the single-target binding, and the builder attestation
+    # above, none of which are relaxed. With no identity supplied the old ad-hoc behaviour
+    # is kept verbatim, because a Mac without the signing key must still be able to build.
+    if [ -n "$CODESIGN_IDENTITY" ] && [ "$CODESIGN_IDENTITY" != "-" ]; then
+        if [[ "$CODESIGN_IDENTITY" != "Developer ID Application:"* ]]; then
+            echo "Local-station signing requires a Developer ID Application identity in RECORDINGS_CODESIGN_IDENTITY." >&2
+            exit 1
+        fi
+        if [ -z "$EXPECTED_TEAM_ID" ]; then
+            echo "Local-station Developer ID signing requires RECORDINGS_EXPECTED_TEAM_IDENTIFIER to pin the team." >&2
+            exit 1
+        fi
+        if [ "$EXPECTED_TEAM_ID" = "ADHOC" ]; then
+            echo "RECORDINGS_EXPECTED_TEAM_IDENTIFIER=ADHOC is not a Developer ID team." >&2
+            exit 1
+        fi
+        LOCAL_SIGNING_MODE="developer_id"
+    else
+        CODESIGN_IDENTITY="-"
+        EXPECTED_TEAM_ID="ADHOC"
+        LOCAL_SIGNING_MODE="ad_hoc"
+    fi
     ARTIFACT_POLICY="local_only"
     APPROVED_TARGET="$LOCAL_APPROVED_TARGET"
     APPROVED_TARGET_IDENTITY_KIND="$LOCAL_APPROVED_TARGET_IDENTITY_KIND"
     APPROVED_TARGET_IDENTITY_SHA256="$LOCAL_APPROVED_TARGET_IDENTITY_SHA256"
-    echo "WARNING: local-only artifacts are ad-hoc signed, non-notarized, and restricted to ${APPROVED_TARGET}." >&2
+    if [ "$LOCAL_SIGNING_MODE" = "developer_id" ]; then
+        echo "WARNING: local-only artifacts are Developer ID signed, non-notarized, and restricted to ${APPROVED_TARGET}." >&2
+    else
+        echo "WARNING: local-only artifacts are ad-hoc signed, non-notarized, and restricted to ${APPROVED_TARGET}." >&2
+    fi
     echo "WARNING: installing can change code identity and require Microphone or Accessibility reauthorization." >&2
 else
     BUILD_CONFIGURATION="debug"
@@ -1496,8 +1533,8 @@ run_signed_helper_contract() {
         HOME="$contract_home"
         PATH="/usr/bin:/bin:/usr/sbin:/sbin"
         TMPDIR="$contract_home"
-        HASNA_RECORDINGS_STORAGE_MODE="local"
-        RECORDINGS_STORAGE_MODE="local"
+        HASNA_RECORDINGS_CLIENT_STORE="sqlite"
+        RECORDINGS_CLIENT_STORE="sqlite"
         HASNA_RECORDINGS_DB_PATH="$contract_home/recordings.db"
         RECORDINGS_AUDIO_DIR="$contract_home/audio"
     )
@@ -1811,7 +1848,8 @@ if [ "$MODE" = "local" ]; then
         --package-root "$PACKAGE_ROOT" \
         --approved-target "$APPROVED_TARGET" \
         --approved-target-identity-kind "$APPROVED_TARGET_IDENTITY_KIND" \
-        --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256"
+        --approved-target-identity-sha256 "$APPROVED_TARGET_IDENTITY_SHA256" \
+        --expected-team-id "$EXPECTED_TEAM_ID"
     publish_app_output
     verify_source_unchanged
     echo "Built immutable local-only app artifact: $FINAL_ARCHIVE"

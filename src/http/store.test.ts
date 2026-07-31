@@ -23,73 +23,73 @@ function mockFetch(handler: (url: string, init: RequestInit) => { status: number
 describe("client-flip resolution", () => {
   test("no env -> local", () => {
     const r = resolveTransport(APP, {});
-    expect(r.transport).toBe("local");
+    expect(r.transport).toBe("sqlite");
   });
 
-  test("self_hosted + url + key -> cloud-http with /v1 base", () => {
+  test("client store http + url + key -> http with /v1 base", () => {
     const r = resolveTransport(APP, {
-      HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+      HASNA_RECORDINGS_CLIENT_STORE: "http",
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
-    expect(r.transport).toBe("cloud-http");
+    expect(r.transport).toBe("http");
     expect(r.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 
-  test("flip env (url + key, NO mode var) -> cloud-http", () => {
+  test("flip env (url + key, NO store var) -> http", () => {
     // Regression: @hasna/machines flip writes ONLY API_URL + API_KEY.
     const r = resolveTransport(APP, {
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
-    expect(r.transport).toBe("cloud-http");
+    expect(r.transport).toBe("http");
     expect(r.modeSource).toBe("auto:api-url+api-key");
     expect(r.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 
-  test("url + key but explicit mode=local forces local (override)", () => {
+  test("url + key but explicit store=sqlite forces sqlite (override)", () => {
     const r = resolveTransport(APP, {
-      HASNA_RECORDINGS_STORAGE_MODE: "local",
+      HASNA_RECORDINGS_CLIENT_STORE: "sqlite",
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
-    expect(r.transport).toBe("local");
+    expect(r.transport).toBe("sqlite");
   });
 
-  test("url only (no key) -> local, not cloud", () => {
+  test("url only (no key) -> sqlite, not http", () => {
     const r = resolveTransport(APP, {
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
     });
-    expect(r.transport).toBe("local");
+    expect(r.transport).toBe("sqlite");
   });
 
-  test("getStore picks cloud-http from flip env (url+key, no mode)", () => {
+  test("getStore picks http from flip env (url+key, no store var)", () => {
     const b = getStore({
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
-    expect(b.mode).toBe("cloud-http");
+    expect(b.mode).toBe("http");
     expect(b.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 
-  test("cloud requested but no key -> misconfigured (throws in resolveStorageClient)", () => {
+  test("http requested but no key -> misconfigured (throws in resolveStorageClient)", () => {
     expect(() =>
-      resolveStorageClient(APP, { HASNA_RECORDINGS_STORAGE_MODE: "self_hosted" }),
+      resolveStorageClient(APP, { HASNA_RECORDINGS_CLIENT_STORE: "http" }),
     ).toThrow();
   });
 
-  test("getStore picks local when env unset", () => {
+  test("getStore picks sqlite when env unset", () => {
     const b = getStore({});
-    expect(b.mode).toBe("local");
+    expect(b.mode).toBe("sqlite");
   });
 
-  test("getStore picks cloud-http when env set", () => {
+  test("getStore picks http when env set", () => {
     const b = getStore({
-      HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+      HASNA_RECORDINGS_CLIENT_STORE: "http",
       HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
       HASNA_RECORDINGS_API_KEY: "test-key",
     });
-    expect(b.mode).toBe("cloud-http");
+    expect(b.mode).toBe("http");
     expect(b.baseUrl).toBe("https://recordings.hasna.xyz/v1");
   });
 });
@@ -157,7 +157,7 @@ describe("cloud HTTP CRUD mapping + auth", () => {
 
     try {
       const store = getStore({
-        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_CLIENT_STORE: "http",
         HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
         HASNA_RECORDINGS_API_KEY: "test-key",
       });
@@ -185,7 +185,7 @@ describe("cloud HTTP CRUD mapping + auth", () => {
 
     try {
       const store = getStore({
-        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_CLIENT_STORE: "http",
         HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
         HASNA_RECORDINGS_API_KEY: "test-key",
       });
@@ -209,7 +209,7 @@ describe("cloud HTTP CRUD mapping + auth", () => {
 
     try {
       const store = getStore({
-        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_CLIENT_STORE: "http",
         HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
         HASNA_RECORDINGS_API_KEY: "test-key",
       });
@@ -235,7 +235,7 @@ describe("cloud HTTP CRUD mapping + auth", () => {
 
     try {
       const store = getStore({
-        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_CLIENT_STORE: "http",
         HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
         HASNA_RECORDINGS_API_KEY: "test-key",
       });
@@ -260,7 +260,7 @@ describe("cloud HTTP CRUD mapping + auth", () => {
 
     try {
       const store = getStore({
-        HASNA_RECORDINGS_STORAGE_MODE: "self_hosted",
+        HASNA_RECORDINGS_CLIENT_STORE: "http",
         HASNA_RECORDINGS_API_URL: "https://recordings.hasna.xyz",
         HASNA_RECORDINGS_API_KEY: "test-key",
       });

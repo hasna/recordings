@@ -31,7 +31,7 @@ export {
 } from "./http/client.js";
 export type {
   StorageClient,
-  StorageMode,
+  ClientStore,
   TransportResolution,
   HttpTransport,
 } from "./http/client.js";

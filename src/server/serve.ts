@@ -3,17 +3,19 @@
  *
  * Surfaces:
  *   GET /health   → { status, version, mode }        (unauthenticated liveness)
- *   GET /ready    → { status, version, mode }         (checks cloud Postgres reachability)
+ *   GET /ready    → { status, version, mode }         (checks PostgreSQL reachability)
  *   GET /version  → { status, version, mode, name }
  *   GET /openapi.json (and /v1/openapi.json)          (SDK source of truth)
- *   ANY /v1/*     → versioned cloud API (A1 pure-remote, API-key auth)
+ *   ANY /v1/*     → versioned API (API-key auth)
  *   ANY /mcp      → MCP Streamable HTTP (same API-key auth as /v1)
  *
- * Per Amendment A1 the `/v1` handlers read/write the shared cloud Postgres directly with
- * @hasna/contracts API-key auth. No local sync/cache lives in the service.
+ * `mode` on the probe endpoints reports the server's DATA BACKEND — `sqlite` or
+ * `postgresql`. It is not a deployment mode; those are removed. When the backend
+ * is `postgresql` the `/v1` handlers read/write that database directly with
+ * @hasna/contracts API-key auth, and no on-box sync/cache lives in the service.
  */
 import { VERSION } from "../version.js";
-import { isCloudModeEnabled } from "./cloud-config.js";
+import { resolveDataBackend } from "./cloud-config.js";
 import { handleV1Request } from "./v1.js";
 import { buildV1OpenApiDocument } from "./openapi.js";
 
@@ -111,7 +113,7 @@ export function buildFetch(options: BuildFetchOptions = {}) {
       });
     }
 
-    const mode = isCloudModeEnabled() ? "remote" : "local";
+    const mode = resolveDataBackend();
 
     // ── Service surface probes (unauthenticated): /health /ready /version ──
     if ((path === "/health" || path === "/ready" || path === "/version") && method === "GET") {
@@ -119,7 +121,7 @@ export function buildFetch(options: BuildFetchOptions = {}) {
         return jsonResponse({ status: "ok", version: VERSION, mode, name: "recordings" });
       }
       if (path === "/ready") {
-        if (mode === "remote") {
+        if (mode === "postgresql") {
           try {
             await checkCloudAuth();
             await checkCloud();
@@ -191,7 +193,7 @@ export async function startServer(port: number, options?: StartServerOptions): P
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  const mode = isCloudModeEnabled() ? "remote (A1 pure-remote)" : "local";
+  const mode = resolveDataBackend();
   console.log(`recordings-serve listening on http://${hostname}:${port} (mode: ${mode})`);
   return server;
 }

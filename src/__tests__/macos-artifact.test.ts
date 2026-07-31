@@ -18,6 +18,7 @@ import {
   assertExpectedCodeLayout,
   assertVersionTransition,
   designatedRequirementForPolicy,
+  localOnlySigningMode,
   parseDesignatedRequirement,
   verifyArchiveManifest,
   compareVersions,
@@ -180,6 +181,40 @@ function localFixture(
   return result;
 }
 
+const developerIdAuthority = "Developer ID Application: Example Corp (EXAMPLE123)";
+
+/**
+ * A local-station artifact that is Developer ID signed rather than ad-hoc. This is the shape
+ * that lets a macOS TCC Accessibility grant survive a rebuild, which is what the hold-to-talk
+ * Fn CGEventTap depends on; an ad-hoc CDHash changes every build and orphans the grant.
+ */
+function developerIdLocalFixture(approvedTarget = "station03") {
+  const result = localFixture(approvedTarget, "tailscale_node_id_sha256");
+  const { manifest } = result;
+  manifest.team_id = "EXAMPLE123";
+  manifest.signing = {
+    ...manifest.signing,
+    mode: "developer_id",
+    authority: developerIdAuthority,
+    team_id: "EXAMPLE123",
+    trusted_timestamp: "none",
+    helper_authority: developerIdAuthority,
+    helper_team_id: "EXAMPLE123",
+    helper_trusted_timestamp: "none",
+  };
+  manifest.nested_code_policy.items = manifest.nested_code_policy.items.map((item) => ({
+    ...item,
+    team_id: "EXAMPLE123",
+  }));
+  manifest.nested_code_policy.allowlist_sha256 = Bun.CryptoHasher.hash(
+    "sha256",
+    JSON.stringify(manifest.nested_code_policy.items),
+    "hex",
+  );
+  writeFileSync(result.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return result;
+}
+
 function requirementDigestFixture() {
   const root = mkdtempSync(join(tmpdir(), "recordings-requirement-digest-"));
   temporaryDirectories.push(root);
@@ -217,6 +252,7 @@ fi
 function runRequirementDigest(
   policy: "release" | "local_only",
   environment: Record<string, string> = {},
+  extraArguments: string[] = [],
 ) {
   const { app, bin } = requirementDigestFixture();
   return Bun.spawnSync(
@@ -228,6 +264,7 @@ function runRequirementDigest(
       app,
       "--artifact-policy",
       policy,
+      ...extraArguments,
     ],
     {
       env: {
@@ -287,8 +324,10 @@ describe("macOS artifact manifest", () => {
     expect(() => designatedRequirementForPolicy(missing, "release")).toThrow(
       "missing a designated requirement",
     );
+    // Unverified in EITHER local signing mode still fails closed; the wording covers both
+    // since local-station artifacts may now be ad-hoc or Developer ID signed.
     expect(() => designatedRequirementForPolicy(missing, "local_only")).toThrow(
-      "requires verified ad-hoc signing",
+      "requires verified signing",
     );
     const missingLocalRequirement = designatedRequirementForPolicy(missing, "local_only", true);
     expect(missingLocalRequirement).toBe("none-ad-hoc");
@@ -323,6 +362,46 @@ describe("macOS artifact manifest", () => {
     ["wrong entitlements", { ENTITLEMENTS_JSON: JSON.stringify({ "com.apple.security.app-sandbox": true }) }],
   ])("real local requirement-digest rejects %s", (_label, environment) => {
     const result = runRequirementDigest("local_only", environment);
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test("real local requirement-digest accepts a Developer ID bundle under its pinned team", () => {
+    // P0 regression: requirement-digest hard-coded the "ADHOC" sentinel for local_only, so a
+    // correctly Developer-ID-signed local-station bundle was rejected as "not consistently
+    // ad-hoc signed". install_macos_app.sh calls requirement-digest unconditionally for every
+    // local install under `set -euo pipefail`, so that abort made a properly signed build
+    // UNINSTALLABLE — closing one half of the bug while opening the other.
+    const result = runRequirementDigest(
+      "local_only",
+      {
+        SIGNING_DETAILS: [
+          "Executable=/tmp/Recordings.app/Contents/MacOS/Recordings",
+          "Identifier=com.hasna.recordings",
+          "CodeDirectory v=20400 size=123 flags=0x10000(runtime)",
+          "Authority=Developer ID Application: Example Corp (EXAMPLE123)",
+          "TeamIdentifier=EXAMPLE123",
+        ].join("\n"),
+        DESIGNATED_REQUIREMENT: 'identifier "com.hasna.recordings" and anchor apple generic',
+      },
+      ["--expected-team-id", "EXAMPLE123"],
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    // The real designated requirement is hashed, NOT the ad-hoc sentinel — that requirement is
+    // the stable identity a TCC Accessibility grant attaches to.
+    expect(result.stdout.toString().trim()).toBe(
+      Bun.CryptoHasher.hash(
+        "sha256",
+        'identifier "com.hasna.recordings" and anchor apple generic',
+        "hex",
+      ),
+    );
+    expect(result.stdout.toString().trim()).not.toBe(
+      Bun.CryptoHasher.hash("sha256", "none-ad-hoc", "hex"),
+    );
+  });
+
+  test("real local requirement-digest still rejects an ad-hoc bundle when a team is pinned", () => {
+    const result = runRequirementDigest("local_only", {}, ["--expected-team-id", "EXAMPLE123"]);
     expect(result.exitCode).not.toBe(0);
   });
 
@@ -526,6 +605,94 @@ describe("macOS artifact manifest", () => {
         "tailscale_node_id_sha256",
       ).approved_target_identity_kind,
     ).toBe("tailscale_node_id_sha256");
+  });
+
+  test("accepts a Developer ID signed local-station manifest under its pinned team", () => {
+    // Regression (station03): local-station artifacts were required to be ad-hoc, which is
+    // precisely why the Fn/Globe hotkey stopped working — TCC keys Accessibility to the
+    // signing identity, and ad-hoc supplies none that survives a rebuild.
+    const { archivePath, manifestPath } = developerIdLocalFixture();
+    const manifest = verifyArchiveManifest(
+      archivePath,
+      manifestPath,
+      "EXAMPLE123",
+      fileDigest(manifestPath),
+      "a".repeat(40),
+      "0.2.12",
+      "local_only",
+      "station03",
+      targetIdentitySha256,
+      "tailscale_node_id_sha256",
+    );
+    expect(manifest.team_id).toBe("EXAMPLE123");
+    expect(manifest.signing.mode).toBe("developer_id");
+    expect(manifest.signing.helper_team_id).toBe("EXAMPLE123");
+    // Signed but still never notarized, and still bound to exactly one Mac.
+    expect(manifest.non_notarized).toBe(true);
+    expect(manifest.notarization.status).toBe("Not Submitted");
+    expect(manifest.approved_target).toBe("station03");
+  });
+
+  test("rejects a local-station manifest that mixes Developer ID and ad-hoc signing", () => {
+    // A Developer ID app with an ad-hoc helper has no single stable identity for TCC to key
+    // on, so it would reintroduce the same lost-grant failure it is meant to fix.
+    const { archivePath, manifestPath, manifest } = developerIdLocalFixture();
+    manifest.signing.helper_authority = "adhoc";
+    manifest.signing.helper_team_id = "ADHOC";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "EXAMPLE123",
+        fileDigest(manifestPath),
+        "a".repeat(40),
+        "0.2.12",
+        "local_only",
+        "station03",
+        targetIdentitySha256,
+        "tailscale_node_id_sha256",
+      ),
+    ).toThrow("consistent Developer ID signing evidence");
+  });
+
+  test("rejects a local-station manifest whose team is neither ADHOC nor a real Apple team", () => {
+    const { archivePath, manifestPath, manifest } = developerIdLocalFixture();
+    manifest.team_id = "not-a-team";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    expect(() =>
+      verifyArchiveManifest(
+        archivePath,
+        manifestPath,
+        "not-a-team",
+        fileDigest(manifestPath),
+        "a".repeat(40),
+        "0.2.12",
+        "local_only",
+        "station03",
+        targetIdentitySha256,
+        "tailscale_node_id_sha256",
+      ),
+    ).toThrow();
+  });
+
+  test("classifies local-station signing teams and rejects malformed ones", () => {
+    expect(localOnlySigningMode("ADHOC")).toBe("ad_hoc");
+    expect(localOnlySigningMode("HKZ326A8Y3")).toBe("developer_id");
+    expect(() => localOnlySigningMode("hkz326a8y3")).toThrow("10-character Apple team identifier");
+    expect(() => localOnlySigningMode("")).toThrow("10-character Apple team identifier");
+    expect(() => localOnlySigningMode("TOOLONGTEAMID")).toThrow("10-character Apple team identifier");
+  });
+
+  test("keeps the real designated requirement for a Developer ID local-station artifact", () => {
+    // The designated requirement IS the durable identity a TCC grant attaches to, so it must
+    // never degrade to the ad-hoc sentinel once the bundle is properly signed.
+    const requirement = 'designated => identifier "com.hasna.recordings" and anchor apple generic';
+    expect(designatedRequirementForPolicy(requirement, "local_only", false, true)).toContain(
+      "com.hasna.recordings",
+    );
+    expect(() => designatedRequirementForPolicy("", "local_only", false, true)).toThrow();
+    expect(designatedRequirementForPolicy("", "local_only", true, false)).toBe("none-ad-hoc");
   });
 
   test("rejects explicit hardware identity kinds on newly written schema-v3 manifests", () => {

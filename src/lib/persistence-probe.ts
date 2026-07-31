@@ -11,17 +11,17 @@ import type { RecordingsConfig } from "../types/index.js";
  *
  * A transcript is only "recorded" once it is durably stored, and this package
  * has TWO stores behind one interface (src/store.ts): on-box SQLite and the
- * self-hosted `/v1` HTTP API. Which one is active is decided entirely by the
+ * server's `/v1` HTTP API. Which one is active is decided entirely by the
  * environment — the presence of HASNA_RECORDINGS_API_URL +
- * HASNA_RECORDINGS_API_KEY is itself the self-hosted signal, with no mode
- * variable to make it visible.
+ * HASNA_RECORDINGS_API_KEY is itself the signal to use the API, with no
+ * variable set explicitly to make it visible.
  *
  * `check` never reported which store it had resolved. That blind spot is not
  * theoretical: on an affected fleet Mac those two variables are set in the
  * LAUNCHD USER SESSION, so every process in the session inherits them — the GUI
  * app, its CLI helper, and any ssh shell alike. Writes go to the API while
  * ~/.hasna/recordings/recordings.db sits frozen at the row count it held when the
- * machine last ran in local mode, and the live store has since grown well past
+ * machine last read from that file, and the live store has since grown well past
  * it. Two separate audits read the stale SQLite file and concluded that recording
  * had stopped persisting. It had not; they were looking at the wrong store.
  *
@@ -64,7 +64,7 @@ export function safeBaseUrl(baseUrl: string | null): string | null {
 }
 
 export interface ActiveStoreDescription {
-  transport: "local" | "cloud-http";
+  transport: "sqlite" | "http";
   /**
    * What decided the transport: an env var NAME, `auto:api-url+api-key`, or
    * `default`. Never a value — these variables hold credentials.
@@ -155,14 +155,14 @@ export function describeActiveStore(
     resolution = resolveTransport(APP, env);
   } catch (error) {
     return {
-      transport: "local",
+      transport: "sqlite",
       mode_source: "unresolved",
       base_url: null,
       local_db_path: localDbPath,
       local_db_present: localDbPresent,
       local_db_recordings: localDbRecordings,
       divergent: false,
-      // The thrown message echoes the raw env value ("Unknown storage mode: <value>"),
+      // The thrown message echoes the raw env value ("Unknown client store: <value>"),
       // which is operator-supplied and may hold anything.
       warning: redactKeyMaterial(
         `could not resolve the active store: ${(error as Error).message}`
@@ -171,7 +171,7 @@ export function describeActiveStore(
   }
 
   const divergent =
-    resolution.transport === "cloud-http" && (localDbRecordings ?? 0) > 0;
+    resolution.transport === "http" && (localDbRecordings ?? 0) > 0;
 
   const warnings: string[] = [];
   if (resolution.warning) warnings.push(resolution.warning);
@@ -179,7 +179,7 @@ export function describeActiveStore(
   // open fails on, among other things, a WAL database whose -shm cannot be
   // created, and silently reporting 0 there would hide the divergence.
   if (
-    resolution.transport === "cloud-http" &&
+    resolution.transport === "http" &&
     localDbPresent &&
     localDbRecordings === null
   ) {
@@ -191,14 +191,14 @@ export function describeActiveStore(
   if (divergent) {
     warnings.push(
       `writes go to ${safeBaseUrl(resolution.baseUrl)}, but ${localDbPath} still holds ` +
-        `${localDbRecordings} recordings from an earlier local-mode period. ` +
+        `${localDbRecordings} recordings from an earlier on-box-only period. ` +
         "That file is NOT the live store — auditing it undercounts and looks like data loss."
     );
   }
-  if (resolution.transport === "cloud-http" && resolution.modeSource === AUTO_FLIP_MODE_SOURCE) {
+  if (resolution.transport === "http" && resolution.modeSource === AUTO_FLIP_MODE_SOURCE) {
     warnings.push(
       "the API transport was selected by the mere PRESENCE of " +
-        "HASNA_RECORDINGS_API_URL + HASNA_RECORDINGS_API_KEY, with no mode variable. " +
+        "HASNA_RECORDINGS_API_URL + HASNA_RECORDINGS_API_KEY, with no store variable set. " +
         "Check `launchctl getenv HASNA_RECORDINGS_API_URL` too: a launchd session variable " +
         "is inherited by the GUI app as well as by shells, and is invisible in a login profile."
     );
@@ -249,7 +249,7 @@ export interface PersistenceProbeResult {
    * reachability plus credential acceptance without adding a row to production.
    */
   reachable: boolean | null;
-  transport: "local" | "cloud-http";
+  transport: "sqlite" | "http";
   base_url: string | null;
   /** Id of the marker recording, kept for cleanup follow-up when needed. */
   recording_id: string | null;
@@ -350,7 +350,7 @@ export const PERSISTENCE_PROBE_MARKER_PREFIX =
  * keeps a row per create with `ON DELETE SET NULL`, so each run leaves a
  * permanent orphan that deleting the recording does not remove. A diagnostic may
  * not do that to production unless the operator asks for it explicitly, so
- * `allowRemoteWrite` must be set for a cloud-http transport.
+ * `allowRemoteWrite` must be set for the `http` transport.
  */
 export async function probeRecordingPersistence(
   options: {
@@ -374,7 +374,7 @@ export async function probeRecordingPersistence(
   const store = options.store ?? getStore();
   const stamp = (options.now?.() ?? new Date()).toISOString();
   const marker = `${PERSISTENCE_PROBE_MARKER_PREFIX} ${stamp}`;
-  const transport = store.mode === "cloud-http" ? "cloud-http" : "local";
+  const transport = store.mode === "http" ? "http" : "sqlite";
   const base: Omit<PersistenceProbeResult, "ok" | "message" | "outcome"> = {
     attempted: false,
     transport,
@@ -390,13 +390,13 @@ export async function probeRecordingPersistence(
   // read-write at all: the probe may not migrate a legacy file behind the
   // operator's back just because the write happens to be its own.
   if (
-    transport === "local" &&
+    transport === "sqlite" &&
     options.localStoreIsLegacy === true &&
     !options.allowLocalMigration
   ) {
     return {
       ...base,
-      // NOT `ok: true`. This is the same defect F1 named on the cloud-http skip: declining to
+      // NOT `ok: true`. This is the same defect F1 named on the `http` skip: declining to
       // measure is not a proof, and rendering it as a green check is the lie. Reported as
       // `skipped` so the renderer prints "NOT MEASURED" and the exit code keys off `failed` only.
       ok: false,
@@ -409,7 +409,7 @@ export async function probeRecordingPersistence(
     };
   }
 
-  if (transport === "cloud-http" && !options.allowRemoteWrite) {
+  if (transport === "http" && !options.allowRemoteWrite) {
     // Prove what CAN be proved without writing to production. A read-only stats call establishes
     // that the resolved base URL is reachable and that the credential is accepted — the skip used
     // to make no network contact at all, so it did not even show the store existed.
@@ -528,7 +528,7 @@ export async function probeRecordingPersistence(
   }
 
   const createdLocalStore =
-    transport === "local" && options.localStoreExistedBefore === false;
+    transport === "sqlite" && options.localStoreExistedBefore === false;
   const where = store.baseUrl
     ? `the API store at ${safeBaseUrl(store.baseUrl)}`
     : "the local SQLite store";

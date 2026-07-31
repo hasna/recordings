@@ -280,7 +280,10 @@ export function parseShortcutChord(input: string): Shortcut {
     );
   }
 
-  const keyToken = keyTokens[0]!;
+  const [keyToken] = keyTokens;
+  if (keyToken === undefined) {
+    throw new ShortcutParseError(`Could not parse shortcut "${input}"`);
+  }
   const nonChordReason = NON_CHORD_KEYS[keyToken];
   if (nonChordReason) throw new ShortcutParseError(nonChordReason);
 
