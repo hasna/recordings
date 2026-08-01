@@ -428,6 +428,21 @@ struct RealtimeTranscriptionTests {
         ) == "final words")
     }
 
+    @Test("A settled transcript survives an unrelated server error")
+    func settledTranscriptSurvivesIncidentalServerError() {
+        let finishResult = RealtimeFinishResult(
+            text: "complete settled transcript",
+            settled: true,
+            error: "server_error: unrelated event"
+        )
+
+        #expect(RecordingEngine.settledRealtimeFallbackTranscript(
+            finishResult: finishResult,
+            pcmByteCount: 96_000,
+            language: "en"
+        ) == "complete settled transcript")
+    }
+
     @Test("Settlement deadline arithmetic saturates at UInt64 bounds")
     @MainActor
     func settlementDeadlineDoesNotOverflow() async {
