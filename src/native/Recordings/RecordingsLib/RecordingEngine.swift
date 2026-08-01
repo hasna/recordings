@@ -2516,7 +2516,8 @@ public final class RecordingEngine: ObservableObject {
         pcmByteCount: Int,
         language: String
     ) -> String? {
-        guard finishResult.settled, finishResult.error == nil else { return nil }
+        // Transport failures cannot settle, so a settled transcript outranks incidental server errors.
+        guard finishResult.settled else { return nil }
         guard let text = safeRealtimeFallbackTranscript(
             realtimeText: finishResult.text,
             language: language
