@@ -390,15 +390,18 @@ function loadSecretKey(keyName: string): string {
       const match = content.match(
         new RegExp(`export\\s+${keyName}\\s*=\\s*"([^"]+)"`)
       );
-      if (match) return match[1]!;
+      const doubleQuotedValue = match?.[1];
+      if (doubleQuotedValue !== undefined) return doubleQuotedValue;
 
       const match2 = content.match(
         new RegExp(`export\\s+${keyName}\\s*=\\s*'([^']+)'`)
       );
-      if (match2) return match2[1]!;
+      const singleQuotedValue = match2?.[1];
+      if (singleQuotedValue !== undefined) return singleQuotedValue;
 
       const match3 = content.match(new RegExp(`${keyName}\\s*=\\s*(.+)`));
-      if (match3) return match3[1]!.trim().replace(/^["']|["']$/g, "");
+      const unquotedValue = match3?.[1];
+      if (unquotedValue !== undefined) return unquotedValue.trim().replace(/^["']|["']$/g, "");
     } catch {
       // Ignore unreadable secret files
     }

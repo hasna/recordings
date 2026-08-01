@@ -418,8 +418,13 @@ if [ "$ARTIFACT_POLICY" = "release" ]; then
     exit 2
   fi
 else
-  if [ -n "$EXPECTED_TEAM_ID" ]; then
-    echo "Local-only artifacts do not accept --expected-team-id or a release TeamIdentifier environment value." >&2
+  # A local-station artifact may be Developer ID signed under a pinned team, because ad-hoc
+  # signing cannot hold a macOS TCC grant: TCC keys Accessibility to bundle id plus signing
+  # identity, and an ad-hoc CDHash changes on every rebuild, which is what silently killed the
+  # Fn/Globe hold-to-talk CGEventTap. A supplied team must therefore be a real Apple team, and
+  # it is matched against the manifest below exactly as a release team is.
+  if [ -n "$EXPECTED_TEAM_ID" ] && ! [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+    echo "Local-only --expected-team-id must be a 10-character Developer ID team identifier." >&2
     exit 2
   fi
   # The approved local-only targets are policy data shared with the artifact tool
@@ -489,9 +494,13 @@ else
     echo "Release identity-migration flags are not valid for local-only artifacts; an ad-hoc replacement is approved with --allow-adhoc-identity-migration." >&2
     exit 2
   fi
-  EXPECTED_TEAM_ID="ADHOC"
+  if [ -z "$EXPECTED_TEAM_ID" ]; then
+    EXPECTED_TEAM_ID="ADHOC"
+  fi
   echo "WARNING: installing a non-notarized local-only artifact approved only for ${APPROVED_TARGET}." >&2
-  echo "WARNING: code identity can change; Microphone or Accessibility may require manual reauthorization." >&2
+  if [ "$EXPECTED_TEAM_ID" = "ADHOC" ]; then
+    echo "WARNING: code identity can change; Microphone or Accessibility may require manual reauthorization." >&2
+  fi
 fi
 if [ "$ARTIFACT_POLICY" = "release" ] && [ "$ALLOW_IDENTITY_MIGRATION" -eq 1 ] && \
    { [ -z "$EXPECTED_OLD_IDENTITY_SHA256" ] || [ -z "$EXPECTED_NEW_IDENTITY_SHA256" ]; }; then
@@ -1721,7 +1730,10 @@ if [ "$ARTIFACT_POLICY" = "release" ] && [ -z "$candidate_requirement" ]; then
   exit 1
 fi
 identity_migration=0
-candidate_identity_sha256="$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" requirement-digest --app "$CANDIDATE_APP" --artifact-policy "$ARTIFACT_POLICY")"
+# Pass the SAME pinned team already given to verify-archive and verify-app. Without it the
+# digest verifies the candidate against the ad-hoc shape, which rejects a correctly
+# Developer-ID-signed local-station bundle and, under `set -euo pipefail`, aborts the install.
+candidate_identity_sha256="$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" requirement-digest --app "$CANDIDATE_APP" --artifact-policy "$ARTIFACT_POLICY" --expected-team-id "$EXPECTED_TEAM_ID")"
 candidate_tree_sha256="$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" tree-digest --path "$CANDIDATE_APP")"
 [ "$candidate_identity_sha256" = "$("$BUN_EXECUTABLE" "$ARTIFACT_TOOL" manifest-get \
   --manifest "$MANIFEST_SNAPSHOT" \

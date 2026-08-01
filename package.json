@@ -28,6 +28,9 @@
       "types": "./dist/sdk/index.d.ts"
     }
   },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "scripts": {
     "clean": "rm -rf dist",
     "build": "bun run clean && bun run build:cli && bun run build:mcp && bun run build:serve && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
@@ -52,6 +55,7 @@
     "test:vacuity-battery:reorder": "bun scripts/vacuity-mutation-battery.ts scripts/vacuity-manifests/reorder.tsv",
     "test:coverage": "bun test --coverage",
     "dev:cli": "bun run src/cli/index.ts",
+    "desktop:snapshot": "bun run src/cli/index.ts app snapshot",
     "dev:mcp": "bun run src/mcp/index.ts",
     "verify:release": "bun run scripts/release-guard.ts",
     "scan:artifact": "bun run scripts/scan-artifact.ts",
