@@ -58,9 +58,10 @@
     "desktop:snapshot": "bun run src/cli/index.ts app snapshot",
     "dev:mcp": "bun run src/mcp/index.ts",
     "verify:release": "bun run scripts/release-guard.ts",
+    "scan:artifact": "bun run scripts/scan-artifact.ts",
     "version:set": "bun run scripts/set-version.ts",
     "version:check": "bun run scripts/set-version.ts --check",
-    "prepack": "bun run build:native-fs-guard && bun run version:check && bun run build && bun run verify:release",
+    "prepack": "bun run build:native-fs-guard && bun run version:check && bun run build && bun run verify:release && bun run scan:artifact",
     "prepublishOnly": "bun run typecheck && bun run test",
     "typecheck:shortcut-contract": "tsc --noEmit -p tsconfig.test.json"
   },
@@ -81,7 +82,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@hasna/contracts": "^0.4.2",
+    "@hasna/contracts": "^0.8.4",
     "@hasna/events": "^0.1.11",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",

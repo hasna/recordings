@@ -20,7 +20,7 @@ const { code, operations, warnings } = generateSdkFromOpenApi(spec as never, {
   apiKeyHeader: "x-api-key",
 });
 
-// @hasna/contracts 0.4.2 stringifies query arrays. Preserve OpenAPI's
+// @hasna/contracts 0.8.4 stringifies query arrays. Preserve OpenAPI's
 // form+explode semantics until the package generator ships array support.
 const scalarQuerySerialization =
   "        if (value !== undefined && value !== null) url.searchParams.set(key, String(value));";

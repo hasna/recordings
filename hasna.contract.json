@@ -3,17 +3,84 @@
   "name": "recordings",
   "class": "service",
   "contractVersion": "v1",
-  "kitVersion": "0.4.2",
+  "kitVersion": "0.8.4",
   "description": "Speech-to-text recording store for AI coding agents. CLI + MCP + HTTP API (recordings-serve) + generated SDK. The server's data backend is a two-value switch, HASNA_RECORDINGS_STORAGE_MODE=sqlite|postgresql (a HASNA_RECORDINGS_DATABASE_URL implies postgresql); on postgresql the serve process reads/writes that database directly with API-key auth via @hasna/contracts. The client is a separate two-value switch, HASNA_RECORDINGS_CLIENT_STORE=sqlite|http, and never opens Postgres.",
-  "bins": ["recordings", "recordings-mcp", "recordings-serve"],
+  "bins": [
+    "recordings",
+    "recordings-mcp",
+    "recordings-serve"
+  ],
+  "hosting": [
+    "user-hosted"
+  ],
+  "serviceSurfaces": [
+    {
+      "name": "http-api",
+      "kind": "api",
+      "status": "supported",
+      "bin": "recordings-serve",
+      "authMode": "api-key",
+      "health": {
+        "method": "GET",
+        "path": "/health",
+        "public": true
+      },
+      "readiness": {
+        "method": "GET",
+        "path": "/ready",
+        "public": true
+      },
+      "version": {
+        "method": "GET",
+        "path": "/version",
+        "public": true
+      },
+      "apiBasePath": "/v1",
+      "openApiPath": "/openapi.json"
+    },
+    {
+      "name": "typescript-sdk",
+      "kind": "sdk",
+      "status": "supported",
+      "authMode": "api-key",
+      "exportSubpath": "./sdk",
+      "generatedFrom": "/openapi.json"
+    },
+    {
+      "name": "mcp",
+      "kind": "mcp",
+      "status": "supported",
+      "mcpBin": "recordings-mcp",
+      "authMode": "local-only"
+    },
+    {
+      "name": "cli",
+      "kind": "cli",
+      "status": "supported",
+      "bin": "recordings",
+      "authMode": "local-only"
+    }
+  ],
   "storage": {
-    "mode": "local",
+    "mode": "sqlite",
+    "engines": [
+      "sqlite",
+      "postgres"
+    ],
     "envPrefix": "HASNA_RECORDINGS_",
     "aliasEnvPrefix": "RECORDINGS_",
-    "databaseUrlSecretRef": "hasna/oss/recordings/database-url",
-    "sqlitePath": "~/.hasna/recordings/recordings.db"
+    "sqlitePath": "~/.hasna/recordings/recordings.db",
+    "pgTestGate": {
+      "envVar": "RECORDINGS_TEST_DATABASE_URL",
+      "command": "bun test"
+    }
   },
   "metadata": {
+    "release": {
+      "artifactScan": {
+        "script": "scan:artifact"
+      }
+    },
     "service": {
       "port": 8874,
       "healthPath": "/health",
@@ -21,8 +88,7 @@
       "versionPath": "/version",
       "openapiPath": "/openapi.json",
       "apiVersion": "v1",
-      "auth": "api-key",
-      "signingSecretSecretRef": "hasna/oss/recordings/api-key-signing-secret"
+      "auth": "api-key"
     },
     "client": {
       "apiUrlEnv": "RECORDINGS_API_URL",
