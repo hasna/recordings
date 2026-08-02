@@ -59,8 +59,29 @@ The client still keeps exactly two stores and still never opens Postgres: there
 is no client-side `PostgresStore` and none is added. The shared Postgres dataset
 is reachable only through the server's `/v1` API.
 
-`hasna.contract.json` `storage.mode` is deliberately unchanged — that enum
-belongs to `hasna/contracts`. `@hasna/contracts` is not bumped.
+`hasna.contract.json` `storage.mode` was deliberately unchanged **by `8ef9ed8`
+itself** — that enum belongs to `hasna/contracts`, which was mid-change — and
+that commit bumped no dependency, touching only the manifest's free-text
+`description`. Both statements are true of `8ef9ed8` and **neither is true of
+this release as a whole**: a later commit, `ed94357`, changed both. See the
+next section.
+
+### Dependency — `@hasna/contracts` `^0.4.2` → `^0.8.4` (`ed94357`)
+
+`@hasna/contracts` is a runtime `dependencies` entry, so **this bump reaches
+every consumer tree**. Installing `@hasna/recordings` `0.3.0` resolves
+`@hasna/contracts` at `^0.8.4`, where `0.2.14` resolved it at `^0.4.2`. A
+consumer that pins, dedupes, or shares a single `@hasna/contracts` instance
+across packages should expect that resolution to move, and should check it
+against the other packages in its tree before upgrading.
+
+The same commit migrated `hasna.contract.json` to the matching manifest schema:
+`kitVersion` `0.4.2` → `0.8.4`, `storage.mode` `local` → `sqlite`, an explicit
+`storage.engines: ["sqlite", "postgres"]` and `storage.pgTestGate`, the removal
+of `storage.databaseUrlSecretRef`, and new `hosting` and `serviceSurfaces`
+blocks. `hasna.contract.json` is **not** listed in `package.json` `files`, so
+none of those manifest changes ship to npm consumers — the dependency range
+above is the part of `ed94357` that does.
 
 ### Also in this release
 
