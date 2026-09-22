@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an improvement to Recordings.
+title: ""
+body:
+  - type: markdown
+    attributes:
+      value: "Please search existing requests first. This request is public; leave out private information."
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+      description: Describe the problem or workflow you want to improve.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Your suggestion
+      description: Tell us how you would like Recordings to help.
+    validations:
+      required: true

@@ -1,0 +1,38 @@
+name: Bug report
+description: Tell us what is not working in Recordings.
+title: ""
+body:
+  - type: markdown
+    attributes:
+      value: "Please search existing issues first. This report is public; do not include private recordings, transcripts, account details, or credentials."
+  - type: input
+    id: app-version
+    attributes:
+      label: Recordings version
+      placeholder: "Version and build from About Recordings"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: transcription-mode
+    attributes:
+      label: Transcription mode
+      options:
+        - Local
+        - Cloud
+        - Both
+        - Not related to transcription
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: What happened?
+      description: Include the steps to reproduce the issue and what you expected.
+    validations:
+      required: true
